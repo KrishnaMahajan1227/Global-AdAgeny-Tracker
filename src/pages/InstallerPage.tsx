@@ -795,9 +795,9 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
 
             <button
               onClick={() => navigateToShop(shop)}
-              className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white font-bold py-4 rounded-xl text-lg"
+              className="w-full flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-lg text-sm transition"
             >
-              <Navigation className="w-5 h-5" /> Navigate to Shop
+              <Navigation className="w-4 h-4" /> Navigate to Shop
             </button>
 
             <button onClick={() => setStep(2)} className="w-full bg-slate-900 text-white font-medium py-3 rounded-lg">Continue</button>

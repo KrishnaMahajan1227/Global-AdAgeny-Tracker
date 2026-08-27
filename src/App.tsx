@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { Role } from '@/lib/types';
+import LandingPage from '@/pages/LandingPage';
 import LoginPage from '@/pages/LoginPage';
 import AdminLayout from '@/components/AdminLayout';
 import DashboardPage from '@/pages/DashboardPage';
@@ -75,7 +76,7 @@ function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode;
 function homeRouteForRole(role: Role) {
   if (FIELD_ROLES.includes(role)) return '/mobile';
   if (CLIENT_ORG_ROLES.includes(role)) return '/client';
-  return '/';
+  return '/dashboard';
 }
 
 function RoleRedirect() {
@@ -97,6 +98,12 @@ function AppRoutes() {
 
   return (
     <Routes>
+      {/* Public marketing landing page. A signed-in visitor never sees
+          this — they're sent straight to their own home route — but
+          anyone else (a fresh URL, a bookmark, a shared link) lands here
+          first instead of being bounced to /login. */}
+      <Route path="/" element={session && profile ? <Navigate to={homeRouteForRole(profile.role)} replace /> : <LandingPage />} />
+
       <Route path="/login" element={session ? <RoleRedirect /> : <LoginPage />} />
 
       {/* Mobile routes for field roles */}
@@ -132,7 +139,7 @@ function AppRoutes() {
           <AdminLayout />
         </ProtectedRoute>
       }>
-        <Route path="/" element={<DashboardPage />} />
+        <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/clients" element={<ClientsPage />} />
         <Route path="/campaigns" element={<CampaignsPage />} />
         <Route path="/projects" element={<Navigate to="/campaigns" replace />} />

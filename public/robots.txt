@@ -1,0 +1,25 @@
+# Darshan Ops — public marketing site is crawlable; the authenticated
+# app (everything past /login) is not useful to index and is blocked.
+User-agent: *
+Allow: /$
+Allow: /login$
+Disallow: /dashboard
+Disallow: /client
+Disallow: /mobile
+Disallow: /owner
+Disallow: /clients
+Disallow: /campaigns
+Disallow: /purchase-orders
+Disallow: /supply-orders
+Disallow: /shops
+Disallow: /survey-review
+Disallow: /design
+Disallow: /production
+Disallow: /installation-review
+Disallow: /field-map
+Disallow: /route-planning
+Disallow: /reports
+Disallow: /billing
+
+# TODO: update to your real production domain once deployed.
+Sitemap: https://ops.darshanadagency.com/sitemap.xml

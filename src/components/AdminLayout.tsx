@@ -77,7 +77,7 @@ export default function AdminLayout() {
   );
 
   const navItems = [
-    { to: '/', label: 'Dashboard', icon: LayoutDashboard, show: isAdmin || isAccounts },
+    { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, show: isAdmin || isAccounts },
     { to: '/clients', label: 'Clients', icon: Building2, show: isAdmin },
     { to: '/campaigns', label: 'Campaigns', icon: ShoppingCart, show: isAdmin },
     { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts, badge: pendingCounts?.clientRequests },
@@ -120,7 +120,7 @@ export default function AdminLayout() {
               <NavLink
                 key={item.to}
                 to={item.to}
-                end={item.to === '/'}
+                end={item.to === '/dashboard'}
                 onClick={() => setSidebarOpen(false)}
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition ${

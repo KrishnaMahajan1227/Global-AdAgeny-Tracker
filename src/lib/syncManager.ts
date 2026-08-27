@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import { logAudit, createNotification } from './helpers';
 import { offlineDb, type SurveyDraft, listDraftsForSurveyor } from './offlineDb';
+import { toFeet } from './units';
 
 // Converts a base64 data URL (captured offline) back into a File so it can
 // be uploaded to Supabase Storage exactly like an online-captured photo.
@@ -85,9 +86,17 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
     // board_markings row (points as % of the image, linked to the exact
     // survey_photo it was drawn on).
     for (const item of draft.workItems) {
-      const w = parseFloat(item.width) || 0;
-      const h = parseFloat(item.height) || 0;
+      const wRaw = parseFloat(item.width) || 0;
+      const hRaw = parseFloat(item.height) || 0;
       const qty = parseInt(item.quantity) || 1;
+      // Width and height can each be entered in a different unit (e.g. a
+      // strip measured "10 ft wide, 8 in deep") — the DB only has one
+      // survey_unit column, so both dimensions are normalized to feet
+      // here before saving. This is also what actually fixes area: a
+      // raw width*height multiply across two different units silently
+      // produced a wrong number, which converting first avoids.
+      const w = toFeet(wRaw, item.unit);
+      const h = toFeet(hRaw, item.heightUnit || item.unit);
       const { data: workItemRow, error: workItemError } = await supabase
         .from('work_items')
         .insert({
@@ -99,7 +108,7 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
           material: item.material || null,
           survey_width: w,
           survey_height: h,
-          survey_unit: item.unit,
+          survey_unit: 'ft',
           survey_quantity: qty,
           survey_area: w * h * qty,
           survey_notes: item.notes || null,

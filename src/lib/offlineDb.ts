@@ -26,6 +26,11 @@ export interface DraftWorkItem {
   width: string;
   height: string;
   unit: string;
+  // Height can be measured in a different unit than width (e.g. a board
+  // that's "10 ft wide, 8 in deep" on an edge strip) — `unit` is the
+  // width's unit; this is the height's. Falls back to `unit` when unset
+  // so every existing draft/board still behaves exactly as before.
+  heightUnit?: string;
   quantity: string;
   notes: string;
   // Which captured photo this board's corners were marked on, and the

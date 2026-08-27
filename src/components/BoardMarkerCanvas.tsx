@@ -82,7 +82,13 @@ export function BoardMarkerCanvas({ photoUrl, points, onChange, label, polygonLa
         onClick={handleContainerClick}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        className="relative rounded-lg overflow-hidden cursor-crosshair select-none touch-none"
+        className="relative rounded-lg overflow-hidden cursor-crosshair select-none"
+        // Scrolling stays available by default (pan-y) so a tall photo
+        // never traps the screen the way a blanket touch-none did —
+        // touch is only locked down to 'none' for the moment a corner
+        // dot is actively being dragged, so repositioning a corner near
+        // the edge doesn't also fight the page into scrolling underneath it.
+        style={{ touchAction: dragIndex !== null ? 'none' : 'pan-y' }}
       >
         <img src={photoUrl} alt="Mark board" className="w-full pointer-events-none" draggable={false} />
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 w-full h-full pointer-events-none">
@@ -103,7 +109,7 @@ export function BoardMarkerCanvas({ photoUrl, points, onChange, label, polygonLa
           <div
             key={i}
             onPointerDown={(e) => handlePointerDown(i, e)}
-            className="absolute w-6 h-6 -ml-3 -mt-3 rounded-full border-2 border-white shadow flex items-center justify-center text-white text-[10px] font-bold cursor-grab active:cursor-grabbing"
+            className="absolute w-6 h-6 -ml-3 -mt-3 rounded-full border-2 border-white shadow flex items-center justify-center text-white text-[10px] font-bold cursor-grab active:cursor-grabbing touch-none"
             style={{ left: `${p.x}%`, top: `${p.y}%`, backgroundColor: color }}
           >
             {i + 1}

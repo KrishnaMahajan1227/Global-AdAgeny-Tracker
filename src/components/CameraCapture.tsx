@@ -57,10 +57,28 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
     const video = videoRef.current;
     if (!video) return;
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d')!;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // Phones commonly report the raw camera stream in landscape pixel
+    // dimensions (videoWidth > videoHeight) even while the video element
+    // is visibly being displayed upright in portrait on screen — capturing
+    // straight off those raw dimensions saves a sideways photo. When the
+    // displayed size (clientWidth/clientHeight, which follows real CSS
+    // layout) disagrees with the raw stream's orientation, rotate 90°
+    // while drawing so the saved photo actually comes out portrait,
+    // matching what was seen live in the viewfinder.
+    const streamIsLandscape = video.videoWidth > video.videoHeight;
+    const displayIsPortrait = video.clientHeight >= video.clientWidth;
+    if (streamIsLandscape && displayIsPortrait) {
+      canvas.width = video.videoHeight;
+      canvas.height = video.videoWidth;
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.drawImage(video, -video.videoWidth / 2, -video.videoHeight / 2);
+    } else {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    }
     setShot(canvas.toDataURL('image/jpeg', 0.85));
   }
 

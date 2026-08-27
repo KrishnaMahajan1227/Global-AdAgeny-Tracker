@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
@@ -13,14 +13,15 @@ import {
 import { syncAllPendingDrafts, syncDraft } from '@/lib/syncManager';
 import { CameraCapture } from '@/components/CameraCapture';
 import { BoardMarkerCanvas } from '@/components/BoardMarkerCanvas';
-import { fillMissingShopCoordinates } from '@/lib/geocode';
+import { fillMissingShopCoordinates, buildAddressQuery } from '@/lib/geocode';
+import { LENGTH_UNIT_OPTIONS, areaSqFt } from '@/lib/units';
 import { renderMarkedImage, buildBoardLabel, type MarkPoint } from '@/lib/markingUtils';
 import { useLiveLocationTracking, LocationShareIndicator } from '@/lib/locationTracking';
 import { buildMultiStopNavigationUrl, formatDistance, formatDuration } from '@/lib/routeOptimization';
 import {
   Home, Briefcase, MapPin, Bell, User, Camera, Navigation, CheckCircle2,
   ChevronLeft, FileText, AlertCircle, Map as MapIcon,
-  Loader2, WifiOff, CloudUpload,
+  Loader2, WifiOff, CloudUpload, Search, SlidersHorizontal,
   Image, Square, Zap, Lightbulb, Flag, Signpost, PanelTop, Layers, Tag,
 } from 'lucide-react';
 
@@ -56,37 +57,33 @@ function iconForWorkType(name: string | null | undefined): typeof Tag {
 const SURVEYABLE_SHOP_STATUSES = ['pending', 'assigned', 'survey_started'];
 
 /**
- * Opens Google Maps directions to a shop — if it doesn't have a pinned
- * lat/lng yet (very common right after a bulk address upload), this
- * geocodes it from address/city/district/state first and saves the
- * result, so "Navigate" works from the shop's address even when nobody
- * has walked in and pinned its exact GPS location yet. Previously this
- * button silently did nothing at all when coordinates were missing.
+ * Opens Google Maps directions to a shop. Uses the pinned lat/lng when one
+ * exists (most precise), but — critically — falls back straight to the
+ * shop's own address/city/district/state as a plain text destination
+ * when it doesn't, since Google Maps directions accept a text address
+ * just as well as coordinates. This never depends on any geocoding API
+ * call succeeding first, so it can't silently do nothing the way it used
+ * to when coordinates were missing.
  */
-export async function navigateToShop(shop: {
-  id: string;
-  latitude: number | null;
-  longitude: number | null;
+export function navigateToShop(shop: {
+  latitude?: number | null;
+  longitude?: number | null;
   address?: string | null;
   city?: string | null;
   district?: string | null;
   state?: string | null;
+  name?: string | null;
 } | null | undefined) {
   if (!shop) return;
   if (shop.latitude != null && shop.longitude != null) {
     window.open(`https://www.google.com/maps/dir/?api=1&destination=${shop.latitude},${shop.longitude}`, '_blank');
     return;
   }
-  try {
-    const { resolved } = await fillMissingShopCoordinates([shop]);
-    const updated = resolved[0];
-    if (updated.latitude != null && updated.longitude != null) {
-      window.open(`https://www.google.com/maps/dir/?api=1&destination=${updated.latitude},${updated.longitude}`, '_blank');
-    } else {
-      alert("Couldn't locate this shop on the map from its address. Ask your office to check the address on file.");
-    }
-  } catch {
-    alert("Couldn't locate this shop on the map from its address. Ask your office to check the address on file.");
+  const query = buildAddressQuery({ address: shop.address, city: shop.city, district: shop.district, state: shop.state }) || shop.name || '';
+  if (query) {
+    window.open(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(query)}`, '_blank');
+  } else {
+    alert("This shop doesn't have an address on file to navigate to. Ask your office to add one.");
   }
 }
 
@@ -316,6 +313,142 @@ function SurveyorHome({ onStart }: { onStart: (shopId: string) => void }) {
   );
 }
 
+/**
+ * The shop-picking list shared by Surveyor's "My Work" and Installer's
+ * "My Jobs" — built to stay usable whether someone has 5 shops or 150:
+ * a search box, City/District/State filters (built from whatever values
+ * actually appear in this person's own assignments, not the full India
+ * list), and a scrollable, fixed-height list of compact rows instead of
+ * one giant page that just keeps growing. Every shop stays one tap away
+ * — there's no forced "next" order, the person picks whichever one they
+ * want, in whatever order suits their day.
+ */
+export function AssignedShopList<T extends { shop_id: string; shops: any }>({
+  assignments,
+  getButtonState,
+  onStart,
+  emptyLabel,
+  renderExtra,
+}: {
+  assignments: T[];
+  getButtonState: (a: T) => { label: string; disabled: boolean; done?: boolean };
+  onStart: (shopId: string) => void;
+  emptyLabel: string;
+  renderExtra?: (a: T) => ReactNode;
+}) {
+  const [search, setSearch] = useState('');
+  const [cityFilter, setCityFilter] = useState('');
+  const [districtFilter, setDistrictFilter] = useState('');
+  const [stateFilter, setStateFilter] = useState('');
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
+  const cityOptions = useMemo(() => Array.from(new Set(assignments.map((a) => a.shops?.city).filter(Boolean))).sort(), [assignments]);
+  const districtOptions = useMemo(() => Array.from(new Set(assignments.map((a) => a.shops?.district).filter(Boolean))).sort(), [assignments]);
+  const stateOptions = useMemo(() => Array.from(new Set(assignments.map((a) => a.shops?.state).filter(Boolean))).sort(), [assignments]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return assignments.filter((a) => {
+      if (q) {
+        const haystack = [a.shops?.name, a.shops?.city, a.shops?.district, a.shops?.state, a.shops?.address, a.shops?.owner_name].filter(Boolean).join(' ').toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      if (cityFilter && a.shops?.city !== cityFilter) return false;
+      if (districtFilter && a.shops?.district !== districtFilter) return false;
+      if (stateFilter && a.shops?.state !== stateFilter) return false;
+      return true;
+    });
+  }, [assignments, search, cityFilter, districtFilter, stateFilter]);
+
+  const activeFilterCount = [cityFilter, districtFilter, stateFilter].filter(Boolean).length;
+
+  return (
+    <div>
+      <div className="relative mb-2">
+        <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search shop, city, address..."
+          className="w-full pl-9 pr-3 py-2.5 border border-slate-200 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      </div>
+
+      <button
+        onClick={() => setFiltersOpen((v) => !v)}
+        className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg mb-3 ${activeFilterCount > 0 ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-slate-100 text-slate-600'}`}
+      >
+        <SlidersHorizontal className="w-3.5 h-3.5" />
+        Filter by area{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+      </button>
+
+      {filtersOpen && (
+        <div className="grid grid-cols-3 gap-2 mb-3">
+          <select value={cityFilter} onChange={(e) => setCityFilter(e.target.value)} className="px-2 py-2 border border-slate-200 rounded-lg text-xs bg-white outline-none">
+            <option value="">All Cities</option>
+            {cityOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <select value={districtFilter} onChange={(e) => setDistrictFilter(e.target.value)} className="px-2 py-2 border border-slate-200 rounded-lg text-xs bg-white outline-none">
+            <option value="">All Districts</option>
+            {districtOptions.map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+          <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)} className="px-2 py-2 border border-slate-200 rounded-lg text-xs bg-white outline-none">
+            <option value="">All States</option>
+            {stateOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+      )}
+
+      <p className="text-xs text-slate-400 mb-2">{filtered.length} of {assignments.length} shop{assignments.length === 1 ? '' : 's'}</p>
+
+      {/* Fixed max-height + its own scroll — this is what keeps the page
+          itself from turning into one endless scroll of 100+ cards. */}
+      <div className="space-y-2 max-h-[65vh] overflow-y-auto pr-0.5 -mr-0.5">
+        {filtered.map((a) => {
+          const btn = getButtonState(a);
+          return (
+            <div key={a.shop_id} className={`rounded-xl border p-3 ${btn.done ? 'border-green-200 bg-green-50/40' : 'border-slate-200 bg-white'}`}>
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium text-slate-900 text-sm truncate">{a.shops?.name}</p>
+                  <p className="text-xs text-slate-500 truncate flex items-center gap-1">
+                    <MapPin className="w-3 h-3 shrink-0" /> {[a.shops?.city, a.shops?.district].filter(Boolean).join(', ') || 'No address on file'}
+                  </p>
+                </div>
+                <StatusBadge status={a.shops?.status || 'pending'} />
+              </div>
+              {renderExtra?.(a)}
+              <div className="flex items-center gap-2 mt-2.5">
+                <button
+                  onClick={() => navigateToShop(a.shops)}
+                  title="Navigate"
+                  aria-label="Navigate"
+                  className="shrink-0 w-9 h-9 flex items-center justify-center bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg transition"
+                >
+                  <Navigation className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => onStart(a.shop_id)}
+                  disabled={btn.disabled}
+                  className="flex-1 flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-medium py-2 rounded-lg text-sm transition"
+                >
+                  {btn.done && <CheckCircle2 className="w-4 h-4" />} {btn.label}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+        {filtered.length === 0 && (
+          <div className="text-center py-10">
+            <Briefcase className="w-9 h-9 text-slate-300 mx-auto mb-2" />
+            <p className="text-sm text-slate-400">{assignments.length === 0 ? emptyLabel : 'No shops match this search/filter.'}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SurveyorWork({ onStart }: { onStart: (shopId: string) => void }) {
   const { profile } = useAuth();
 
@@ -336,60 +469,20 @@ function SurveyorWork({ onStart }: { onStart: (shopId: string) => void }) {
   return (
     <div className="p-4">
       <h1 className="text-xl font-bold text-slate-900 mb-4">My Work</h1>
-      <div className="space-y-3">
-        {(assignments || []).map((a) => {
-          // "Done" is judged off the shop's own status, not just the
-          // assignment row — this is what actually re-locks (or re-opens)
-          // consistently with Admin/Owner's Approve / Reject / Request
-          // Correction actions on Survey Review, which move shop.status
-          // back to 'assigned' to intentionally re-open the job.
-          const jobDone = !isShopSurveyable(a.shops?.status);
-          return (
-          <Card key={a.id} className={`p-4 ${jobDone ? 'border-green-200 bg-green-50/40' : ''}`}>
-            <div className="flex items-start justify-between mb-3">
-              <div>
-                <p className="font-semibold text-slate-900">{a.shops?.name}</p>
-                <p className="text-sm text-slate-500">{a.shops?.clients?.name}</p>
-                <p className="text-sm text-slate-500 flex items-center gap-1 mt-1">
-                  <MapPin className="w-3.5 h-3.5" /> {a.shops?.city}
-                </p>
-              </div>
-              <StatusBadge status={a.shops?.status || 'pending'} />
-            </div>
-            {jobDone && (
-              <p className="flex items-center gap-1.5 text-xs font-medium text-green-700 mb-3">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Job done — submitted for review. You can't edit this unless Admin/Owner sends it back for correction.
-              </p>
-            )}
-            <div className="flex gap-2">
-              <button
-                onClick={() => navigateToShop(a.shops)}
-                className="flex-1 flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-lg text-sm transition"
-              >
-                <Navigation className="w-4 h-4" /> Navigate
-              </button>
-              <button
-                onClick={() => onStart(a.shop_id)}
-                disabled={jobDone}
-                className="flex-1 flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-medium py-2.5 rounded-lg text-sm transition"
-              >
-                {jobDone ? (
-                  <><CheckCircle2 className="w-4 h-4" /> Job Done</>
-                ) : (
-                  'Start Survey'
-                )}
-              </button>
-            </div>
-          </Card>
-          );
-        })}
-        {(!assignments || assignments.length === 0) && (
-          <Card className="p-8 text-center">
-            <Briefcase className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-            <p className="text-sm text-slate-400">No work assigned yet</p>
-          </Card>
-        )}
-      </div>
+      <AssignedShopList
+        assignments={assignments || []}
+        getButtonState={(a) => {
+          const done = !isShopSurveyable(a.shops?.status);
+          return done ? { label: 'Job Done', disabled: true, done: true } : { label: 'Start Survey', disabled: false };
+        }}
+        onStart={onStart}
+        emptyLabel="No work assigned yet"
+        renderExtra={(a) => !isShopSurveyable(a.shops?.status) ? (
+          <p className="flex items-center gap-1.5 text-[11px] font-medium text-green-700 mt-1.5">
+            <CheckCircle2 className="w-3 h-3" /> Submitted — locked unless sent back for correction.
+          </p>
+        ) : null}
+      />
     </div>
   );
 }
@@ -462,7 +555,6 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   const pendingQueue = (pendingAssignments || []).filter((a) => isShopSurveyable(a.shops?.status));
   const queuePosition = pendingQueue.findIndex((a) => a.shop_id === shopId);
   const queueTotal = pendingQueue.length;
-  const nextShopId = queuePosition >= 0 ? pendingQueue.find((a, i) => i !== queuePosition)?.shop_id : undefined;
 
   const { data: workTypes } = useQuery({
     queryKey: ['work-types', profile?.organization_id],
@@ -859,14 +951,9 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
               <p className="text-sm text-slate-500 mb-6">Your survey for {shop?.name} has been submitted for review.</p>
             </>
           )}
-          <button onClick={() => onExit(nextShopId)} className="w-full bg-blue-600 text-white font-medium py-3 rounded-lg">
-            {nextShopId ? 'Next Shop' : 'Done'}
+          <button onClick={() => onExit()} className="w-full bg-blue-600 text-white font-medium py-3 rounded-lg">
+            Back to My Shops
           </button>
-          {nextShopId && (
-            <button onClick={() => onExit()} className="w-full text-sm text-slate-500 font-medium py-2.5 mt-1">
-              Done for now
-            </button>
-          )}
         </Card>
       </div>
     );
@@ -1014,7 +1101,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
               return (
                 <div className="space-y-4">
                   {boardsForPhoto.map(({ w: item, idx }, n) => {
-                    const area = (parseFloat(item.width) || 0) * (parseFloat(item.height) || 0) * (parseInt(item.quantity) || 1);
+                    const area = areaSqFt(parseFloat(item.width) || 0, item.unit, parseFloat(item.height) || 0, item.heightUnit || item.unit) * (parseInt(item.quantity) || 1);
                     return (
                       <Card key={idx} className="p-4 space-y-3">
                         <div className="flex items-center justify-between">
@@ -1063,19 +1150,27 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                               })}
                             </div>
                           </div>
-                          <Input label="Material" value={item.material} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, material: v } : w))} placeholder="e.g. ACP Sheet" />
                           <div className="grid grid-cols-2 gap-3">
                             <Input label="Width" type="number" value={item.width} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, width: v } : w))} step="any" />
-                            <Input label="Height" type="number" value={item.height} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, height: v } : w))} step="any" />
+                            <Select label="Width Unit" value={item.unit} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, unit: v } : w))} options={LENGTH_UNIT_OPTIONS} />
                           </div>
                           <div className="grid grid-cols-2 gap-3">
-                            <Select label="Unit" value={item.unit} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, unit: v } : w))} options={[{ value: 'ft', label: 'Feet' }, { value: 'in', label: 'Inch' }, { value: 'm', label: 'Meter' }, { value: 'cm', label: 'Centimeter' }]} />
-                            <Input label="Quantity" type="number" value={item.quantity} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, quantity: v } : w))} />
+                            <Input label="Height" type="number" value={item.height} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, height: v } : w))} step="any" />
+                            {/* Height gets its own unit — a board's height is sometimes
+                                genuinely measured differently than its width (e.g. a
+                                strip that's "10 ft wide, 8 in deep"), and forcing one
+                                shared unit was exactly what made mixed-unit boards
+                                compute a silently wrong area. */}
+                            <Select label="Height Unit" value={item.heightUnit || item.unit} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, heightUnit: v } : w))} options={LENGTH_UNIT_OPTIONS} />
                           </div>
+                          <Input label="Quantity" type="number" value={item.quantity} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, quantity: v } : w))} />
                           <Textarea label="Notes" value={item.notes} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, notes: v } : w))} rows={2} />
                           <div className="bg-blue-50 rounded-lg p-3 text-center">
-                            <p className="text-xs text-blue-600">Calculated Area</p>
-                            <p className="text-lg font-bold text-blue-700">{area.toFixed(2)} sq {item.unit}</p>
+                            <p className="text-xs text-blue-600">Size Taken</p>
+                            <p className="text-lg font-bold text-blue-700">
+                              {item.width || 0} {item.unit} × {item.height || 0} {item.heightUnit || item.unit}
+                              {(parseInt(item.quantity) || 1) > 1 ? ` × ${item.quantity}` : ''}
+                            </p>
                           </div>
                           {(() => {
                             const lineItem = poLineItemsForShop?.find((li) => li.id === item.po_line_item_id);
@@ -1203,13 +1298,14 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                       <div className="mt-2 space-y-1">
                         {boards.map(({ w }, n) => {
                           const marked = (w.points?.length || 0) >= 3;
-                          const area = (parseFloat(w.width) || 0) * (parseFloat(w.height) || 0) * (parseInt(w.quantity) || 1);
                           return (
                             <div key={n} className="flex items-center justify-between text-xs">
                               <span className={marked ? 'text-slate-600' : 'text-amber-600'}>
-                                {!marked && '⚠ '}{w.work_type_name || 'Board'} {n + 1}{w.material ? ` — ${w.material}` : ''}
+                                {!marked && '⚠ '}{w.work_type_name || 'Board'} {n + 1}
                               </span>
-                              <span className="text-slate-500">{w.width || '0'}×{w.height || '0'} {w.unit} = {area.toFixed(1)} sq {w.unit}</span>
+                              <span className="text-slate-500">
+                                {w.width || '0'} {w.unit} × {w.height || '0'} {w.heightUnit || w.unit}{(parseInt(w.quantity) || 1) > 1 ? ` × ${w.quantity}` : ''}
+                              </span>
                             </div>
                           );
                         })}

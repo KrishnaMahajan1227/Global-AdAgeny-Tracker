@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { Card, Select, Textarea, StatusBadge } from '@/components/ui';
+import { Card, Select, Textarea } from '@/components/ui';
 import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { CameraCapture } from '@/components/CameraCapture';
@@ -15,7 +15,7 @@ import {
   Home, Briefcase, MapPin, Bell, User, Camera, Navigation, CheckCircle2,
   ChevronLeft, AlertCircle, Map as MapIcon, Loader2, Wrench, Ruler, Package, X,
 } from 'lucide-react';
-import { FieldMapView, NotificationsView, ProfileView, navigateToShop } from './SurveyorPage';
+import { FieldMapView, NotificationsView, ProfileView, navigateToShop, AssignedShopList } from './SurveyorPage';
 
 type MobileTab = 'home' | 'work' | 'map' | 'notifications' | 'profile';
 
@@ -196,60 +196,42 @@ function InstallerWork({ onStart }: { onStart: (shopId: string) => void }) {
   return (
     <div className="p-4">
       <h1 className="text-xl font-bold text-slate-900 mb-4">My Installations</h1>
-      <div className="space-y-3">
-        {(assignments || []).map((a) => {
+      <AssignedShopList
+        assignments={assignments || []}
+        getButtonState={(a) => {
+          const shopStatus = a.shops?.status || 'pending';
+          const isInstalled = shopStatus === 'installed';
+          const isAwaitingApproval = shopStatus === 'installation_review';
+          const isReady = READY_STATUSES.includes(shopStatus);
+          if (isInstalled) return { label: 'Installed', disabled: true, done: true };
+          if (isAwaitingApproval) return { label: 'Awaiting Approval', disabled: true };
+          if (!isReady) return { label: 'Not Ready Yet', disabled: true };
+          return { label: 'Start Install', disabled: false };
+        }}
+        onStart={onStart}
+        emptyLabel="No installations assigned"
+        renderExtra={(a) => {
           const shopStatus = a.shops?.status || 'pending';
           const isInstalled = shopStatus === 'installed';
           const isAwaitingApproval = shopStatus === 'installation_review';
           const isReady = READY_STATUSES.includes(shopStatus);
           return (
-          <Card key={a.id} className="p-4">
-            <div className="flex items-start justify-between mb-3">
-              <div>
-                <p className="font-semibold text-slate-900">{a.shops?.name}</p>
-                <p className="text-sm text-slate-500">{a.shops?.clients?.name}</p>
-                <p className="text-sm text-slate-500 flex items-center gap-1 mt-1">
-                  <MapPin className="w-3.5 h-3.5" /> {a.shops?.city}
+            <>
+              {isAwaitingApproval && (
+                <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1.5">
+                  Submitted — waiting for Admin/Owner to approve this installation.
                 </p>
-              </div>
-              <StatusBadge status={shopStatus} />
-            </div>
-            {isAwaitingApproval && (
-              <p className="text-xs text-amber-600 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mb-3">
-                Submitted — waiting for Admin/Owner to approve this installation.
-              </p>
-            )}
-            {!isInstalled && !isAwaitingApproval && !isReady && (
-              <p className="text-xs text-amber-600 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mb-3">
-                Waiting on production to be completed and approved before this can be installed.
-              </p>
-            )}
-            <MaterialsToBring items={(approvedItems || []).filter((it) => it.shop_id === a.shop_id)} />
-            <div className="flex gap-2">
-              <button
-                onClick={() => navigateToShop(a.shops)}
-                className="flex-1 flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-lg text-sm transition"
-              >
-                <Navigation className="w-4 h-4" /> Navigate
-              </button>
-              <button
-                onClick={() => onStart(a.shop_id)}
-                disabled={isInstalled || isAwaitingApproval || !isReady}
-                className="flex-1 flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-medium py-2.5 rounded-lg text-sm transition"
-              >
-                {isAwaitingApproval ? 'Awaiting Approval' : 'Start Install'}
-              </button>
-            </div>
-          </Card>
+              )}
+              {!isInstalled && !isAwaitingApproval && !isReady && (
+                <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1.5">
+                  Waiting on production to be completed and approved.
+                </p>
+              )}
+              <MaterialsToBring items={(approvedItems || []).filter((it) => it.shop_id === a.shop_id)} />
+            </>
           );
-        })}
-        {(!assignments || assignments.length === 0) && (
-          <Card className="p-8 text-center">
-            <Wrench className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-            <p className="text-sm text-slate-400">No installations assigned</p>
-          </Card>
-        )}
-      </div>
+        }}
+      />
     </div>
   );
 }

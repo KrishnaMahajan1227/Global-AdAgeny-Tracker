@@ -7,15 +7,13 @@ import {
   Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, PageHeader, ProgressBar,
   FilterButton, FilterDrawer, FilterSection, Drawer, Pagination,
 } from '@/components/ui';
-import { PurchaseOrder, POLineItem, POLineItemUtilization, POLineItemBurndownEvent, Campaign, Zone, RateCard } from '@/lib/types';
+import { PurchaseOrder, POLineItem, POLineItemUtilization, Campaign, Zone, RateCard } from '@/lib/types';
 import { logAudit, notifyLinkedOrg } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
-import { computeUtilization, formatQty, formatRupees, UtilizationStage } from '@/lib/poUtilization';
-import { buildBurndownSeries } from '@/lib/poBurndown';
-import { BurndownChart } from '@/components/BurndownChart';
+import { computeUtilization, formatQty, formatRupees, isAreaUom, getActualForStage, UtilizationStage } from '@/lib/poUtilization';
 import {
-  Plus, Pencil, Trash2, ShoppingCart, FileText, Upload, X, Loader2, IndianRupee, ListChecks, AlertTriangle, TrendingDown,
-  Inbox, Check, XCircle, Building2, Store, Ban, ChevronRight, Calendar, Layers, ClipboardList,
+  Plus, Pencil, Trash2, ShoppingCart, FileText, Upload, X, Loader2, IndianRupee, ListChecks, AlertTriangle, TrendingUp, ChevronDown,
+  Inbox, Check, XCircle, Building2, Store, Ban, ChevronRight, Calendar, Layers,
 } from 'lucide-react';
 
 const UOM_OPTIONS = [
@@ -919,7 +917,7 @@ function WorkOrderDetailDrawer({
   onRespond?: (decision: 'accepted' | 'rejected') => void;
   isResponding?: boolean;
 }) {
-  const { lineCount, hasBudget, anyVariance, budgetedAmount, invoicedAmount, balance, invoicedPct, completionPct, campaignName, stage } = getPoMetrics(po, utilization);
+  const { hasBudget, anyVariance, budgetedAmount, invoicedAmount, balance, invoicedPct, completionPct, campaignName, stage } = getPoMetrics(po, utilization);
   const primary = getPrimaryStatus(po);
   const isPending = po.origin === 'client_created' && po.assignment_status === 'pending_acceptance';
 
@@ -960,6 +958,35 @@ function WorkOrderDetailDrawer({
           </div>
         )}
 
+        {/* Actions up front — these used to be buried at the very bottom
+            of the drawer, past the utilization table and burndown chart,
+            which meant the most common things anyone actually opens this
+            drawer to do (edit it, manage line items, see the shops on it)
+            were the last thing you could reach. */}
+        <div className="flex flex-wrap gap-2">
+          <button onClick={onEdit} className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition">
+            <Pencil className="w-4 h-4" /> Edit
+          </button>
+          <button onClick={onManageLineItems} className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition">
+            <ListChecks className="w-4 h-4" /> Line Items & Rates
+          </button>
+          <Link to={`/shops?po=${po.id}`} className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition">
+            <Store className="w-4 h-4" /> View Shops{shopCount > 0 ? ` (${shopCount})` : ''}
+          </Link>
+          {canDelete && po.status !== 'cancelled' && (
+            <button
+              onClick={onDelete}
+              title={canHardDelete ? 'No shops or invoices attached yet — safe to permanently delete' : 'Has shops or invoiced amounts — will be cancelled and kept for record-keeping'}
+              className={`flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm font-medium transition ${
+                canHardDelete ? 'bg-red-50 hover:bg-red-100 text-red-600' : 'bg-amber-50 hover:bg-amber-100 text-amber-700'
+              }`}
+            >
+              {canHardDelete ? <Trash2 className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
+              {canHardDelete ? 'Delete Work Order' : 'Cancel Work Order'}
+            </button>
+          )}
+        </div>
+
         <div className="grid grid-cols-2 gap-x-4 gap-y-3">
           <div>
             <p className="text-xs text-slate-400 flex items-center gap-1 mb-0.5"><Building2 className="w-3 h-3" /> Client</p>
@@ -972,10 +999,6 @@ function WorkOrderDetailDrawer({
           <div>
             <p className="text-xs text-slate-400 flex items-center gap-1 mb-0.5"><Calendar className="w-3 h-3" /> Order Date</p>
             <p className="text-sm font-medium text-slate-900">{new Date(po.po_date).toLocaleDateString('en-IN')}</p>
-          </div>
-          <div>
-            <p className="text-xs text-slate-400 flex items-center gap-1 mb-0.5"><ClipboardList className="w-3 h-3" /> Line Items</p>
-            <p className="text-sm font-medium text-slate-900">{lineCount} item{lineCount === 1 ? '' : 's'}</p>
           </div>
         </div>
 
@@ -1005,8 +1028,8 @@ function WorkOrderDetailDrawer({
           <p className="text-xs text-slate-400 mt-1">Budgeted amount: {hasBudget ? formatRupees(budgetedAmount) : 'No line items with budget yet'}</p>
         </div>
 
+        <PoStageProgressChart rows={utilization} stage={stage} />
         <PoUtilizationTable rows={utilization} stage={stage} />
-        <PoBurndownPanel rows={utilization} />
 
         {(po.payment_terms || po.notes) && (
           <div className="space-y-3 border-t border-slate-100 pt-4">
@@ -1030,30 +1053,6 @@ function WorkOrderDetailDrawer({
             <FileText className="w-4 h-4" /> View source PO document
           </a>
         )}
-
-        <div className="border-t border-slate-100 pt-4 flex flex-wrap gap-2">
-          <button onClick={onEdit} className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition">
-            <Pencil className="w-4 h-4" /> Edit
-          </button>
-          <button onClick={onManageLineItems} className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition">
-            <ListChecks className="w-4 h-4" /> Line Items & Rates
-          </button>
-          <Link to={`/shops?po=${po.id}`} className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition">
-            <Store className="w-4 h-4" /> View Shops{shopCount > 0 ? ` (${shopCount})` : ''}
-          </Link>
-          {canDelete && po.status !== 'cancelled' && (
-            <button
-              onClick={onDelete}
-              title={canHardDelete ? 'No shops or invoices attached yet — safe to permanently delete' : 'Has shops or invoiced amounts — will be cancelled and kept for record-keeping'}
-              className={`flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm font-medium transition ${
-                canHardDelete ? 'bg-red-50 hover:bg-red-100 text-red-600' : 'bg-amber-50 hover:bg-amber-100 text-amber-700'
-              }`}
-            >
-              {canHardDelete ? <Trash2 className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
-              {canHardDelete ? 'Delete Work Order' : 'Cancel Work Order'}
-            </button>
-          )}
-        </div>
       </div>
     </Drawer>
   );
@@ -1064,115 +1063,133 @@ function WorkOrderDetailDrawer({
 // budgeted). `stage` picks which actual column drives the % bar — installed
 // for survey_install POs, produced for supply_only POs (they never reach
 // "installed", they dispatch instead).
+//
+// Collapsed by default behind a "View full utilization" toggle — the
+// summary cards + stage progress chart above already answer "how's this
+// PO doing", so the full line-by-line breakdown only needs to take up
+// space when someone actually asks for it.
 function PoUtilizationTable({ rows, stage }: { rows: POLineItemUtilization[]; stage: UtilizationStage }) {
+  const [open, setOpen] = useState(false);
   if (rows.length === 0) return null;
   return (
     <div>
-      <p className="text-sm font-medium text-slate-700 mb-2">Utilization — budget vs actual</p>
-      <div className="border border-slate-200 rounded-lg overflow-x-auto">
-        <table className="w-full text-sm min-w-[820px]">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
-            <tr>
-              <th className="text-left px-3 py-2">Description</th>
-              <th className="text-right px-3 py-2">Budgeted</th>
-              <th className="text-right px-3 py-2">Surveyed</th>
-              <th className="text-right px-3 py-2">Approved</th>
-              <th className="text-right px-3 py-2">Produced</th>
-              <th className="text-right px-3 py-2">Installed</th>
-              <th className="text-right px-3 py-2">Invoiced</th>
-              <th className="text-right px-3 py-2">Balance</th>
-              <th className="text-center px-3 py-2">%</th>
-              <th className="px-3 py-2"></th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {rows.map((row) => {
-              const fig = computeUtilization(row, stage);
-              return (
-                <tr key={row.po_line_item_id} className="hover:bg-slate-50">
-                  <td className="px-3 py-2 text-slate-900">{row.description}</td>
-                  <td className="px-3 py-2 text-right text-slate-600">{formatQty(fig.budgetedPrimary, row.uom)}</td>
-                  <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.surveyed_area : row.surveyed_qty, row.uom)}</td>
-                  <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.approved_area : row.approved_qty, row.uom)}</td>
-                  <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.produced_qty, row.uom === 'sqft' ? 'piece' : row.uom)}</td>
-                  <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.installed_area : row.installed_qty, row.uom)}</td>
-                  <td className="px-3 py-2 text-right text-slate-600">{formatRupees(fig.invoicedAmount)}</td>
-                  <td className={`px-3 py-2 text-right font-medium ${fig.remainingBalance != null && fig.remainingBalance < 0 ? 'text-red-600' : 'text-slate-900'}`}>
-                    {formatRupees(fig.remainingBalance)}
-                  </td>
-                  <td className="px-3 py-2">
-                    <ProgressBar pct={fig.utilizationPct} className="w-16 mx-auto" />
-                  </td>
-                  <td className="px-3 py-2 text-center">
-                    {fig.hasVariance && (
-                      <span title={`Surveyed differs from budgeted by ${fig.variance != null ? Math.round(fig.variance * 100) / 100 : ''} ${row.uom}`}>
-                        <AlertTriangle className="w-4 h-4 text-amber-500 inline" />
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between text-sm font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg px-3.5 py-2.5 transition"
+      >
+        <span>Utilization — budget vs actual ({rows.length} line item{rows.length === 1 ? '' : 's'})</span>
+        <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="border border-slate-200 border-t-0 rounded-b-lg overflow-x-auto -mt-px">
+          <table className="w-full text-sm min-w-[820px]">
+            <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
+              <tr>
+                <th className="text-left px-3 py-2">Description</th>
+                <th className="text-right px-3 py-2">Budgeted</th>
+                <th className="text-right px-3 py-2">Surveyed</th>
+                <th className="text-right px-3 py-2">Approved</th>
+                <th className="text-right px-3 py-2">Produced</th>
+                <th className="text-right px-3 py-2">Installed</th>
+                <th className="text-right px-3 py-2">Invoiced</th>
+                <th className="text-right px-3 py-2">Balance</th>
+                <th className="text-center px-3 py-2">%</th>
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map((row) => {
+                const fig = computeUtilization(row, stage);
+                return (
+                  <tr key={row.po_line_item_id} className="hover:bg-slate-50">
+                    <td className="px-3 py-2 text-slate-900">{row.description}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">{formatQty(fig.budgetedPrimary, row.uom)}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.surveyed_area : row.surveyed_qty, row.uom)}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.approved_area : row.approved_qty, row.uom)}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.produced_qty, row.uom === 'sqft' ? 'piece' : row.uom)}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.installed_area : row.installed_qty, row.uom)}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">{formatRupees(fig.invoicedAmount)}</td>
+                    <td className={`px-3 py-2 text-right font-medium ${fig.remainingBalance != null && fig.remainingBalance < 0 ? 'text-red-600' : 'text-slate-900'}`}>
+                      {formatRupees(fig.remainingBalance)}
+                    </td>
+                    <td className="px-3 py-2">
+                      <ProgressBar pct={fig.utilizationPct} className="w-16 mx-auto" />
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      {fig.hasVariance && (
+                        <span title={`Surveyed differs from budgeted by ${fig.variance != null ? Math.round(fig.variance * 100) / 100 : ''} ${row.uom}`}>
+                          <AlertTriangle className="w-4 h-4 text-amber-500 inline" />
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
 
-// Phase I — Burndown chart (Section 10). Cumulative surveyed/approved/
-// produced/installed over time against the line item's budgeted qty/area,
-// backed by v_po_line_item_burndown_events (migration 0032). Scoped to one
-// line item at a time via a picker, since different line items can use
-// different UOMs (sqft vs piece) and a shared axis wouldn't be meaningful.
-function PoBurndownPanel({ rows }: { rows: POLineItemUtilization[] }) {
-  const [selectedId, setSelectedId] = useState<string>(rows[0]?.po_line_item_id || '');
-
-  const selectedRow = rows.find((r) => r.po_line_item_id === selectedId) || rows[0];
-
-  const { data: events, isLoading } = useQuery({
-    queryKey: ['po-burndown-events', selectedRow?.po_line_item_id],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('v_po_line_item_burndown_events')
-        .select('*')
-        .eq('po_line_item_id', selectedRow!.po_line_item_id);
-      if (error) throw error;
-      return data as POLineItemBurndownEvent[];
-    },
-    enabled: !!selectedRow?.po_line_item_id,
-  });
-
+// Replaces the old per-line-item cumulative burndown line chart, which
+// needed picking one line item at a time and reading overlapping lines to
+// answer "how is this PO actually progressing" — not a clear at-a-glance
+// view. This aggregates every line item into ₹ terms (the one unit that's
+// comparable across sqft/piece/lot line items) and shows, stage by stage,
+// how much of the total budget has actually moved through each one so
+// far — a much more direct answer to "what work is happening, how".
+function PoStageProgressChart({ rows, stage }: { rows: POLineItemUtilization[]; stage: UtilizationStage }) {
   if (rows.length === 0) return null;
 
-  const budgeted = selectedRow ? (selectedRow.uom === 'sqft' ? selectedRow.budgeted_area : selectedRow.budgeted_qty) : null;
-  const series = selectedRow ? buildBurndownSeries(events || [], selectedRow.uom, budgeted) : [];
+  const totalBudget = rows.reduce((sum, r) => {
+    const primary = isAreaUom(r.uom) ? r.budgeted_area : r.budgeted_qty;
+    return sum + (primary != null && r.rate != null ? primary * r.rate : 0);
+  }, 0);
+
+  const stageDefs: { key: UtilizationStage | 'invoiced'; label: string; color: string }[] = [
+    { key: 'surveyed', label: 'Surveyed', color: '#3b82f6' },
+    { key: 'approved', label: 'Approved', color: '#8b5cf6' },
+    { key: stage, label: stage === 'produced' ? 'Produced' : 'Installed', color: '#f59e0b' },
+    { key: 'invoiced', label: 'Invoiced', color: '#10b981' },
+  ];
+
+  const amountFor = (key: UtilizationStage | 'invoiced') => {
+    if (key === 'invoiced') return rows.reduce((sum, r) => sum + (r.invoiced_amount || 0), 0);
+    return rows.reduce((sum, r) => sum + (getActualForStage(r, key) || 0) * (r.rate || 0), 0);
+  };
+
+  if (totalBudget <= 0) {
+    return (
+      <div className="border border-dashed border-slate-200 rounded-lg p-4 text-center">
+        <p className="text-xs text-slate-400">Add a rate to this PO's line items to see stage-by-stage progress here.</p>
+      </div>
+    );
+  }
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-2">
-        <p className="text-sm font-medium text-slate-700 flex items-center gap-1.5">
-          <TrendingDown className="w-4 h-4 text-slate-400" /> Burndown — execution pace over time
-        </p>
-        {rows.length > 1 && (
-          <select
-            value={selectedRow?.po_line_item_id}
-            onChange={(e) => setSelectedId(e.target.value)}
-            className="text-xs border border-slate-200 rounded-md px-2 py-1 bg-white"
-          >
-            {rows.map((r) => (
-              <option key={r.po_line_item_id} value={r.po_line_item_id}>{r.description}</option>
-            ))}
-          </select>
-        )}
+      <p className="text-sm font-medium text-slate-700 mb-3 flex items-center gap-1.5">
+        <TrendingUp className="w-4 h-4 text-slate-400" /> Progress — how work is moving through each stage
+      </p>
+      <div className="space-y-3">
+        {stageDefs.map((s) => {
+          const amount = amountFor(s.key);
+          const pct = Math.min(100, Math.round((amount / totalBudget) * 100));
+          return (
+            <div key={s.label}>
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span className="font-medium text-slate-600">{s.label}</span>
+                <span className="text-slate-500">{formatRupees(amount)} <span className="text-slate-400">({pct}%)</span></span>
+              </div>
+              <div className="h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, backgroundColor: s.color }} />
+              </div>
+            </div>
+          );
+        })}
       </div>
-      {isLoading ? (
-        <div className="flex items-center justify-center h-[220px] text-slate-400 text-sm">
-          <Loader2 className="w-4 h-4 animate-spin mr-2" /> Loading...
-        </div>
-      ) : (
-        <BurndownChart points={series} uom={selectedRow?.uom || 'sqft'} />
-      )}
     </div>
   );
 }
@@ -1329,9 +1346,9 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
           <p className="text-sm font-semibold text-blue-900">{formatRupees(computedTotal)}</p>
         </div>
 
-        <PoUtilizationTable rows={utilization} stage={po.fulfillment_type === 'supply_only' ? 'produced' : 'installed'} />
+        <PoStageProgressChart rows={utilization} stage={po.fulfillment_type === 'supply_only' ? 'produced' : 'installed'} />
 
-        <PoBurndownPanel rows={utilization} />
+        <PoUtilizationTable rows={utilization} stage={po.fulfillment_type === 'supply_only' ? 'produced' : 'installed'} />
 
         <div className="border border-slate-200 rounded-lg overflow-hidden">
           <table className="w-full text-sm">

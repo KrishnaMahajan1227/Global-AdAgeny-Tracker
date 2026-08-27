@@ -7,7 +7,7 @@ import { ROLE_LABELS } from '@/lib/types';
 import { NotificationBell } from '@/components/NotificationBell';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import {
-  LayoutDashboard, Store, Building2, ShoppingCart, FileCheck, Palette,
+  LayoutDashboard, Building2, ShoppingCart, FileCheck, Palette,
   Printer, Wrench, FileText, IndianRupee, Settings, LogOut, Menu, X,
   Map as MapIcon, ClipboardCheck, ClipboardList, Truck, Route as RouteIcon,
 } from 'lucide-react';
@@ -82,7 +82,6 @@ export default function AdminLayout() {
     { to: '/campaigns', label: 'Campaigns', icon: ShoppingCart, show: isAdmin },
     { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts, badge: pendingCounts?.clientRequests },
     { to: '/supply-orders', label: 'Supply Orders', icon: Truck, show: isAdmin || isAccounts },
-    { to: '/shops', label: 'Shops', icon: Store, show: isAdmin || isAccounts },
     { to: '/survey-review', label: 'Survey Review', icon: FileCheck, show: isAdmin, badge: pendingCounts?.survey },
     { to: '/design', label: 'Design Queue', icon: Palette, show: isAdmin || isDesigner, badge: (isAdmin || isDesigner) ? pendingCounts?.design : undefined },
     { to: '/production', label: 'Production', icon: Printer, show: isAdmin || isProduction, badge: (isAdmin || isProduction) ? pendingCounts?.production : undefined },

@@ -13,6 +13,7 @@ import {
 import { syncAllPendingDrafts, syncDraft } from '@/lib/syncManager';
 import { CameraCapture } from '@/components/CameraCapture';
 import { BoardMarkerCanvas } from '@/components/BoardMarkerCanvas';
+import { fillMissingShopCoordinates } from '@/lib/geocode';
 import { renderMarkedImage, buildBoardLabel, type MarkPoint } from '@/lib/markingUtils';
 import { useLiveLocationTracking, LocationShareIndicator } from '@/lib/locationTracking';
 import { buildMultiStopNavigationUrl, formatDistance, formatDuration } from '@/lib/routeOptimization';
@@ -54,8 +55,42 @@ function iconForWorkType(name: string | null | undefined): typeof Tag {
 // the Survey Review page, which resets the shop to 'assigned'.
 const SURVEYABLE_SHOP_STATUSES = ['pending', 'assigned', 'survey_started'];
 
-function isShopSurveyable(status: string | null | undefined): boolean {
-  return SURVEYABLE_SHOP_STATUSES.includes(status || '');
+/**
+ * Opens Google Maps directions to a shop — if it doesn't have a pinned
+ * lat/lng yet (very common right after a bulk address upload), this
+ * geocodes it from address/city/district/state first and saves the
+ * result, so "Navigate" works from the shop's address even when nobody
+ * has walked in and pinned its exact GPS location yet. Previously this
+ * button silently did nothing at all when coordinates were missing.
+ */
+export async function navigateToShop(shop: {
+  id: string;
+  latitude: number | null;
+  longitude: number | null;
+  address?: string | null;
+  city?: string | null;
+  district?: string | null;
+  state?: string | null;
+} | null | undefined) {
+  if (!shop) return;
+  if (shop.latitude != null && shop.longitude != null) {
+    window.open(`https://www.google.com/maps/dir/?api=1&destination=${shop.latitude},${shop.longitude}`, '_blank');
+    return;
+  }
+  try {
+    const { resolved } = await fillMissingShopCoordinates([shop]);
+    const updated = resolved[0];
+    if (updated.latitude != null && updated.longitude != null) {
+      window.open(`https://www.google.com/maps/dir/?api=1&destination=${updated.latitude},${updated.longitude}`, '_blank');
+    } else {
+      alert("Couldn't locate this shop on the map from its address. Ask your office to check the address on file.");
+    }
+  } catch {
+    alert("Couldn't locate this shop on the map from its address. Ask your office to check the address on file.");
+  }
+}
+
+function isShopSurveyable(status: string | null | undefined): boolean {  return SURVEYABLE_SHOP_STATUSES.includes(status || '');
 }
 
 export default function SurveyorPage() {
@@ -328,11 +363,7 @@ function SurveyorWork({ onStart }: { onStart: (shopId: string) => void }) {
             )}
             <div className="flex gap-2">
               <button
-                onClick={() => {
-                  if (a.shops?.latitude && a.shops?.longitude) {
-                    window.open(`https://www.google.com/maps/dir/?api=1&destination=${a.shops.latitude},${a.shops.longitude}`, '_blank');
-                  }
-                }}
+                onClick={() => navigateToShop(a.shops)}
                 className="flex-1 flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-lg text-sm transition"
               >
                 <Navigation className="w-4 h-4" /> Navigate
@@ -916,11 +947,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
             </Card>
 
             <button
-              onClick={() => {
-                if (shop.latitude && shop.longitude) {
-                  window.open(`https://www.google.com/maps/dir/?api=1&destination=${shop.latitude},${shop.longitude}`, '_blank');
-                }
-              }}
+              onClick={() => navigateToShop(shop)}
               className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white font-bold py-4 rounded-xl text-lg transition"
             >
               <Navigation className="w-5 h-5" /> Navigate to Shop
@@ -1331,25 +1358,58 @@ function MyRoutePanel() {
 export function FieldMapView() {
   const { profile } = useAuth();
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+  const [resolvedShops, setResolvedShops] = useState<any[] | null>(null);
+  const [geocoding, setGeocoding] = useState(false);
+  const [geocodeFailedCount, setGeocodeFailedCount] = useState(0);
 
   const { data: assignments } = useQuery({
     queryKey: ['field-map', profile?.id],
     queryFn: async () => {
       const { data } = await supabase
         .from('shop_assignments')
-        .select('shops(id, name, latitude, longitude, city, status)')
+        .select('shops(id, name, latitude, longitude, city, district, state, address, status)')
         .eq('user_id', profile!.id);
       return data;
     },
     enabled: !!profile?.id,
   });
 
-  const shops = (assignments || []).map((a: any) => a.shops).filter((s: any) => s?.latitude);
+  const rawShops = (assignments || []).map((a: any) => a.shops).filter(Boolean);
+
+  // Shops with a pinned lat/lng already are fine as-is. Anything missing
+  // coordinates (very common straight after a bulk address upload) gets
+  // geocoded from its address/city/district/state and written back —
+  // this is what turns "No shops with coordinates assigned" into an
+  // actual map with every assigned shop on it.
+  useEffect(() => {
+    let cancelled = false;
+    if (rawShops.length === 0) { setResolvedShops([]); return; }
+    const allHaveCoords = rawShops.every((s: any) => s.latitude != null && s.longitude != null);
+    if (allHaveCoords) { setResolvedShops(rawShops); return; }
+
+    setGeocoding(true);
+    fillMissingShopCoordinates(rawShops).then(({ resolved, failedIds }) => {
+      if (cancelled) return;
+      setResolvedShops(resolved);
+      setGeocodeFailedCount(failedIds.length);
+      setGeocoding(false);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(rawShops.map((s: any) => s.id))]);
+
+  const shops = (resolvedShops ?? rawShops).filter((s: any) => s?.latitude != null && s?.longitude != null);
 
   return (
     <div className="p-4">
       <h1 className="text-xl font-bold text-slate-900 mb-4">Map</h1>
       <MyRoutePanel />
+      {geocoding && (
+        <p className="text-xs text-slate-500 mb-3 flex items-center gap-1.5">
+          <span className="w-3 h-3 border-2 border-slate-300 border-t-blue-600 rounded-full animate-spin inline-block" />
+          Locating shops on the map from their address...
+        </p>
+      )}
       {apiKey && shops.length > 0 ? (
         <SimpleMap apiKey={apiKey} shops={shops} />
       ) : (
@@ -1370,8 +1430,20 @@ export function FieldMapView() {
                 </button>
               </div>
             ))}
-            {shops.length === 0 && <p className="text-sm text-slate-400">No shops with coordinates assigned</p>}
+            {!geocoding && shops.length === 0 && rawShops.length === 0 && (
+              <p className="text-sm text-slate-400">No shops assigned to you yet.</p>
+            )}
+            {!geocoding && shops.length === 0 && rawShops.length > 0 && (
+              <p className="text-sm text-amber-600">
+                Couldn't locate any of your {rawShops.length} assigned shop(s) on the map — their addresses may be incomplete. Ask your office to check the address/city/state on file.
+              </p>
+            )}
           </div>
+          {!geocoding && geocodeFailedCount > 0 && shops.length > 0 && (
+            <p className="text-xs text-amber-600 mt-2">
+              {geocodeFailedCount} shop(s) couldn't be located from their address and aren't shown above.
+            </p>
+          )}
           {!apiKey && <p className="text-xs text-amber-600 mt-3">Set VITE_GOOGLE_MAPS_API_KEY to enable the map view.</p>}
         </Card>
       )}

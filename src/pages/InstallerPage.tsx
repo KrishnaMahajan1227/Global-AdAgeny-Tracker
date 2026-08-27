@@ -15,7 +15,7 @@ import {
   Home, Briefcase, MapPin, Bell, User, Camera, Navigation, CheckCircle2,
   ChevronLeft, AlertCircle, Map as MapIcon, Loader2, Wrench, Ruler, Package, X,
 } from 'lucide-react';
-import { FieldMapView, NotificationsView, ProfileView } from './SurveyorPage';
+import { FieldMapView, NotificationsView, ProfileView, navigateToShop } from './SurveyorPage';
 
 type MobileTab = 'home' | 'work' | 'map' | 'notifications' | 'profile';
 
@@ -227,11 +227,7 @@ function InstallerWork({ onStart }: { onStart: (shopId: string) => void }) {
             <MaterialsToBring items={(approvedItems || []).filter((it) => it.shop_id === a.shop_id)} />
             <div className="flex gap-2">
               <button
-                onClick={() => {
-                  if (a.shops?.latitude && a.shops?.longitude) {
-                    window.open(`https://www.google.com/maps/dir/?api=1&destination=${a.shops.latitude},${a.shops.longitude}`, '_blank');
-                  }
-                }}
+                onClick={() => navigateToShop(a.shops)}
                 className="flex-1 flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-lg text-sm transition"
               >
                 <Navigation className="w-4 h-4" /> Navigate
@@ -816,7 +812,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
             <ApprovedSpecsCard items={approvedItems} photos={surveyPhotos || []} markings={boardMarkings || []} />
 
             <button
-              onClick={() => window.open(`https://www.google.com/maps/dir/?api=1&destination=${shop.latitude},${shop.longitude}`, '_blank')}
+              onClick={() => navigateToShop(shop)}
               className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white font-bold py-4 rounded-xl text-lg"
             >
               <Navigation className="w-5 h-5" /> Navigate to Shop

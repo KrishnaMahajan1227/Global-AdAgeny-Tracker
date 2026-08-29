@@ -9,7 +9,7 @@ import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import {
   LayoutDashboard, Building2, ShoppingCart, FileCheck, Palette,
   Printer, Wrench, FileText, IndianRupee, Settings, LogOut, Menu, X,
-  Map as MapIcon, ClipboardCheck, ClipboardList, Truck, Route as RouteIcon,
+  Map as MapIcon, ClipboardCheck, ClipboardList, Truck, Route as RouteIcon, User,
 } from 'lucide-react';
 
 export default function AdminLayout() {
@@ -91,6 +91,7 @@ export default function AdminLayout() {
     { to: '/reports', label: 'Reports', icon: FileText, show: isAdmin || isAccounts },
     { to: '/billing', label: 'Billing', icon: IndianRupee, show: isAdmin || isAccounts },
     { to: '/owner', label: 'Owner Console', icon: Settings, show: isOwner },
+    { to: '/account', label: 'My Account', icon: User, show: true },
   ].filter((item) => item.show);
 
   async function handleSignOut() {

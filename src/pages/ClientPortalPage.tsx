@@ -7,7 +7,7 @@ import { ROLE_LABELS } from '@/lib/types';
 import { NotificationBell } from '@/components/NotificationBell';
 import {
   LayoutDashboard, ClipboardList, Building2, Store,
-  FileBarChart, LogOut, Menu, X, Megaphone,
+  FileBarChart, LogOut, Menu, X, Megaphone, User,
 } from 'lucide-react';
 
 // The Client Organization portal shell. Mirrors AdminLayout.tsx's sidebar +
@@ -30,6 +30,7 @@ const NAV_ITEMS = [
   { to: '/client/shops', label: 'Shops', icon: Store, end: false, accent: 'text-purple-400', countKey: 'shops' as const },
   { to: '/client/agencies', label: 'Agencies', icon: Building2, end: false, accent: 'text-amber-400', countKey: 'agencies' as const },
   { to: '/client/reports', label: 'Reports', icon: FileBarChart, end: false, accent: 'text-teal-400', countKey: null },
+  { to: '/client/account', label: 'My Account', icon: User, end: false, accent: 'text-slate-400', countKey: null },
 ];
 
 export default function ClientPortalPage() {

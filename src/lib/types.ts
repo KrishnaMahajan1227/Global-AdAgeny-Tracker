@@ -1,7 +1,15 @@
-export type Role = 'agency_owner' | 'admin' | 'client_manager' | 'surveyor' | 'designer' | 'printing' | 'installer' | 'accounts' | 'demo' | 'client_admin' | 'client_viewer';
+export type Role = 'agency_owner' | 'admin' | 'client_manager' | 'surveyor' | 'designer' | 'printing' | 'installer' | 'accounts' | 'demo' | 'client_admin' | 'client_viewer' | 'super_admin';
 
 export interface Profile {
   id: string;
+  // Always a real org for every role except 'super_admin' (where it's
+  // actually null in the DB — a platform account that sits above every
+  // organization). Kept as `string` here rather than `string | null`
+  // since every other role treats this as guaranteed, and super_admin
+  // never reaches any of those org-scoped pages (route-guarded to its
+  // own /superadmin screen only) — widening this type would have forced
+  // a defensive null-check into ~25 unrelated call sites for a case that
+  // can only ever occur on a page none of them run on.
   organization_id: string;
   full_name: string;
   role: Role;
@@ -905,6 +913,7 @@ export const ROLE_LABELS: Record<string, string> = {
   demo: 'Demo',
   client_admin: 'Client Admin',
   client_viewer: 'Client Viewer',
+  super_admin: 'Platform Super Admin',
 };
 
 export const OFFICE_ROLES: Role[] = ['agency_owner', 'admin', 'client_manager', 'designer', 'printing', 'accounts', 'demo'];

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '@/lib/auth';
-import { Building2, Eye, EyeOff, Smartphone, Mail, Users2, Loader2 } from 'lucide-react';
+import { Building2, Eye, EyeOff, Smartphone, Mail, Loader2 } from 'lucide-react';
 
 // Single, unified sign-in screen for the whole platform — agency staff,
 // field workers, and Client Organization users all sign in exactly the
@@ -21,7 +21,6 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [demoLoading, setDemoLoading] = useState<'agency' | 'client' | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -40,21 +39,7 @@ export default function LoginPage() {
     }
   }
 
-  async function tryDemo(which: 'agency' | 'client') {
-    setError(null);
-    setDemoLoading(which);
-    try {
-      const { error } =
-        which === 'agency'
-          ? await signIn('demo@darshanadagency.com', 'Demo@2026')
-          : await signIn('client-demo@darshanadagency.com', 'ClientDemo@2026');
-      if (error) setError(error);
-    } finally {
-      setDemoLoading(null);
-    }
-  }
-
-  const busy = loading || !!demoLoading;
+  const busy = loading;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-blue-900 px-4 py-10">
@@ -160,31 +145,6 @@ export default function LoginPage() {
           <p className="text-xs text-slate-400 text-center mt-4">
             Agency team member or a linked client — sign in above with the account your agency set up for you.
           </p>
-
-          <div className="mt-5 pt-5 border-t border-slate-200">
-            <p className="text-xs font-medium text-slate-500 text-center mb-3">New here? Explore a live demo</p>
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                onClick={() => tryDemo('agency')}
-                disabled={busy}
-                className="flex items-center justify-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 font-medium py-2.5 rounded-lg transition disabled:opacity-50 text-sm"
-              >
-                {demoLoading === 'agency' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Building2 className="w-4 h-4" />}
-                Agency Demo
-              </button>
-              <button
-                onClick={() => tryDemo('client')}
-                disabled={busy}
-                className="flex items-center justify-center gap-1.5 bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-700 font-medium py-2.5 rounded-lg transition disabled:opacity-50 text-sm"
-              >
-                {demoLoading === 'client' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Users2 className="w-4 h-4" />}
-                Client Demo
-              </button>
-            </div>
-            <p className="text-xs text-slate-400 text-center mt-2">
-              Read-only demo workspaces — see the full survey-to-billing pipeline as an agency, or a campaign's live progress as a client.
-            </p>
-          </div>
         </div>
       </div>
     </div>

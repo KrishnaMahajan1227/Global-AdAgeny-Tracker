@@ -29,6 +29,8 @@ import ClientPODetailPage from '@/pages/client/ClientPODetailPage';
 import ClientShopsPage from '@/pages/client/ClientShopsPage';
 import ClientAgenciesPage from '@/pages/client/ClientAgenciesPage';
 import ClientReportsPage from '@/pages/client/ClientReportsPage';
+import SuperAdminPage from '@/pages/SuperAdminPage';
+import AccountSettingsPage from '@/pages/AccountSettingsPage';
 import { Loader2 } from 'lucide-react';
 
 const queryClient = new QueryClient({
@@ -74,6 +76,7 @@ function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode;
 }
 
 function homeRouteForRole(role: Role) {
+  if (role === 'super_admin') return '/superadmin';
   if (FIELD_ROLES.includes(role)) return '/mobile';
   if (CLIENT_ORG_ROLES.includes(role)) return '/client';
   return '/dashboard';
@@ -106,6 +109,15 @@ function AppRoutes() {
 
       <Route path="/login" element={session ? <RoleRedirect /> : <LoginPage />} />
 
+      {/* Platform Super Admin — sits above every organization, no
+          AdminLayout (which assumes an org context for its nav badges).
+          Self-contained page with its own header/sign-out. */}
+      <Route path="/superadmin" element={
+        <ProtectedRoute allowedRoles={['super_admin']}>
+          <SuperAdminPage />
+        </ProtectedRoute>
+      } />
+
       {/* Mobile routes for field roles */}
       <Route path="/mobile" element={
         <ProtectedRoute allowedRoles={['surveyor', 'installer']}>
@@ -131,6 +143,7 @@ function AppRoutes() {
         <Route path="shops" element={<ClientShopsPage />} />
         <Route path="agencies" element={<ClientAgenciesPage />} />
         <Route path="reports" element={<ClientReportsPage />} />
+        <Route path="account" element={<AccountSettingsPage />} />
       </Route>
 
       {/* Admin/Office routes */}
@@ -140,6 +153,7 @@ function AppRoutes() {
         </ProtectedRoute>
       }>
         <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/account" element={<AccountSettingsPage />} />
         <Route path="/clients" element={<ClientsPage />} />
         <Route path="/campaigns" element={<CampaignsPage />} />
         <Route path="/projects" element={<Navigate to="/campaigns" replace />} />

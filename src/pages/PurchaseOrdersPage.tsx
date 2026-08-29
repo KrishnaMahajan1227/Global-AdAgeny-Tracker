@@ -11,6 +11,7 @@ import { PurchaseOrder, POLineItem, POLineItemUtilization, Campaign, Zone, RateC
 import { logAudit, notifyLinkedOrg } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { computeUtilization, formatQty, formatRupees, isAreaUom, getActualForStage, UtilizationStage } from '@/lib/poUtilization';
+import { DonutChart } from '@/components/DonutChart';
 import {
   Plus, Pencil, Trash2, ShoppingCart, FileText, Upload, X, Loader2, IndianRupee, ListChecks, AlertTriangle, TrendingUp, ChevronDown,
   Inbox, Check, XCircle, Building2, Store, Ban, ChevronRight, Calendar, Layers,
@@ -1019,14 +1020,7 @@ function WorkOrderDetailDrawer({
           </div>
         </div>
 
-        <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <p className="text-sm font-medium text-slate-700">Overall Completion</p>
-            <span className="text-sm font-semibold text-slate-900">{hasBudget && completionPct != null ? `${Math.round(completionPct)}%` : '—'}</span>
-          </div>
-          <ProgressBar pct={hasBudget ? completionPct : null} />
-          <p className="text-xs text-slate-400 mt-1">Budgeted amount: {hasBudget ? formatRupees(budgetedAmount) : 'No line items with budget yet'}</p>
-        </div>
+        <PoCompletionDonut budgetedAmount={hasBudget ? budgetedAmount : null} invoicedAmount={invoicedAmount} completionPct={completionPct} />
 
         <PoStageProgressChart rows={utilization} stage={stage} />
         <PoUtilizationTable rows={utilization} stage={stage} />
@@ -1140,6 +1134,67 @@ function PoUtilizationTable({ rows, stage }: { rows: POLineItemUtilization[]; st
 // comparable across sqft/piece/lot line items) and shows, stage by stage,
 // how much of the total budget has actually moved through each one so
 // far — a much more direct answer to "what work is happening, how".
+// Replaces the old flat "Overall Completion: 0% + a progress bar +
+// budgeted amount" block, which buried the one thing that actually
+// matters — how much of the physical work is actually done — behind a
+// rupee figure at the very end that reads as the headline when it's
+// really just context. This turns the same three numbers (budgeted,
+// invoiced, % complete) already computed for the summary cards above
+// into a donut that answers "how much work, of what kind" at a glance:
+// how much is done and billed, done but not yet billed, and still
+// remaining — money is present but secondary, sized by its slice, not
+// spelled out as the headline.
+function PoCompletionDonut({
+  budgetedAmount, invoicedAmount, completionPct,
+}: {
+  budgetedAmount: number | null;
+  invoicedAmount: number;
+  completionPct: number | null;
+}) {
+  if (budgetedAmount == null || budgetedAmount <= 0) {
+    return (
+      <div className="border border-dashed border-slate-200 rounded-lg p-4 text-center">
+        <p className="text-xs text-slate-400">Add a rate to this PO's line items to see completion here.</p>
+      </div>
+    );
+  }
+
+  const completedAmount = budgetedAmount * ((completionPct ?? 0) / 100);
+  const invoiced = Math.min(invoicedAmount, budgetedAmount);
+  const completedNotInvoiced = Math.max(0, completedAmount - invoiced);
+  const remaining = Math.max(0, budgetedAmount - completedAmount);
+
+  const segments = [
+    { key: 'invoiced', label: 'Done & Invoiced', value: invoiced, color: '#10b981' },
+    { key: 'completed', label: 'Done, Not Yet Invoiced', value: completedNotInvoiced, color: '#3b82f6' },
+    { key: 'remaining', label: 'Work Remaining', value: remaining, color: '#e2e8f0' },
+  ];
+
+  return (
+    <div>
+      <p className="text-sm font-medium text-slate-700 mb-3">Overall Completion — how much work is actually done</p>
+      <div className="flex items-center gap-5">
+        <DonutChart
+          segments={segments}
+          size={132}
+          strokeWidth={18}
+          centerValue={`${Math.round(completionPct ?? 0)}%`}
+          centerLabel="done"
+        />
+        <div className="flex-1 space-y-2.5 min-w-0">
+          {segments.map((s) => (
+            <div key={s.key} className="flex items-center gap-2 text-xs">
+              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: s.color }} />
+              <span className="text-slate-600 flex-1 truncate">{s.label}</span>
+              <span className="font-semibold text-slate-800">{formatRupees(s.value)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PoStageProgressChart({ rows, stage }: { rows: POLineItemUtilization[]; stage: UtilizationStage }) {
   if (rows.length === 0) return null;
 

@@ -7,7 +7,7 @@ import { logAudit } from '@/lib/helpers';
 import type { ClientAgencyLink, PurchaseOrder } from '@/lib/types';
 import { siteBucket } from '@/lib/clientPortal';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
-import { Building2, ShoppingCart, Store, Plus, Loader2, Pencil, Ban, Link2, AlertCircle } from 'lucide-react';
+import { Building2, ShoppingCart, Store, Plus, Loader2, Pencil, Ban, Link2, AlertCircle, Star, TrendingUp, TrendingDown, Shield } from 'lucide-react';
 
 type LinkRow = ClientAgencyLink & { agency_org: { name: string; phone: string | null; email: string | null; address: string | null; gst_number: string | null } | null };
 type ShopRow = { id: string; status: string; purchase_order_id: string | null };
@@ -73,6 +73,19 @@ export default function ClientAgenciesPage() {
       const { data, error } = await supabase.from('shops').select('id, status, purchase_order_id');
       if (error) throw error;
       return data as ShopRow[];
+    },
+    enabled: !!orgId,
+  });
+
+  // Powers the monthly performance numbers below (migration 0073 grants
+  // this read) — completed_at is the one piece of real timing data this
+  // portal can see, with zero money attached to it.
+  const { data: installJobs } = useQuery({
+    queryKey: ['client-agencies-install-jobs', orgId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('installation_jobs').select('shop_id, status, completed_at');
+      if (error) throw error;
+      return data as { shop_id: string; status: string; completed_at: string | null }[];
     },
     enabled: !!orgId,
   });
@@ -183,6 +196,41 @@ export default function ClientAgenciesPage() {
 
   const poById = new Map((pos || []).map((p) => [p.id, p]));
 
+  // Automated rating — purely a function of real completion data, no
+  // manual/subjective input. Bands are deliberately coarse (half-star
+  // steps) so a single shop's status flip doesn't visibly swing an
+  // agency's rating day to day.
+  function ratingForPct(pct: number | null): { stars: number; label: string } {
+    if (pct == null) return { stars: 0, label: 'Not enough data yet' };
+    if (pct >= 90) return { stars: 5, label: 'Excellent' };
+    if (pct >= 75) return { stars: 4.5, label: 'Very Good' };
+    if (pct >= 60) return { stars: 4, label: 'Good' };
+    if (pct >= 40) return { stars: 3, label: 'Average' };
+    if (pct >= 20) return { stars: 2, label: 'Needs Improvement' };
+    return { stars: 1, label: 'Just Getting Started' };
+  }
+
+  const now = new Date();
+  const thisMonthKey = `${now.getFullYear()}-${now.getMonth()}`;
+  const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const lastMonthKey = `${lastMonthDate.getFullYear()}-${lastMonthDate.getMonth()}`;
+
+  function monthlyPerformance(agencyOrgId: string) {
+    let thisMonth = 0, lastMonth = 0;
+    for (const job of installJobs || []) {
+      if (job.status !== 'completed') continue;
+      if (!job.completed_at) continue;
+      const shop = (shops || []).find((s) => s.id === job.shop_id);
+      const po = shop?.purchase_order_id ? poById.get(shop.purchase_order_id) : null;
+      if (!po || po.assigned_agency_id !== agencyOrgId) continue;
+      const d = new Date(job.completed_at);
+      const key = `${d.getFullYear()}-${d.getMonth()}`;
+      if (key === thisMonthKey) thisMonth++;
+      else if (key === lastMonthKey) lastMonth++;
+    }
+    return { thisMonth, lastMonth };
+  }
+
   return (
     <div>
       <PageHeader
@@ -213,6 +261,9 @@ export default function ClientAgenciesPage() {
             if (bucket === 'completed') completed += 1;
           }
           const pct = total > 0 ? Math.round((completed / total) * 100) : null;
+          const rating = ratingForPct(pct);
+          const monthly = monthlyPerformance(link.agency_org_id);
+          const trend = monthly.thisMonth - monthly.lastMonth;
 
           return (
             <Card key={link.id} className="p-5">
@@ -238,11 +289,42 @@ export default function ClientAgenciesPage() {
                 </>
               ) : (
                 <>
-                  <div className="grid grid-cols-2 gap-3 text-sm mb-2">
+                  <div className="grid grid-cols-2 gap-3 text-sm mb-3">
                     <div className="flex items-center gap-1.5 text-slate-600"><ShoppingCart className="w-3.5 h-3.5 text-slate-400" /> {poCount} Work Order{poCount === 1 ? '' : 's'}</div>
                     <div className="flex items-center gap-1.5 text-slate-600"><Store className="w-3.5 h-3.5 text-slate-400" /> {total} site{total === 1 ? '' : 's'}</div>
                   </div>
-                  {pct != null && <p className="text-xs text-slate-400 mb-3">{pct}% of sites completed</p>}
+
+                  {/* Performance — automated, purely from completion data.
+                      Star rating is a deterministic band off overall %
+                      complete; the monthly figures come from real
+                      installation completion dates (migration 0073). */}
+                  <div className="bg-slate-50 border border-slate-100 rounded-lg p-3 mb-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-medium text-slate-500">Performance</span>
+                      <StarRating stars={rating.stars} label={rating.label} />
+                    </div>
+                    <div className="mb-2">
+                      <div className="flex items-center justify-between text-xs mb-1">
+                        <span className="text-slate-500">Overall completion</span>
+                        <span className="font-semibold text-slate-800">{pct != null ? `${pct}%` : '—'}</span>
+                      </div>
+                      <div className="h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                        <div className="h-full bg-blue-500 rounded-full" style={{ width: `${pct ?? 0}%` }} />
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-200">
+                      <span className="text-slate-500">This month</span>
+                      <span className="font-semibold text-slate-800 flex items-center gap-1">
+                        {monthly.thisMonth} site{monthly.thisMonth === 1 ? '' : 's'} installed
+                        {trend !== 0 && (
+                          <span className={`inline-flex items-center gap-0.5 font-medium ${trend > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                            {trend > 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                            {Math.abs(trend)} vs last month
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  </div>
 
                   <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
                     <button onClick={() => openEdit(link)} className="flex items-center gap-1 text-xs text-slate-500 hover:text-blue-600 px-2 py-1 border border-slate-200 rounded">
@@ -323,6 +405,10 @@ export default function ClientAgenciesPage() {
             <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
             <p>Ask the agency for their invite code (they can find it on their own Platform Clients screen). They'll need to accept your request before you can create campaigns/POs with them.</p>
           </div>
+          <div className="flex items-start gap-2.5 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2.5 text-xs text-emerald-800">
+            <Shield className="w-4 h-4 mt-0.5 shrink-0" />
+            <p>Private by design: this only tells the agency that someone with this code wants to link. No pricing, other clients, or your other agency relationships are visible to them — or to you about them — until you both confirm, and even then only what your own campaigns actually need to share.</p>
+          </div>
           <Input
             label="Agency Invite Code"
             value={linkForm.invite_code}
@@ -394,6 +480,30 @@ export default function ClientAgenciesPage() {
         confirmLabel={removeMutation.isPending ? 'Removing...' : 'Remove'}
         danger
       />
+    </div>
+  );
+}
+
+// Half-star-aware rating display — filled/half/empty per star, plus the
+// text label the star count was derived from, since "4 stars" alone
+// doesn't say what that means without the words next to it.
+function StarRating({ stars, label }: { stars: number; label: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-0.5">
+        {[1, 2, 3, 4, 5].map((i) => {
+          const fill = Math.max(0, Math.min(1, stars - (i - 1)));
+          return (
+            <span key={i} className="relative w-3.5 h-3.5 inline-block">
+              <Star className="w-3.5 h-3.5 text-slate-200 absolute inset-0" fill="currentColor" />
+              <span className="absolute inset-0 overflow-hidden" style={{ width: `${fill * 100}%` }}>
+                <Star className="w-3.5 h-3.5 text-amber-400" fill="currentColor" />
+              </span>
+            </span>
+          );
+        })}
+      </div>
+      <span className="text-[11px] font-medium text-slate-500">{label}</span>
     </div>
   );
 }

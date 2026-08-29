@@ -809,15 +809,21 @@ function PlatformClientsTab() {
       </div>
 
       {org?.agency_invite_code && (
-        <Card className="p-4 mb-4 flex items-center justify-between flex-wrap gap-3 bg-blue-50/50 border-blue-100">
-          <div>
-            <p className="text-sm font-medium text-slate-800">Your agency invite code</p>
-            <p className="text-xs text-slate-500 mt-0.5">Share this with a client so they can link to you themselves from their "Agencies" page — accepting their request below adds them to your Clients automatically.</p>
+        <Card className="p-4 mb-4 bg-blue-50/50 border-blue-100">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <p className="text-sm font-medium text-slate-800">Your agency invite code</p>
+              <p className="text-xs text-slate-500 mt-0.5">Share this with a client so they can link to you themselves from their "Agencies" page — accepting their request below adds them to your Clients automatically.</p>
+            </div>
+            <button onClick={copyInviteCode} className="flex items-center gap-2 bg-white border border-blue-200 px-3 py-2 rounded-lg font-mono text-sm font-semibold text-blue-700 hover:bg-blue-50 transition shrink-0">
+              {org.agency_invite_code}
+              {codeCopied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-3.5 h-3.5 text-blue-400" />}
+            </button>
           </div>
-          <button onClick={copyInviteCode} className="flex items-center gap-2 bg-white border border-blue-200 px-3 py-2 rounded-lg font-mono text-sm font-semibold text-blue-700 hover:bg-blue-50 transition shrink-0">
-            {org.agency_invite_code}
-            {codeCopied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-3.5 h-3.5 text-blue-400" />}
-          </button>
+          <p className="flex items-start gap-1.5 text-xs text-slate-500 mt-3 pt-3 border-t border-blue-100">
+            <Shield className="w-3.5 h-3.5 mt-0.5 shrink-0 text-emerald-600" />
+            The code itself reveals nothing — nobody can look up or browse your clients, rates, or work in progress from it. It only lets someone submit a link request, which you approve or decline below before anything is shared either way.
+          </p>
         </Card>
       )}
 

@@ -1370,6 +1370,89 @@ export function exportClientPhotoComplianceReport(rows: ClientPhotoComplianceRow
   XLSX.writeFile(wb, `${fileName}.xlsx`);
 }
 
+// Corporate-style detail report — "who was given what, when, how much is
+// done, where, and what it actually looks like". Unlike
+// exportClientPhotoComplianceReport above (which is deliberately compact
+// — just counts, for a quick compliance scan), this is the full record:
+// one Sites sheet (scope, work assigned, status, dates) plus one row per
+// photo (not a count) with a real clickable link, exactly the shape a
+// corporate stakeholder report uses — never a rate/₹ figure anywhere,
+// same as every other client-portal export in this file.
+export interface ClientSiteDetailRow {
+  shop_name: string;
+  city: string | null;
+  district: string | null;
+  address: string | null;
+  campaign_name: string;
+  po_label: string;
+  agency_name: string;
+  status_label: string;
+  work_types: string;
+  total_area_sqft: number | null;
+  total_qty: number | null;
+  assigned_on: string;
+  survey_photo_count: number;
+  installation_photo_count: number;
+}
+export interface ClientSitePhotoRow {
+  shop_name: string;
+  city: string | null;
+  po_label: string;
+  photo_type: string;
+  uploaded_on: string;
+  photo_url: string;
+}
+
+export function exportClientSiteDetailReport(
+  sites: ClientSiteDetailRow[],
+  surveyPhotos: ClientSitePhotoRow[],
+  installPhotos: ClientSitePhotoRow[],
+  fileName: string = 'site-detail-report'
+) {
+  const wb = XLSX.utils.book_new();
+
+  const siteData = sites.map((r) => ({
+    'Site': r.shop_name,
+    'City': r.city || '',
+    'District': r.district || '',
+    'Address': r.address || '',
+    'Campaign': r.campaign_name,
+    'Work Order': r.po_label,
+    'Agency': r.agency_name,
+    'Status': r.status_label,
+    'Work Type(s)': r.work_types,
+    'Total Area (sq ft)': r.total_area_sqft ?? '',
+    'Total Qty (pieces)': r.total_qty ?? '',
+    'Assigned On': r.assigned_on,
+    'Survey Photos': r.survey_photo_count,
+    'Installation Photos': r.installation_photo_count,
+  }));
+  const sitesWs = XLSX.utils.json_to_sheet(siteData.length > 0 ? siteData : [{ 'Site': 'No data' }]);
+  if (siteData.length > 0) sitesWs['!cols'] = Object.keys(siteData[0]).map((h) => ({ wch: Math.min(Math.max(h.length + 2, 12), 34) }));
+  XLSX.utils.book_append_sheet(wb, sitesWs, 'Sites');
+
+  function appendPhotoSheet(name: string, rows: ClientSitePhotoRow[]) {
+    const data = rows.map((r) => ({
+      'Site': r.shop_name, 'City': r.city || '', 'Work Order': r.po_label,
+      'Photo Type': r.photo_type, 'Uploaded On': r.uploaded_on, 'Photo Link': r.photo_url,
+    }));
+    const ws = XLSX.utils.json_to_sheet(data.length > 0 ? data : [{ 'Site': 'No data' }]);
+    if (data.length > 0) {
+      ws['!cols'] = [{ wch: 22 }, { wch: 14 }, { wch: 20 }, { wch: 14 }, { wch: 18 }, { wch: 46 }];
+      const linkCol = 5; // 'Photo Link' is the 6th column (index 5)
+      rows.forEach((r, i) => {
+        const cellRef = `${XLSX.utils.encode_col(linkCol)}${i + 2}`;
+        if (r.photo_url && ws[cellRef]) ws[cellRef].l = { Target: r.photo_url };
+      });
+    }
+    XLSX.utils.book_append_sheet(wb, ws, name);
+  }
+  appendPhotoSheet('Survey Photos', surveyPhotos);
+  appendPhotoSheet('Installation Photos', installPhotos);
+
+  XLSX.writeFile(wb, `${fileName}.xlsx`);
+}
+
 // ---------------------------------------------------------------------------
 // PowerPoint exports (already single-deck for any number of shops)
 // ---------------------------------------------------------------------------

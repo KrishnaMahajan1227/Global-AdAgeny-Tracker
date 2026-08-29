@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { Card, Drawer, Select, Textarea, EmptyState } from '@/components/ui';
+import { Card, Drawer, Select, Textarea, EmptyState, Modal, Input } from '@/components/ui';
 import { ROLE_LABELS } from '@/lib/types';
 import {
   Building2, Users, Store, CheckCircle2, ShoppingCart, LogOut, Search,
-  Link2, Shield, Loader2,
+  Link2, Shield, Loader2, Plus, KeyRound, Mail,
 } from 'lucide-react';
 
 // A subscription-status pill, deliberately separate from the app-wide
@@ -36,6 +36,8 @@ export default function SuperAdminPage() {
   const [typeFilter, setTypeFilter] = useState<'' | 'agency' | 'client'>('');
   const [statusFilter, setStatusFilter] = useState('');
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
+  const [addOrgOpen, setAddOrgOpen] = useState(false);
+  const [addOrgForm, setAddOrgForm] = useState({ org_name: '', org_type: 'agency' as 'agency' | 'client', admin_full_name: '', admin_email: '', admin_phone: '', admin_password: '' });
 
   // Every query below is scoped only by the super-admin-only RLS policies
   // added in migration 0072 — none of this touches rate_cards, invoices,
@@ -56,9 +58,9 @@ export default function SuperAdminPage() {
   const { data: allUsers } = useQuery({
     queryKey: ['superadmin-users'],
     queryFn: async () => {
-      const { data, error } = await supabase.from('profiles').select('id, organization_id, full_name, role, is_active');
+      const { data, error } = await supabase.rpc('super_admin_list_users');
       if (error) throw error;
-      return data as { id: string; organization_id: string | null; full_name: string; role: string; is_active: boolean }[];
+      return data as { id: string; organization_id: string | null; full_name: string; role: string; is_active: boolean; email: string }[];
     },
   });
 
@@ -157,6 +159,26 @@ export default function SuperAdminPage() {
     });
   }, [orgs, search, typeFilter, statusFilter]);
 
+  const createOrgMutation = useMutation({
+    mutationFn: async () => {
+      const { error } = await supabase.rpc('super_admin_create_organization', {
+        p_org_name: addOrgForm.org_name,
+        p_org_type: addOrgForm.org_type,
+        p_admin_full_name: addOrgForm.admin_full_name,
+        p_admin_email: addOrgForm.admin_email,
+        p_admin_phone: addOrgForm.admin_phone,
+        p_admin_password: addOrgForm.admin_password,
+      });
+      if (error) throw new Error(error.message.replace(/^.*?:\s*/, ''));
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['superadmin-orgs'] });
+      queryClient.invalidateQueries({ queryKey: ['superadmin-users'] });
+      setAddOrgOpen(false);
+      setAddOrgForm({ org_name: '', org_type: 'agency', admin_full_name: '', admin_email: '', admin_phone: '', admin_password: '' });
+    },
+  });
+
   const selectedOrg = (orgs || []).find((o) => o.id === selectedOrgId) || null;
 
   return (
@@ -217,6 +239,15 @@ export default function SuperAdminPage() {
         </Card>
 
         {/* Organizations table */}
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-slate-700">All Organizations</h2>
+          <button
+            onClick={() => setAddOrgOpen(true)}
+            className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg text-sm font-medium transition"
+          >
+            <Plus className="w-4 h-4" /> Add Organization
+          </button>
+        </div>
         <Card className="overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -289,6 +320,52 @@ export default function SuperAdminPage() {
         allOrgs={orgs || []}
         onSaved={() => queryClient.invalidateQueries({ queryKey: ['superadmin-orgs'] })}
       />
+
+      <Modal open={addOrgOpen} onClose={() => setAddOrgOpen(false)} title="Add Organization" size="md">
+        <div className="space-y-4">
+          <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-1 w-fit">
+            <button
+              type="button"
+              onClick={() => setAddOrgForm({ ...addOrgForm, org_type: 'agency' })}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition ${addOrgForm.org_type === 'agency' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}
+            >
+              Agency
+            </button>
+            <button
+              type="button"
+              onClick={() => setAddOrgForm({ ...addOrgForm, org_type: 'client' })}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition ${addOrgForm.org_type === 'client' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}
+            >
+              Client
+            </button>
+          </div>
+
+          <Input label="Organization Name" value={addOrgForm.org_name} onChange={(v) => setAddOrgForm({ ...addOrgForm, org_name: v })} placeholder="e.g. Darshan Ad Agency" required />
+
+          <div className="border-t border-slate-100 pt-4">
+            <p className="text-sm font-medium text-slate-700 mb-3">First login ({addOrgForm.org_type === 'agency' ? 'Agency Owner' : 'Client Admin'})</p>
+            <div className="space-y-3">
+              <Input label="Full Name" value={addOrgForm.admin_full_name} onChange={(v) => setAddOrgForm({ ...addOrgForm, admin_full_name: v })} required />
+              <div className="grid grid-cols-2 gap-3">
+                <Input label="Email" type="email" value={addOrgForm.admin_email} onChange={(v) => setAddOrgForm({ ...addOrgForm, admin_email: v })} required />
+                <Input label="Phone" value={addOrgForm.admin_phone} onChange={(v) => setAddOrgForm({ ...addOrgForm, admin_phone: v })} placeholder="+91 90000 00000" />
+              </div>
+              <Input label="Initial Password" type="password" value={addOrgForm.admin_password} onChange={(v) => setAddOrgForm({ ...addOrgForm, admin_password: v })} required />
+            </div>
+          </div>
+
+          {createOrgMutation.isError && <p className="text-sm text-red-600">{(createOrgMutation.error as Error).message}</p>}
+
+          <button
+            onClick={() => createOrgMutation.mutate()}
+            disabled={createOrgMutation.isPending || !addOrgForm.org_name || !addOrgForm.admin_full_name || !addOrgForm.admin_email || !addOrgForm.admin_password}
+            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition disabled:opacity-50"
+          >
+            {createOrgMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+            {createOrgMutation.isPending ? 'Creating...' : 'Create Organization'}
+          </button>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -314,7 +391,7 @@ function OrgDetailDrawer({
 }: {
   org: OrgRow | null;
   onClose: () => void;
-  users: { id: string; full_name: string; role: string; is_active: boolean }[];
+  users: { id: string; full_name: string; role: string; is_active: boolean; email: string }[];
   shopStats?: { total: number; completed: number };
   clientCount: number;
   links: { id: string; client_org_id: string; agency_org_id: string; status: string }[];
@@ -324,6 +401,7 @@ function OrgDetailDrawer({
   const [status, setStatus] = useState('');
   const [plan, setPlan] = useState('');
   const [notes, setNotes] = useState('');
+  const [credentialsTarget, setCredentialsTarget] = useState<{ id: string; full_name: string; email: string } | null>(null);
 
   // Re-seed the local edit form whenever a different org is opened.
   useEffect(() => {
@@ -428,13 +506,23 @@ function OrgDetailDrawer({
           {/* Users */}
           <div>
             <p className="text-sm font-semibold text-slate-900 mb-2 flex items-center gap-1.5"><Users className="w-4 h-4 text-slate-400" /> Users ({users.length})</p>
-            <div className="space-y-1.5 max-h-64 overflow-y-auto">
+            <div className="space-y-1.5 max-h-72 overflow-y-auto">
               {users.map((u) => (
-                <div key={u.id} className="flex items-center justify-between text-xs bg-slate-50 rounded-lg px-3 py-2">
-                  <span className="text-slate-700 font-medium">{u.full_name}</span>
-                  <div className="flex items-center gap-2">
+                <div key={u.id} className="flex items-center justify-between text-xs bg-slate-50 rounded-lg px-3 py-2 gap-2">
+                  <div className="min-w-0">
+                    <p className="text-slate-700 font-medium truncate">{u.full_name}</p>
+                    <p className="text-slate-400 truncate flex items-center gap-1"><Mail className="w-3 h-3 shrink-0" /> {u.email}</p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
                     <span className="text-slate-500">{ROLE_LABELS[u.role] || u.role}</span>
                     {!u.is_active && <span className="text-red-500 font-medium">Inactive</span>}
+                    <button
+                      onClick={() => setCredentialsTarget({ id: u.id, full_name: u.full_name, email: u.email })}
+                      title="Reset this user's email/password"
+                      className="text-blue-600 hover:text-blue-700 shrink-0"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
               ))}
@@ -443,6 +531,60 @@ function OrgDetailDrawer({
           </div>
         </div>
       )}
+
+      <ResetCredentialsModal target={credentialsTarget} onClose={() => setCredentialsTarget(null)} />
     </Drawer>
+  );
+}
+
+// Change any user's login email and/or password — the "for now" override
+// the Super Admin needs for support cases (a client locked out, an
+// agency owner's email changed, etc.). Either field can be left blank to
+// leave that credential untouched; the RPC itself enforces the same
+// (only-a-super-admin, 8-char-minimum-password) rules server-side, this
+// is just the form around it.
+function ResetCredentialsModal({ target, onClose }: { target: { id: string; full_name: string; email: string } | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+
+  useEffect(() => {
+    if (target) { setEmail(target.email); setPassword(''); }
+  }, [target]);
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      if (!target) return;
+      const { error } = await supabase.rpc('super_admin_update_user_credentials', {
+        p_user_id: target.id,
+        p_new_email: email !== target.email ? email : null,
+        p_new_password: password || null,
+      });
+      if (error) throw new Error(error.message.replace(/^.*?:\s*/, ''));
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['superadmin-users'] });
+      onClose();
+    },
+  });
+
+  return (
+    <Modal open={!!target} onClose={onClose} title={`Reset Login — ${target?.full_name || ''}`} size="sm">
+      {target && (
+        <div className="space-y-4">
+          <Input label="Email" type="email" value={email} onChange={setEmail} required />
+          <Input label="New Password (leave blank to keep current)" type="password" value={password} onChange={setPassword} placeholder="At least 8 characters" />
+          {mutation.isError && <p className="text-sm text-red-600">{(mutation.error as Error).message}</p>}
+          <button
+            onClick={() => mutation.mutate()}
+            disabled={mutation.isPending || !email}
+            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition disabled:opacity-50"
+          >
+            {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+            {mutation.isPending ? 'Saving...' : 'Save Login Changes'}
+          </button>
+        </div>
+      )}
+    </Modal>
   );
 }

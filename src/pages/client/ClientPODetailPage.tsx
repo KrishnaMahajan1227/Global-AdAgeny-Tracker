@@ -19,7 +19,7 @@ import {
 import {
   ArrowLeft, Store, MapPin, FileText, Loader2, XCircle, ListChecks, TrendingUp, Search,
   LayoutDashboard, Image as ImageIcon, PieChart, AlertTriangle, AlertCircle, X, Pencil, Plus, Trash2, Map as MapIcon,
-  UploadCloud, Phone, Ruler, ChevronRight,
+  UploadCloud, Phone, Ruler, ChevronRight, CheckCircle2, LucideIcon,
 } from 'lucide-react';
 import { useClientRealtimeInvalidate } from '@/lib/useClientRealtimeInvalidate';
 import { ClientPoSiteMap } from './ClientPoSiteMap';
@@ -883,6 +883,44 @@ export default function ClientPODetailPage() {
 
       {tab === 'report' && (
         <div className="space-y-6">
+          {/* Headline numbers first — what a decision-maker actually
+              wants before scrolling into any table or chart. */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <ReportStat icon={Store} label="Total Sites" value={String(photoComplianceRows.length)} color="text-purple-600 bg-purple-50" />
+            <ReportStat icon={CheckCircle2} label="Overall Completion" value={completionPct != null ? `${Math.round(completionPct)}%` : '—'} color="text-emerald-600 bg-emerald-50" />
+            <ReportStat icon={ImageIcon} label="Photo-Compliant" value={photoComplianceRows.length > 0 ? `${photoComplianceRows.length - nonCompliantCount}/${photoComplianceRows.length}` : '—'} color="text-blue-600 bg-blue-50" />
+            <ReportStat icon={AlertTriangle} label="Needs Attention" value={String(nonCompliantCount)} color={nonCompliantCount > 0 ? 'text-amber-600 bg-amber-50' : 'text-slate-400 bg-slate-100'} />
+          </div>
+
+          <Card className="p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <PieChart className="w-4.5 h-4.5 text-slate-400" />
+              <h2 className="font-semibold text-slate-900">Progress by Line Item</h2>
+            </div>
+            {(progress || []).length === 0 ? (
+              <EmptyState icon={<PieChart className="w-10 h-10" />} title="No line items yet" />
+            ) : (
+              <>
+                <div className="max-w-sm mb-5">
+                  <Select label="Line Item" value={reportLineItemId} onChange={setReportLineItemId} options={reportLineItemOptions} />
+                </div>
+                {!selectedProgressRow ? (
+                  <p className="text-sm text-slate-400 py-6 text-center">Pick a line item to see its progress breakdown.</p>
+                ) : (
+                  <LineItemProgressChart
+                    completionPct={lineItemCompletionPct}
+                    completionLabel={STAGE_STEPS.find((s) => s.key === lineItemFinalStage)?.label || 'Complete'}
+                    stages={lineItemStageValues}
+                  />
+                )}
+              </>
+            )}
+          </Card>
+
+          {/* Bounded height with its own internal scroll rather than
+              letting a long site list stretch the whole page — this is
+              what actually keeps the Report tab usable once a Work Order
+              has hundreds of sites instead of a handful. */}
           <Card className="p-5">
             <div className="flex items-center gap-2 mb-3">
               <ImageIcon className="w-4.5 h-4.5 text-slate-400" />
@@ -893,7 +931,7 @@ export default function ClientPODetailPage() {
                 </span>
               )}
             </div>
-            <div className="border border-slate-200 rounded-lg overflow-x-auto max-h-80 overflow-y-auto">
+            <div className="border border-slate-200 rounded-lg overflow-x-auto max-h-96 overflow-y-auto">
               <table className="w-full text-sm min-w-[560px]">
                 <thead className="bg-slate-50 text-slate-500 text-xs uppercase sticky top-0">
                   <tr>
@@ -922,31 +960,6 @@ export default function ClientPODetailPage() {
                 </tbody>
               </table>
             </div>
-          </Card>
-
-          <Card className="p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <PieChart className="w-4.5 h-4.5 text-slate-400" />
-              <h2 className="font-semibold text-slate-900">Progress by Line Item</h2>
-            </div>
-            {(progress || []).length === 0 ? (
-              <EmptyState icon={<PieChart className="w-10 h-10" />} title="No line items yet" />
-            ) : (
-              <>
-                <div className="max-w-sm mb-5">
-                  <Select label="Line Item" value={reportLineItemId} onChange={setReportLineItemId} options={reportLineItemOptions} />
-                </div>
-                {!selectedProgressRow ? (
-                  <p className="text-sm text-slate-400 py-6 text-center">Pick a line item to see its progress breakdown.</p>
-                ) : (
-                  <LineItemProgressChart
-                    completionPct={lineItemCompletionPct}
-                    completionLabel={STAGE_STEPS.find((s) => s.key === lineItemFinalStage)?.label || 'Complete'}
-                    stages={lineItemStageValues}
-                  />
-                )}
-              </>
-            )}
           </Card>
         </div>
       )}
@@ -1283,6 +1296,20 @@ function DetailRow({ label, value }: { label: string; value: string }) {
     <div className="flex justify-between gap-3">
       <dt className="text-slate-400 shrink-0">{label}</dt>
       <dd className="text-slate-700 text-right">{value}</dd>
+    </div>
+  );
+}
+
+function ReportStat({ icon: Icon, label, value, color }: { icon: LucideIcon; label: string; value: string; color: string }) {
+  return (
+    <div className="bg-white border border-slate-200 rounded-xl p-4 flex items-center gap-3">
+      <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${color}`}>
+        <Icon className="w-4.5 h-4.5" />
+      </div>
+      <div className="min-w-0">
+        <p className="text-lg font-bold text-slate-900 leading-tight truncate">{value}</p>
+        <p className="text-[11px] text-slate-500 truncate">{label}</p>
+      </div>
     </div>
   );
 }

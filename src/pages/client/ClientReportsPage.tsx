@@ -5,7 +5,7 @@ import { useAuth } from '@/lib/auth';
 import { Card, EmptyState, PageHeader, StatusBadge, Select } from '@/components/ui';
 import { LineItemProgressChart } from '@/components/LineItemProgressChart';
 import { exportClientCampaignReport, exportClientPhotoComplianceReport, exportClientSiteDetailReport, exportClientCampaignReportPDF, exportClientSiteDetailPDF } from '@/lib/reports';
-import { STATUS_LABELS, type PurchaseOrder, type ClientPOLineItemProgress, type Campaign, type WorkItem, type SurveyPhoto, type InstallationProof, type Organization } from '@/lib/types';
+import { STATUS_LABELS, type PurchaseOrder, type ClientPOLineItemProgress, type Campaign, type WorkItem, type SurveyPhoto, type Organization } from '@/lib/types';
 import {
   buildClientCampaignRows, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS, stagePct, finalStage,
 } from '@/lib/clientPortal';
@@ -105,9 +105,9 @@ export default function ClientReportsPage() {
   const { data: workItems } = useQuery({
     queryKey: ['client-reports-work-items', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('work_items').select('id, shop_id, work_type_name, survey_area, survey_quantity, approved_area, approved_quantity, uom, created_at');
+      const { data, error } = await supabase.from('work_items').select('id, shop_id, work_type_name, survey_area, survey_quantity, approved_area, approved_quantity, created_at');
       if (error) throw error;
-      return data as Pick<WorkItem, 'id' | 'shop_id' | 'work_type_name' | 'survey_area' | 'survey_quantity' | 'approved_area' | 'approved_quantity' | 'uom' | 'created_at'>[];
+      return data as Pick<WorkItem, 'id' | 'shop_id' | 'work_type_name' | 'survey_area' | 'survey_quantity' | 'approved_area' | 'approved_quantity' | 'created_at'>[];
     },
     enabled: !!orgId,
   });
@@ -122,12 +122,17 @@ export default function ClientReportsPage() {
     enabled: !!orgId,
   });
 
+  // InstallationProof's timestamp column is `captured_at`, not
+  // `created_at` — selected and re-keyed to `created_at` right here so
+  // every downstream use in this file (which treats survey and
+  // installation photos identically) can stay uniform without needing to
+  // special-case one of the two photo types.
   const { data: installPhotos } = useQuery({
     queryKey: ['client-reports-install-photos', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('installation_proofs').select('shop_id, photo_url, photo_type, created_at');
+      const { data, error } = await supabase.from('installation_proofs').select('shop_id, photo_url, photo_type, captured_at');
       if (error) throw error;
-      return data as Pick<InstallationProof, 'shop_id' | 'photo_url' | 'photo_type' | 'created_at'>[];
+      return (data || []).map((p) => ({ shop_id: p.shop_id, photo_url: p.photo_url, photo_type: p.photo_type, created_at: p.captured_at })) as { shop_id: string; photo_url: string; photo_type: string; created_at: string }[];
     },
     enabled: !!orgId,
   });
@@ -329,7 +334,23 @@ export default function ClientReportsPage() {
   }
 
   async function handleExportCampaignPDF() {
-    await exportClientCampaignReportPDF(campaignRows, org);
+    await exportClientCampaignReportPDF(
+      campaignRows.map((r) => {
+        const po = posInCampaignFilter.find((p) => p.id === r.po_id);
+        const campaignName = po?.campaign_id ? campaignById.get(po.campaign_id)?.name || '—' : '—';
+        return {
+          campaign_name: campaignName,
+          po_number: r.po_number,
+          po_date: r.po_date,
+          agency_name: r.agency_name,
+          fulfillment_type: r.fulfillment_type,
+          work_status: CLIENT_PO_WORK_STATUS_LABELS[r.work_status],
+          sites_total: r.sites_total,
+          completion_pct: r.completion_pct,
+        };
+      }),
+      org
+    );
   }
 
   // ---- Per-line-item progress (donut + stage bars) ----

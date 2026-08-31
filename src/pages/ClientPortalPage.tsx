@@ -25,12 +25,12 @@ import {
 // Organization user never sees agency rate, Work Order amounts, or
 // invoice/payment data.
 const NAV_ITEMS = [
-  { to: '/client', label: 'Overview', icon: LayoutDashboard, end: true, accent: 'text-blue-400', countKey: null as null | 'campaigns' | 'shops' | 'agencies' },
-  { to: '/client/campaigns', label: 'Campaigns', icon: ClipboardList, end: false, accent: 'text-violet-400', countKey: 'campaigns' as const },
-  { to: '/client/shops', label: 'Shops', icon: Store, end: false, accent: 'text-purple-400', countKey: 'shops' as const },
-  { to: '/client/agencies', label: 'Agencies', icon: Building2, end: false, accent: 'text-amber-400', countKey: 'agencies' as const },
-  { to: '/client/reports', label: 'Reports', icon: FileBarChart, end: false, accent: 'text-teal-400', countKey: null },
-  { to: '/client/account', label: 'My Account', icon: User, end: false, accent: 'text-slate-400', countKey: null },
+  { to: '/client', label: 'Overview', icon: LayoutDashboard, end: true, accent: 'text-blue-400' },
+  { to: '/client/campaigns', label: 'Campaigns', icon: ClipboardList, end: false, accent: 'text-violet-400' },
+  { to: '/client/shops', label: 'Shops', icon: Store, end: false, accent: 'text-purple-400' },
+  { to: '/client/agencies', label: 'Agencies', icon: Building2, end: false, accent: 'text-amber-400' },
+  { to: '/client/reports', label: 'Reports', icon: FileBarChart, end: false, accent: 'text-teal-400' },
+  { to: '/client/account', label: 'My Account', icon: User, end: false, accent: 'text-slate-400' },
 ];
 
 export default function ClientPortalPage() {
@@ -49,44 +49,6 @@ export default function ClientPortalPage() {
     },
     enabled: !!orgId,
   });
-
-  // Live counts for the sidebar's badges — each a `head: true` count
-  // query (returns just a number, never the rows), so this stays cheap
-  // and accurate regardless of how many agencies or shops this client
-  // ends up with. Independent from whatever the currently-open page has
-  // already fetched, since the sidebar is a shared shell around every
-  // client page, not just Overview.
-  const { data: campaignCount } = useQuery({
-    queryKey: ['client-nav-count-campaigns', orgId],
-    queryFn: async () => {
-      const { count, error } = await supabase.from('campaigns').select('id', { count: 'exact', head: true }).eq('client_org_id', orgId).eq('status', 'active');
-      if (error) throw error;
-      return count ?? 0;
-    },
-    enabled: !!orgId,
-    refetchInterval: 30000,
-  });
-  const { data: shopCount } = useQuery({
-    queryKey: ['client-nav-count-shops', orgId],
-    queryFn: async () => {
-      const { count, error } = await supabase.from('shops').select('id', { count: 'exact', head: true }).neq('status', 'cancelled');
-      if (error) throw error;
-      return count ?? 0;
-    },
-    enabled: !!orgId,
-    refetchInterval: 30000,
-  });
-  const { data: agencyCount } = useQuery({
-    queryKey: ['client-nav-count-agencies', orgId],
-    queryFn: async () => {
-      const { count, error } = await supabase.from('client_agency_links').select('id', { count: 'exact', head: true }).eq('client_org_id', orgId).eq('status', 'active');
-      if (error) throw error;
-      return count ?? 0;
-    },
-    enabled: !!orgId,
-    refetchInterval: 30000,
-  });
-  const navCounts = { campaigns: campaignCount, shops: shopCount, agencies: agencyCount };
 
   async function handleSignOut() {
     await signOut();
@@ -125,7 +87,6 @@ export default function ClientPortalPage() {
         <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
-            const count = item.countKey ? navCounts[item.countKey] : undefined;
             return (
               <NavLink
                 key={item.to}
@@ -144,11 +105,6 @@ export default function ClientPortalPage() {
                   <>
                     <Icon className={`w-[18px] h-[18px] shrink-0 ${isActive ? item.accent : ''}`} />
                     <span className="flex-1">{item.label}</span>
-                    {!!count && count > 0 && (
-                      <span className={`text-[11px] font-semibold rounded-full px-1.5 py-0.5 min-w-[20px] text-center ${isActive ? 'bg-slate-700 text-slate-200' : 'bg-slate-800 text-slate-400'}`}>
-                        {count}
-                      </span>
-                    )}
                   </>
                 )}
               </NavLink>

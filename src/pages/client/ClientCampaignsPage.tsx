@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { useClientRealtimeInvalidate } from '@/lib/useClientRealtimeInvalidate';
@@ -11,12 +11,12 @@ import {
 import { logAudit } from '@/lib/helpers';
 import type { Campaign, PurchaseOrder, ClientPOLineItemProgress } from '@/lib/types';
 import {
-  buildClientCampaignRows, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS,
+  buildClientCampaignRows,
   type ClientCampaignRow,
 } from '@/lib/clientPortal';
 import {
-  Plus, Megaphone, ArrowUpRight, ArrowRight, ShoppingCart, Store, Loader2, Pencil, Trash2,
-  Search, ChevronDown, Building2, Calendar, Layers, CheckCircle2, PlayCircle, Ban,
+  Plus, Megaphone, ShoppingCart, Store, Loader2, Pencil, Trash2,
+  Search, Calendar, CheckCircle2, PlayCircle, Ban,
 } from 'lucide-react';
 
 type PoRow = PurchaseOrder & { agency_org: { name: string } | null };
@@ -45,26 +45,28 @@ type CampaignRow = {
   poCount: number;
   siteTotal: number;
   pct: number | null;
-  agencyNames: string[];
   agencyIds: string[];
   zones: string[];
 };
 
-// Campaigns — the top of the client's flow, exactly as asked: decide what
-// campaign to run FIRST, then open it to add the PO(s) under it (each PO
-// deciding which agency it goes to) — see ClientCampaignDetailPage.tsx.
-// A campaign is purely a client-owned grouping; it's never visible to,
-// or editable by, any agency.
+// Campaigns — the top of the client's flow: decide what campaign to run
+// FIRST, then open it to add the PO(s) under it (each PO deciding which
+// agency it goes to) — see ClientCampaignDetailPage.tsx. A campaign is
+// purely a client-owned grouping; it's never visible to, or editable by,
+// any agency.
 //
-// Redesigned as a dense, filterable list (rather than a card grid) so a
-// client managing 1000+ campaigns can actually scan and locate one —
-// every campaign row can be expanded in place to see its Work Orders
-// (agency, sites, progress, status) without leaving the list, or opened
-// fully via "Open Campaign" for the complete detail view.
+// Every row is a single click straight into that campaign — no in-place
+// accordion, no separate "Open Campaign" link to hunt for once you've
+// already found the row you want. Agencies show as compact reference
+// codes (A1, A2…) rather than full names in this dense list — with
+// dozens of agencies, repeating full names in every row is what actually
+// makes a list like this unreadable; the full name is always one click
+// away on the campaign/Work Order itself.
 export default function ClientCampaignsPage() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
@@ -74,7 +76,6 @@ export default function ClientCampaignsPage() {
   const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [modalOpen, setModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Campaign | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Campaign | null>(null);
@@ -146,15 +147,22 @@ export default function ClientCampaignsPage() {
         const { error } = await supabase.from('campaigns').update(payload).eq('id', editTarget.id);
         if (error) throw error;
         await logAudit('campaigns', editTarget.id, 'update', null, null, null, `Edited campaign "${payload.name}"`);
+        return { id: editTarget.id, isNew: false };
       } else {
         const { data, error } = await supabase.from('campaigns').insert({ ...payload, client_org_id: orgId, created_by: profile?.id }).select().single();
         if (error) throw error;
         await logAudit('campaigns', data.id, 'insert', null, null, null, `Created campaign "${payload.name}"`);
+        return { id: data.id as string, isNew: true };
       }
     },
-    onSuccess: () => {
+    onSuccess: ({ id, isNew }) => {
       queryClient.invalidateQueries({ queryKey: ['client-campaigns', orgId] });
       closeModal();
+      // A freshly created campaign is empty — nothing to see on the list
+      // page. Go straight into it so a Work Order can be added right
+      // away, instead of landing back on the list and making the client
+      // find and re-open what they just made.
+      if (isNew) navigate(`/client/campaigns/${id}`);
     },
   });
 
@@ -175,23 +183,22 @@ export default function ClientCampaignsPage() {
     setForm(emptyForm);
     setModalOpen(true);
   }
-  function openEdit(c: Campaign) {
+  function openEdit(c: Campaign, e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
     setEditTarget(c);
     setForm({ name: c.name, description: c.description || '', start_date: c.start_date || '', end_date: c.end_date || '', status: c.status });
     setModalOpen(true);
+  }
+  function confirmDelete(c: Campaign, e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDeleteTarget(c);
   }
   function closeModal() {
     setModalOpen(false);
     setEditTarget(null);
     setForm(emptyForm);
-  }
-  function toggleExpand(id: string) {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
   }
 
   const poRowsByCampaign = useMemo(() => {
@@ -202,6 +209,22 @@ export default function ClientCampaignsPage() {
       arr.push(po);
       map.set(po.campaign_id, arr);
     }
+    return map;
+  }, [pos]);
+
+  // Stable short reference codes (A1, A2…) for every distinct agency this
+  // client works with, assigned alphabetically so they don't reshuffle
+  // between renders. Used only for this dense list's own display — every
+  // other screen (Overview, the campaign/Work Order detail pages, the
+  // Agencies page itself) keeps showing full agency names as normal.
+  const agencyCodeById = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const po of pos || []) {
+      if (po.assigned_agency_id) names.set(po.assigned_agency_id, po.agency_org?.name || 'Agency');
+    }
+    const sorted = Array.from(names.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+    const map = new Map<string, { code: string; name: string }>();
+    sorted.forEach(([id, name], i) => map.set(id, { code: `A${i + 1}`, name }));
     return map;
   }, [pos]);
 
@@ -227,19 +250,15 @@ export default function ClientCampaignsPage() {
       }
 
       const agencyIds = Array.from(new Set(wos.filter((p) => p.assigned_agency_id).map((p) => p.assigned_agency_id as string)));
-      const agencyNames = Array.from(new Set(poRows.map((r) => r.agency_name))).filter((n) => n && n !== 'Unassigned');
 
-      return { campaign: c, poRows, poCount: wos.length, siteTotal, pct, agencyNames, agencyIds, zones: Array.from(zones) };
+      return { campaign: c, poRows, poCount: wos.length, siteTotal, pct, agencyIds, zones: Array.from(zones) };
     });
   }, [campaigns, poRowsByCampaign, shops, progress]);
 
-  const agencyOptions = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const po of pos || []) {
-      if (po.assigned_agency_id) map.set(po.assigned_agency_id, po.agency_org?.name || 'Agency');
-    }
-    return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
-  }, [pos]);
+  const agencyOptions = useMemo(
+    () => Array.from(agencyCodeById.entries()).sort((a, b) => a[1].code.localeCompare(b[1].code)),
+    [agencyCodeById]
+  );
 
   const zoneOptions = useMemo(
     () => Array.from(new Set((shops || []).map((s) => s.zone).filter((z): z is string => !!z))).sort(),
@@ -307,10 +326,23 @@ export default function ClientCampaignsPage() {
         }
       />
 
-      {/* KPI strip — a fast, at-a-glance summary before scanning 1000+ rows */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
-        <KpiCard icon={<Megaphone className="w-4.5 h-4.5" />} iconClass="bg-violet-50 text-violet-600" label="Total Campaigns" value={kpi.total.toLocaleString('en-IN')} />
-        <KpiCard icon={<PlayCircle className="w-4.5 h-4.5" />} iconClass="bg-blue-50 text-blue-600" label="Active" value={kpi.active.toLocaleString('en-IN')} />
+      {/* KPI strip — the three counts that matter at a glance. "Active"
+          moved into its own small chip next to Total Campaigns rather
+          than taking a full card, since it's a detail of that number,
+          not a separate headline metric. */}
+      <div className="grid grid-cols-3 gap-3 mb-5">
+        <Card className="p-4 flex items-center gap-3">
+          <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 bg-violet-50 text-violet-600"><Megaphone className="w-4.5 h-4.5" /></div>
+          <div className="min-w-0 flex-1">
+            <p className="text-xl font-bold text-slate-900 leading-tight">{kpi.total.toLocaleString('en-IN')}</p>
+            <p className="text-xs text-slate-500 flex items-center gap-1.5">
+              Total Campaigns
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-full">
+                <PlayCircle className="w-2.5 h-2.5" /> {kpi.active} active
+              </span>
+            </p>
+          </div>
+        </Card>
         <KpiCard icon={<ShoppingCart className="w-4.5 h-4.5" />} iconClass="bg-amber-50 text-amber-600" label="Work Orders" value={kpi.workOrders.toLocaleString('en-IN')} />
         <KpiCard icon={<Store className="w-4.5 h-4.5" />} iconClass="bg-emerald-50 text-emerald-600" label="Total Sites" value={kpi.sites.toLocaleString('en-IN')} />
       </div>
@@ -352,7 +384,7 @@ export default function ClientCampaignsPage() {
           <FilterSection label="Agency">
             <select value={agencyFilter} onChange={(e) => setAgencyFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
               <option value="">All Agencies ({agencyOptions.length})</option>
-              {agencyOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+              {agencyOptions.map(([id, v]) => <option key={id} value={id}>{v.code} — {v.name}</option>)}
             </select>
           </FilterSection>
         )}
@@ -373,152 +405,97 @@ export default function ClientCampaignsPage() {
           <span className="w-24 text-center">Work Orders</span>
           <span className="w-20 text-center">Sites</span>
           <span className="w-40">Progress</span>
-          <span className="w-44">Agencies</span>
+          <span className="w-32">Agencies</span>
           <span className="w-16" />
         </div>
       )}
 
-      <div className="space-y-3">
+      <div className="space-y-2.5">
         {isLoading && (
           <>
             {[...Array(4)].map((_, i) => (
-              <div key={i} className="h-24 rounded-xl border border-slate-200 bg-slate-50 animate-pulse" />
+              <div key={i} className="h-20 rounded-xl border border-slate-200 bg-slate-50 animate-pulse" />
             ))}
           </>
         )}
 
-        {!isLoading && pagedRows.map(({ campaign: c, poRows, poCount, siteTotal, pct, agencyNames }) => {
-          const isOpen = expanded.has(c.id);
-          return (
-            <Card key={c.id} className="overflow-hidden hover:border-blue-300 hover:shadow-md transition">
-              <div className="p-4 lg:p-5">
-                <div className="flex flex-wrap lg:flex-nowrap items-center gap-4 lg:gap-6">
-                  {/* Campaign identity */}
-                  <button
-                    onClick={() => toggleExpand(c.id)}
-                    className="flex items-start gap-3 flex-1 min-w-0 text-left group"
-                  >
-                    <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-50 to-violet-100 flex items-center justify-center shrink-0 mt-0.5">
-                      <Megaphone className="w-5 h-5 text-violet-600" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-semibold text-slate-900 group-hover:text-blue-700 transition truncate">{c.name}</span>
-                        <CampaignStatusBadge status={c.status} />
-                      </div>
-                      {c.description && <p className="text-xs text-slate-500 mt-0.5 line-clamp-1 max-w-md">{c.description}</p>}
-                      {(c.start_date || c.end_date) && (
-                        <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
-                          <Calendar className="w-3 h-3" />
-                          {c.start_date ? new Date(c.start_date).toLocaleDateString('en-IN') : '—'} → {c.end_date ? new Date(c.end_date).toLocaleDateString('en-IN') : '—'}
-                        </p>
-                      )}
-                    </div>
-                  </button>
-
-                  {/* Metrics */}
-                  <div className="flex items-center justify-center w-24 shrink-0">
-                    <div className="flex items-center gap-1.5 text-sm text-slate-700 font-medium">
-                      <ShoppingCart className="w-3.5 h-3.5 text-slate-400" /> {poCount}
-                    </div>
+        {/* Every row is the click target — the whole card links straight
+            into the campaign. Edit/Delete stop propagation so they act on
+            the row without also triggering the navigation underneath. */}
+        {!isLoading && pagedRows.map(({ campaign: c, poCount, siteTotal, pct, agencyIds }) => (
+          <Link
+            key={c.id}
+            to={`/client/campaigns/${c.id}`}
+            className="block"
+          >
+            <Card className="p-4 lg:p-5 hover:border-blue-300 hover:shadow-md transition cursor-pointer">
+              <div className="flex flex-wrap lg:flex-nowrap items-center gap-4 lg:gap-6">
+                <div className="flex items-start gap-3 flex-1 min-w-0">
+                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-50 to-violet-100 flex items-center justify-center shrink-0 mt-0.5">
+                    <Megaphone className="w-5 h-5 text-violet-600" />
                   </div>
-                  <div className="flex items-center justify-center w-20 shrink-0">
-                    <div className="flex items-center gap-1.5 text-sm text-slate-700 font-medium">
-                      <Store className="w-3.5 h-3.5 text-slate-400" /> {siteTotal}
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-slate-900 truncate">{c.name}</span>
+                      <CampaignStatusBadge status={c.status} />
                     </div>
-                  </div>
-                  <div className="w-full lg:w-40 shrink-0">
-                    <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                      <span className="lg:hidden">Progress</span><span>{pct != null ? `${Math.round(pct)}%` : '—'}</span>
-                    </div>
-                    <ProgressBar pct={pct} />
-                  </div>
-                  <div className="w-full lg:w-44 shrink-0">
-                    {agencyNames.length > 0 ? (
-                      <div className="flex flex-wrap gap-1">
-                        {agencyNames.slice(0, 2).map((name) => (
-                          <span key={name} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[11px] font-medium max-w-[110px] truncate">
-                            <Building2 className="w-3 h-3 shrink-0" /> <span className="truncate">{name}</span>
-                          </span>
-                        ))}
-                        {agencyNames.length > 2 && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[11px] font-medium">
-                            +{agencyNames.length - 2} more
-                          </span>
-                        )}
-                      </div>
-                    ) : (
-                      <span className="text-xs text-slate-300">—</span>
+                    {c.description && <p className="text-xs text-slate-500 mt-0.5 line-clamp-1 max-w-md">{c.description}</p>}
+                    {(c.start_date || c.end_date) && (
+                      <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                        <Calendar className="w-3 h-3" />
+                        {c.start_date ? new Date(c.start_date).toLocaleDateString('en-IN') : '—'} → {c.end_date ? new Date(c.end_date).toLocaleDateString('en-IN') : '—'}
+                      </p>
                     )}
                   </div>
+                </div>
 
-                  {/* Actions */}
-                  <div className="flex items-center gap-1 shrink-0 ml-auto lg:ml-0">
-                    <button onClick={() => openEdit(c)} title="Edit campaign" className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition"><Pencil className="w-3.5 h-3.5" /></button>
-                    <button onClick={() => setDeleteTarget(c)} title="Delete campaign" className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition"><Trash2 className="w-3.5 h-3.5" /></button>
-                    <button
-                      onClick={() => toggleExpand(c.id)}
-                      title={isOpen ? 'Hide Work Orders' : 'Show Work Orders'}
-                      className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition"
-                    >
-                      <ChevronDown className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-                    </button>
+                <div className="flex items-center justify-center w-24 shrink-0">
+                  <div className="flex items-center gap-1.5 text-sm text-slate-700 font-medium">
+                    <ShoppingCart className="w-3.5 h-3.5 text-slate-400" /> {poCount}
                   </div>
                 </div>
-
-                <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">
-                  <button onClick={() => toggleExpand(c.id)} className="text-xs text-slate-500 hover:text-slate-800 font-medium flex items-center gap-1">
-                    <Layers className="w-3.5 h-3.5" /> {isOpen ? 'Hide' : 'View'} {poCount} Work Order{poCount === 1 ? '' : 's'}
-                  </button>
-                  <Link to={`/client/campaigns/${c.id}`} className="text-xs text-blue-600 hover:text-blue-700 font-semibold flex items-center gap-1">
-                    Open Campaign <ArrowUpRight className="w-3.5 h-3.5" />
-                  </Link>
+                <div className="flex items-center justify-center w-20 shrink-0">
+                  <div className="flex items-center gap-1.5 text-sm text-slate-700 font-medium">
+                    <Store className="w-3.5 h-3.5 text-slate-400" /> {siteTotal}
+                  </div>
                 </div>
-              </div>
-
-              {/* Work Orders dropdown */}
-              {isOpen && (
-                <div className="border-t border-slate-100 bg-slate-50/70 px-4 lg:px-5 py-3">
-                  {poRows.length === 0 ? (
-                    <p className="text-xs text-slate-400 py-2 text-center">No Work Orders added under this campaign yet.</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {poRows.map((r) => (
-                        <Link
-                          key={r.po_id}
-                          to={`/client/campaigns/${c.id}/po/${r.po_id}`}
-                          className="flex flex-wrap items-center gap-x-5 gap-y-2 bg-white border border-slate-200 hover:border-blue-300 rounded-lg px-3.5 py-2.5 transition"
-                        >
-                          <div className="min-w-[130px]">
-                            {r.name && <p className="text-sm font-semibold text-slate-800">{r.name}</p>}
-                            <p className={r.name ? 'text-[11px] text-slate-400' : 'text-sm font-semibold text-slate-800'}>{r.po_number}</p>
-                            <p className="text-[11px] text-slate-400">{new Date(r.po_date).toLocaleDateString('en-IN')}</p>
-                          </div>
-                          <div className="min-w-[130px] flex items-center gap-1.5 text-xs text-slate-600">
-                            <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" /> <span className="truncate">{r.agency_name}</span>
-                          </div>
-                          <div className="min-w-[70px] flex items-center gap-1.5 text-xs text-slate-600">
-                            <Store className="w-3.5 h-3.5 text-slate-400" /> {r.sites_total}
-                          </div>
-                          <div className="min-w-[130px] flex-1 max-w-[180px]">
-                            <div className="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
-                              <span>Work Done</span><span>{r.completion_pct != null ? `${Math.round(r.completion_pct)}%` : '—'}</span>
-                            </div>
-                            <ProgressBar pct={r.completion_pct} />
-                          </div>
-                          <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${CLIENT_PO_WORK_STATUS_COLORS[r.work_status]}`}>
-                            {CLIENT_PO_WORK_STATUS_LABELS[r.work_status]}
+                <div className="w-full lg:w-40 shrink-0">
+                  <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
+                    <span className="lg:hidden">Progress</span><span>{pct != null ? `${Math.round(pct)}%` : '—'}</span>
+                  </div>
+                  <ProgressBar pct={pct} />
+                </div>
+                <div className="w-full lg:w-32 shrink-0">
+                  {agencyIds.length > 0 ? (
+                    <div className="flex flex-wrap gap-1">
+                      {agencyIds.slice(0, 3).map((id) => {
+                        const info = agencyCodeById.get(id);
+                        if (!info) return null;
+                        return (
+                          <span key={id} title={info.name} className="inline-flex items-center justify-center w-7 h-6 rounded-md bg-slate-100 text-slate-600 text-[11px] font-semibold">
+                            {info.code}
                           </span>
-                          <ArrowRight className="w-3.5 h-3.5 text-slate-300 ml-auto" />
-                        </Link>
-                      ))}
+                        );
+                      })}
+                      {agencyIds.length > 3 && (
+                        <span className="inline-flex items-center px-1.5 h-6 rounded-md bg-slate-100 text-slate-500 text-[11px] font-medium">
+                          +{agencyIds.length - 3}
+                        </span>
+                      )}
                     </div>
+                  ) : (
+                    <span className="text-xs text-slate-300">—</span>
                   )}
                 </div>
-              )}
+
+                <div className="flex items-center gap-1 shrink-0 ml-auto lg:ml-0">
+                  <button onClick={(e) => openEdit(c, e)} title="Edit campaign" className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition"><Pencil className="w-3.5 h-3.5" /></button>
+                  <button onClick={(e) => confirmDelete(c, e)} title="Delete campaign" className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
+              </div>
             </Card>
-          );
-        })}
+          </Link>
+        ))}
 
         {!isLoading && sortedRows.length === 0 && (
           <Card>

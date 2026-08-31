@@ -1379,6 +1379,7 @@ export function exportClientPhotoComplianceReport(rows: ClientPhotoComplianceRow
 // corporate stakeholder report uses — never a rate/₹ figure anywhere,
 // same as every other client-portal export in this file.
 export interface ClientSiteDetailRow {
+  shop_id: string;
   shop_name: string;
   city: string | null;
   district: string | null;
@@ -1451,6 +1452,117 @@ export function exportClientSiteDetailReport(
   appendPhotoSheet('Installation Photos', installPhotos);
 
   XLSX.writeFile(wb, `${fileName}.xlsx`);
+}
+
+/** Table-only PDF, safe at any scale (POs/campaigns, never one row per shop/photo) — the client-facing equivalent of the agency's own summary-style exports. */
+export async function exportClientCampaignReportPDF(
+  rows: ClientCampaignExportRow[],
+  org: Organization | null | undefined,
+  fileName: string = 'campaign-performance-report'
+) {
+  const doc = new jsPDF();
+  drawSectionHeader(doc, 'Campaign Performance Report', org, true, [15, 23, 42]);
+
+  autoTable(doc, {
+    head: [['Campaign', 'Work Order', 'Agency', 'Type', 'Status', 'Sites', 'Completion']],
+    body: rows.map((r) => [
+      r.campaign_name, r.po_number, r.agency_name,
+      r.fulfillment_type === 'supply_only' ? 'Supply Only' : 'Survey & Install',
+      r.work_status, String(r.sites_total), r.completion_pct != null ? `${Math.round(r.completion_pct)}%` : '—',
+    ]),
+    startY: 40,
+    theme: 'striped',
+    headStyles: { fillColor: [37, 99, 235] },
+    styles: { fontSize: 8.5 },
+  });
+
+  addDocumentFooters(doc);
+  doc.save(`${fileName}.pdf`);
+}
+
+// Client-side safety valve, same reasoning as the agency Design Approval
+// report's cap — embedding photos into a PDF means decoding every image
+// client-side, so an unbounded "export everything" on a 10,000-shop
+// account would hang the browser tab rather than produce anything.
+const CLIENT_SITE_PDF_MAX_SITES = 40;
+
+/**
+ * The "full images" PDF version of the Site Detail Report — one section
+ * per site (what was assigned, when, current status) followed by its
+ * actual survey and installation photos embedded on the page, not just
+ * linked. This is what a corporate stakeholder actually wants to open
+ * and read end to end; the Excel version (exportClientSiteDetailReport)
+ * is the one built for filtering/sorting a large list instead.
+ */
+export async function exportClientSiteDetailPDF(
+  sites: ClientSiteDetailRow[],
+  surveyPhotosByShop: Map<string, ClientSitePhotoRow[]>,
+  installPhotosByShop: Map<string, ClientSitePhotoRow[]>,
+  org: Organization | null | undefined,
+  fileName: string = 'site-detail-report'
+): Promise<{ generated: number; skipped: number }> {
+  const scoped = sites.slice(0, CLIENT_SITE_PDF_MAX_SITES);
+  if (scoped.length === 0) return { generated: 0, skipped: 0 };
+
+  const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+
+  for (let i = 0; i < scoped.length; i++) {
+    const site = scoped[i];
+    if (i > 0) doc.addPage();
+    let y = drawSectionHeader(doc, site.shop_name, org, i === 0, [15, 23, 42]);
+
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(71, 85, 105);
+    const infoLines = [
+      `${[site.city, site.district].filter(Boolean).join(', ') || '—'}${site.address ? ' — ' + site.address : ''}`,
+      `Campaign: ${site.campaign_name}   |   Work Order: ${site.po_label}   |   Agency: ${site.agency_name}`,
+      `Status: ${site.status_label}   |   Work Type(s): ${site.work_types}   |   Assigned: ${site.assigned_on}`,
+    ];
+    for (const line of infoLines) {
+      doc.text(line, 14, y);
+      y += 6;
+    }
+    doc.setTextColor(15, 23, 42);
+    y += 4;
+
+    const maxImgWidth = (pageWidth - 14 - 14 - 8) / 2; // two photos side by side
+    const surveyPhotos = (surveyPhotosByShop.get(site.shop_id) || []).slice(0, 2);
+    const installPhotos = (installPhotosByShop.get(site.shop_id) || []).slice(0, 2);
+
+    if (surveyPhotos.length === 0 && installPhotos.length === 0) {
+      doc.setFontSize(9);
+      doc.setTextColor(148, 163, 184);
+      doc.text('No photos uploaded for this site yet.', 14, y);
+      doc.setTextColor(15, 23, 42);
+      continue;
+    }
+
+    const maxRows = Math.max(surveyPhotos.length, installPhotos.length);
+    for (let r = 0; r < maxRows; r++) {
+      const rowStartY = y;
+      let leftBottom = rowStartY, rightBottom = rowStartY;
+      if (surveyPhotos[r]) {
+        try {
+          const dataUrl = await toJpegDataUrl(surveyPhotos[r].photo_url);
+          leftBottom = await addCaptionedImage(doc, `Survey — ${surveyPhotos[r].photo_type}`, dataUrl, 14, rowStartY, maxImgWidth, 70, pageHeight);
+        } catch { /* skip photos that fail to fetch */ }
+      }
+      if (installPhotos[r]) {
+        try {
+          const dataUrl = await toJpegDataUrl(installPhotos[r].photo_url);
+          rightBottom = await addCaptionedImage(doc, `Install — ${installPhotos[r].photo_type}`, dataUrl, 14 + maxImgWidth + 8, rowStartY, maxImgWidth, 70, pageHeight);
+        } catch { /* skip photos that fail to fetch */ }
+      }
+      y = Math.max(leftBottom, rightBottom);
+    }
+  }
+
+  addDocumentFooters(doc);
+  doc.save(`${fileName}.pdf`);
+  return { generated: scoped.length, skipped: sites.length - scoped.length };
 }
 
 // ---------------------------------------------------------------------------

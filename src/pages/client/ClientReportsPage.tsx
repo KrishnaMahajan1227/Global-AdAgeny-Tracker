@@ -4,12 +4,12 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { Card, EmptyState, PageHeader, StatusBadge, Select } from '@/components/ui';
 import { LineItemProgressChart } from '@/components/LineItemProgressChart';
-import { exportClientCampaignReport, exportClientPhotoComplianceReport, exportClientSiteDetailReport } from '@/lib/reports';
-import { STATUS_LABELS, type PurchaseOrder, type ClientPOLineItemProgress, type Campaign, type WorkItem, type SurveyPhoto, type InstallationProof } from '@/lib/types';
+import { exportClientCampaignReport, exportClientPhotoComplianceReport, exportClientSiteDetailReport, exportClientCampaignReportPDF, exportClientSiteDetailPDF } from '@/lib/reports';
+import { STATUS_LABELS, type PurchaseOrder, type ClientPOLineItemProgress, type Campaign, type WorkItem, type SurveyPhoto, type InstallationProof, type Organization } from '@/lib/types';
 import {
   buildClientCampaignRows, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS, stagePct, finalStage,
 } from '@/lib/clientPortal';
-import { Download, FileBarChart, Image as ImageIcon, PieChart, AlertTriangle, Megaphone, Building2, ShoppingCart } from 'lucide-react';
+import { Download, FileBarChart, Image as ImageIcon, PieChart, AlertTriangle, Megaphone, Building2, ShoppingCart, CheckCircle2, Loader2, FileDown } from 'lucide-react';
 
 type PoRow = PurchaseOrder & { agency_org: { name: string } | null };
 type ShopRow = { id: string; name: string; city: string | null; district: string | null; address: string | null; status: string; purchase_order_id: string | null };
@@ -42,6 +42,17 @@ export default function ClientReportsPage() {
   const [poFilter, setPoFilter] = useState('');
   const [progressPoId, setProgressPoId] = useState('');
   const [progressLineItemId, setProgressLineItemId] = useState('');
+  const [pdfGenerating, setPdfGenerating] = useState(false);
+  const [pdfNotice, setPdfNotice] = useState<{ kind: 'error' | 'success'; message: string } | null>(null);
+
+  const { data: org } = useQuery({
+    queryKey: ['client-reports-org', orgId],
+    queryFn: async () => {
+      const { data } = await supabase.from('organizations').select('*').eq('id', orgId).maybeSingle();
+      return data as Organization | null;
+    },
+    enabled: !!orgId,
+  });
 
   // Dropping the parent filters resets whichever child filter they'd
   // otherwise leave pointed at a Work Order that's no longer in scope.
@@ -250,6 +261,7 @@ export default function ClientReportsPage() {
       const totalQty = items.reduce((sum, w) => sum + (w.approved_quantity ?? w.survey_quantity ?? 0), 0);
       const earliestAssigned = items.length > 0 ? items.map((w) => w.created_at).sort()[0] : null;
       return {
+        shop_id: s.id,
         shop_name: s.name,
         city: s.city,
         district: s.district,
@@ -285,6 +297,39 @@ export default function ClientReportsPage() {
       .filter((p) => siteShopIdsInFilter.has(p.shop_id))
       .map((p) => ({ ...shopMetaFor(p.shop_id), photo_type: p.photo_type, uploaded_on: new Date(p.created_at).toLocaleDateString('en-IN'), photo_url: p.photo_url }));
     exportClientSiteDetailReport(siteDetailRows, surveyRows, installRows);
+  }
+
+  async function handleExportSiteDetailPDF() {
+    setPdfGenerating(true);
+    setPdfNotice(null);
+    try {
+      const surveyByShop = new Map<string, { shop_name: string; city: string | null; po_label: string; photo_type: string; uploaded_on: string; photo_url: string }[]>();
+      for (const p of surveyPhotos || []) {
+        if (!siteShopIdsInFilter.has(p.shop_id)) continue;
+        const list = surveyByShop.get(p.shop_id) || [];
+        list.push({ ...shopMetaFor(p.shop_id), photo_type: p.photo_type, uploaded_on: new Date(p.created_at).toLocaleDateString('en-IN'), photo_url: p.photo_url });
+        surveyByShop.set(p.shop_id, list);
+      }
+      const installByShop = new Map<string, { shop_name: string; city: string | null; po_label: string; photo_type: string; uploaded_on: string; photo_url: string }[]>();
+      for (const p of installPhotos || []) {
+        if (!siteShopIdsInFilter.has(p.shop_id)) continue;
+        const list = installByShop.get(p.shop_id) || [];
+        list.push({ ...shopMetaFor(p.shop_id), photo_type: p.photo_type, uploaded_on: new Date(p.created_at).toLocaleDateString('en-IN'), photo_url: p.photo_url });
+        installByShop.set(p.shop_id, list);
+      }
+      const { generated, skipped } = await exportClientSiteDetailPDF(siteDetailRows, surveyByShop, installByShop, org);
+      if (generated === 0) setPdfNotice({ kind: 'error', message: 'No sites in this scope yet.' });
+      else if (skipped > 0) setPdfNotice({ kind: 'success', message: `PDF ready — first ${generated} sites (${skipped} more matched this filter; narrow it with Campaign/Agency/Work Order to include them too).` });
+      else setPdfNotice({ kind: 'success', message: `PDF ready — ${generated} site(s), with photos.` });
+    } catch {
+      setPdfNotice({ kind: 'error', message: 'Could not generate the PDF. Please try again.' });
+    } finally {
+      setPdfGenerating(false);
+    }
+  }
+
+  async function handleExportCampaignPDF() {
+    await exportClientCampaignReportPDF(campaignRows, org);
   }
 
   // ---- Per-line-item progress (donut + stage bars) ----
@@ -358,13 +403,22 @@ export default function ClientReportsPage() {
               <FileBarChart className="w-4.5 h-4.5 text-slate-400" />
               <h2 className="font-semibold text-slate-900">Campaign Performance</h2>
             </div>
-            <button
-              onClick={handleExportCampaigns}
-              disabled={campaignRows.length === 0}
-              className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium disabled:opacity-50"
-            >
-              <Download className="w-4 h-4" /> Export Excel
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleExportCampaigns}
+                disabled={campaignRows.length === 0}
+                className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium disabled:opacity-50"
+              >
+                <Download className="w-4 h-4" /> Excel
+              </button>
+              <button
+                onClick={handleExportCampaignPDF}
+                disabled={campaignRows.length === 0}
+                className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-sm font-medium disabled:opacity-50"
+              >
+                <FileDown className="w-4 h-4" /> PDF
+              </button>
+            </div>
           </div>
           {campaignRows.length === 0 ? (
             <EmptyState icon={<FileBarChart className="w-10 h-10" />} title="No Work Orders yet" />
@@ -460,17 +514,33 @@ export default function ClientReportsPage() {
                 <h2 className="font-semibold text-slate-900">Site Detail Report</h2>
               </div>
               <p className="text-xs text-slate-400 mt-1">
-                The full corporate-style export — what was assigned, when, how much is done, where, and every survey/installation photo as a clickable link (not just a count).
+                The full corporate-style export — what was assigned, when, how much is done, where, and every survey/installation photo. Excel links to each photo; PDF embeds them directly on the page.
               </p>
             </div>
-            <button
-              onClick={handleExportSiteDetail}
-              disabled={siteDetailRows.length === 0}
-              className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium disabled:opacity-50 shrink-0"
-            >
-              <Download className="w-4 h-4" /> Export Excel
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={handleExportSiteDetail}
+                disabled={siteDetailRows.length === 0}
+                className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium disabled:opacity-50"
+              >
+                <Download className="w-4 h-4" /> Excel
+              </button>
+              <button
+                onClick={handleExportSiteDetailPDF}
+                disabled={siteDetailRows.length === 0 || pdfGenerating}
+                className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-sm font-medium disabled:opacity-50"
+              >
+                {pdfGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
+                PDF {pdfGenerating ? '...' : '(with photos)'}
+              </button>
+            </div>
           </div>
+          {pdfNotice && (
+            <div className={`flex items-start gap-2 rounded-lg px-3 py-2 mb-3 text-xs ${pdfNotice.kind === 'error' ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
+              {pdfNotice.kind === 'error' ? <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" /> : <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />}
+              <p>{pdfNotice.message}</p>
+            </div>
+          )}
           {siteDetailRows.length === 0 ? (
             <EmptyState icon={<FileBarChart className="w-10 h-10" />} title="No sites in this scope yet" />
           ) : (

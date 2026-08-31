@@ -16,7 +16,6 @@ import {
 } from 'lucide-react';
 
 type PoRow = PurchaseOrder & { agency_org: { name: string } | null };
-type ShopRow = { id: string; status: string; purchase_order_id: string | null };
 
 const SITE_DONUT_COLORS: Record<'pending' | 'in_progress' | 'completed', string> = {
   pending: '#94a3b8',    // slate-400 — mirrors SITE_BUCKET_DOT_COLORS
@@ -100,12 +99,16 @@ export default function ClientOverviewPage() {
     refetchInterval: 20000,
   });
 
-  const { data: shops } = useQuery({
-    queryKey: ['client-overview-shops', orgId],
+  // Grouped counts, not one row per shop — the whole point is that this
+  // scales the same whether there are 20 shops or 20,000 (see migration
+  // 0075). siteBucket() below still does the same status→bucket mapping
+  // it always did, just applied to grouped rows instead of raw ones.
+  const { data: shopStatusCounts } = useQuery({
+    queryKey: ['client-overview-shop-status-counts', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('shops').select('id, status, purchase_order_id');
+      const { data, error } = await supabase.rpc('client_shop_status_counts');
       if (error) throw error;
-      return data as ShopRow[];
+      return data as { purchase_order_id: string; status: string; shop_count: number }[];
     },
     enabled: !!orgId,
     refetchInterval: 20000,
@@ -194,17 +197,17 @@ export default function ClientOverviewPage() {
 
   useClientRealtimeInvalidate(orgId, [
     ['client-overview-pos', orgId],
-    ['client-overview-shops', orgId],
+    ['client-overview-shop-status-counts', orgId],
   ]);
 
   const activePos = (pos || []).filter((po) => po.status !== 'cancelled' && po.assignment_status !== 'rejected');
   const activeCampaignsCount = (campaigns || []).filter((c) => c.status === 'active').length;
 
   const siteCounts = { pending: 0, in_progress: 0, completed: 0 };
-  for (const s of shops || []) {
-    const bucket = siteBucket(s.status);
+  for (const row of shopStatusCounts || []) {
+    const bucket = siteBucket(row.status);
     if (bucket === 'cancelled') continue;
-    siteCounts[bucket] += 1;
+    siteCounts[bucket] += row.shop_count;
   }
   const totalSites = siteCounts.pending + siteCounts.in_progress + siteCounts.completed;
   const overallCompletionPct = totalSites > 0 ? (siteCounts.completed / totalSites) * 100 : null;
@@ -216,15 +219,15 @@ export default function ClientOverviewPage() {
   // status bucket" completion the KPI cards above already use.
   const poById = new Map((pos || []).map((po) => [po.id, po]));
   const agencyMap = new Map<string, { name: string; total: number; completed: number }>();
-  for (const s of shops || []) {
-    const po = s.purchase_order_id ? poById.get(s.purchase_order_id) : null;
+  for (const row of shopStatusCounts || []) {
+    const po = row.purchase_order_id ? poById.get(row.purchase_order_id) : null;
     if (!po?.assigned_agency_id) continue;
-    const bucket = siteBucket(s.status);
+    const bucket = siteBucket(row.status);
     if (bucket === 'cancelled') continue;
     const key = po.assigned_agency_id;
     const entry = agencyMap.get(key) || { name: po.agency_org?.name || 'Agency', total: 0, completed: 0 };
-    entry.total += 1;
-    if (bucket === 'completed') entry.completed += 1;
+    entry.total += row.shop_count;
+    if (bucket === 'completed') entry.completed += row.shop_count;
     agencyMap.set(key, entry);
   }
   const agencySplits = Array.from(agencyMap.entries())

@@ -306,14 +306,6 @@ export default function ClientCampaignsPage() {
 
   const activeFilterCount = [search, statusFilter, agencyFilter, zoneFilter].filter(Boolean).length;
 
-  const kpi = useMemo(() => {
-    const total = rows.length;
-    const active = rows.filter((r) => r.campaign.status === 'active').length;
-    const workOrders = rows.reduce((s, r) => s + r.poCount, 0);
-    const sites = rows.reduce((s, r) => s + r.siteTotal, 0);
-    return { total, active, workOrders, sites };
-  }, [rows]);
-
   return (
     <div>
       <PageHeader
@@ -326,43 +318,148 @@ export default function ClientCampaignsPage() {
         }
       />
 
-      {/* KPI strip — the three counts that matter at a glance. "Active"
-          moved into its own small chip next to Total Campaigns rather
-          than taking a full card, since it's a detail of that number,
-          not a separate headline metric. */}
-      <div className="grid grid-cols-3 gap-3 mb-5">
-        <Card className="p-4 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 bg-violet-50 text-violet-600"><Megaphone className="w-4.5 h-4.5" /></div>
-          <div className="min-w-0 flex-1">
-            <p className="text-xl font-bold text-slate-900 leading-tight">{kpi.total.toLocaleString('en-IN')}</p>
-            <p className="text-xs text-slate-500 flex items-center gap-1.5">
-              Total Campaigns
-              <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-full">
-                <PlayCircle className="w-2.5 h-2.5" /> {kpi.active} active
-              </span>
-            </p>
+      <div>
+        <div className="flex flex-wrap items-center gap-2 mb-5">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search campaigns by name or description..."
+              className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
+            />
           </div>
-        </Card>
-        <KpiCard icon={<ShoppingCart className="w-4.5 h-4.5" />} iconClass="bg-amber-50 text-amber-600" label="Work Orders" value={kpi.workOrders.toLocaleString('en-IN')} />
-        <KpiCard icon={<Store className="w-4.5 h-4.5" />} iconClass="bg-emerald-50 text-emerald-600" label="Total Sites" value={kpi.sites.toLocaleString('en-IN')} />
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2 mb-5">
-        <div className="relative flex-1 min-w-[220px]">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search campaigns by name or description..."
-            className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
-          />
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="px-3 py-2.5 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
+            {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>Sort: {o.label}</option>)}
+          </select>
+          <FilterButton activeCount={activeFilterCount} onClick={() => setFilterDrawerOpen(true)} />
+          {activeFilterCount > 0 && (
+            <span className="text-xs text-slate-400">{filteredRows.length.toLocaleString('en-IN')} of {rows.length.toLocaleString('en-IN')} shown</span>
+          )}
         </div>
-        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="px-3 py-2.5 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-          {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>Sort: {o.label}</option>)}
-        </select>
-        <FilterButton activeCount={activeFilterCount} onClick={() => setFilterDrawerOpen(true)} />
-        {activeFilterCount > 0 && (
-          <span className="text-xs text-slate-400">{filteredRows.length.toLocaleString('en-IN')} of {rows.length.toLocaleString('en-IN')} shown</span>
+
+        {/* Column legend — only worth showing once there's something to scan */}
+        {!isLoading && sortedRows.length > 0 && (
+          <div className="hidden lg:flex items-center gap-6 px-5 mb-2 text-[11px] font-medium text-slate-400 uppercase tracking-wide">
+            <span className="flex-1 min-w-0">Campaign</span>
+            <span className="w-20 text-center">Work Orders</span>
+            <span className="w-16 text-center">Sites</span>
+            <span className="w-32">Progress</span>
+            <span className="w-24">Agencies</span>
+            <span className="w-16" />
+          </div>
+        )}
+
+        <div className="space-y-2.5">
+          {isLoading && (
+            <>
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="h-20 rounded-xl border border-slate-200 bg-slate-50 animate-pulse" />
+              ))}
+            </>
+          )}
+
+          {/* Every row is the click target — the whole card links straight
+              into the campaign. Edit/Delete stop propagation so they act on
+              the row without also triggering the navigation underneath. */}
+          {!isLoading && pagedRows.map(({ campaign: c, poCount, siteTotal, pct, agencyIds }) => (
+            <Link
+              key={c.id}
+              to={`/client/campaigns/${c.id}`}
+              className="block"
+            >
+              <Card className="p-4 lg:p-5 hover:border-blue-300 hover:shadow-md transition cursor-pointer">
+                <div className="flex flex-wrap lg:flex-nowrap items-center gap-4 lg:gap-5">
+                  <div className="flex items-start gap-3 flex-1 min-w-0">
+                    <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-50 to-violet-100 flex items-center justify-center shrink-0 mt-0.5">
+                      <Megaphone className="w-5 h-5 text-violet-600" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-semibold text-slate-900 truncate">{c.name}</span>
+                        <CampaignStatusBadge status={c.status} />
+                      </div>
+                      {c.description && <p className="text-xs text-slate-500 mt-0.5 line-clamp-1 max-w-md">{c.description}</p>}
+                      {(c.start_date || c.end_date) && (
+                        <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                          <Calendar className="w-3 h-3" />
+                          {c.start_date ? new Date(c.start_date).toLocaleDateString('en-IN') : '—'} → {c.end_date ? new Date(c.end_date).toLocaleDateString('en-IN') : '—'}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-center w-20 shrink-0">
+                    <div className="flex items-center gap-1.5 text-sm text-slate-700 font-medium">
+                      <ShoppingCart className="w-3.5 h-3.5 text-slate-400" /> {poCount}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-center w-16 shrink-0">
+                    <div className="flex items-center gap-1.5 text-sm text-slate-700 font-medium">
+                      <Store className="w-3.5 h-3.5 text-slate-400" /> {siteTotal}
+                    </div>
+                  </div>
+                  <div className="w-full lg:w-32 shrink-0">
+                    <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
+                      <span className="lg:hidden">Progress</span><span>{pct != null ? `${Math.round(pct)}%` : '—'}</span>
+                    </div>
+                    <ProgressBar pct={pct} />
+                  </div>
+                  <div className="w-full lg:w-24 shrink-0">
+                    {agencyIds.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {agencyIds.slice(0, 2).map((id) => {
+                          const info = agencyCodeById.get(id);
+                          if (!info) return null;
+                          return (
+                            <span key={id} title={info.name} className="inline-flex items-center justify-center w-7 h-6 rounded-md bg-slate-100 text-slate-600 text-[11px] font-semibold">
+                              {info.code}
+                            </span>
+                          );
+                        })}
+                        {agencyIds.length > 2 && (
+                          <span className="inline-flex items-center px-1.5 h-6 rounded-md bg-slate-100 text-slate-500 text-[11px] font-medium">
+                            +{agencyIds.length - 2}
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-slate-300">—</span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1 shrink-0 ml-auto lg:ml-0">
+                    <button onClick={(e) => openEdit(c, e)} title="Edit campaign" className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition"><Pencil className="w-3.5 h-3.5" /></button>
+                    <button onClick={(e) => confirmDelete(c, e)} title="Delete campaign" className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition"><Trash2 className="w-3.5 h-3.5" /></button>
+                  </div>
+                </div>
+              </Card>
+            </Link>
+          ))}
+
+          {!isLoading && sortedRows.length === 0 && (
+            <Card>
+              <EmptyState
+                icon={<Megaphone className="w-12 h-12" />}
+                title={campaigns && campaigns.length > 0 ? 'No campaigns match these filters' : 'No campaigns yet'}
+                subtitle={campaigns && campaigns.length > 0 ? 'Try clearing a filter' : 'Create your first campaign, then add Work Orders under it'}
+              />
+            </Card>
+          )}
+        </div>
+
+        {!isLoading && sortedRows.length > 0 && (
+          <Card className="mt-3">
+            <Pagination
+              page={safePage}
+              pageSize={pageSize}
+              totalItems={sortedRows.length}
+              onPageChange={setPage}
+              onPageSizeChange={(n) => { setPageSize(n); setPage(0); }}
+              pageSizeOptions={PAGE_SIZE_OPTIONS}
+              itemLabel="campaigns"
+            />
+          </Card>
         )}
       </div>
 
@@ -397,130 +494,6 @@ export default function ClientCampaignsPage() {
           </FilterSection>
         )}
       </FilterDrawer>
-
-      {/* Column legend — only worth showing once there's something to scan */}
-      {!isLoading && sortedRows.length > 0 && (
-        <div className="hidden lg:flex items-center gap-6 px-5 mb-2 text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-          <span className="flex-1 min-w-0">Campaign</span>
-          <span className="w-24 text-center">Work Orders</span>
-          <span className="w-20 text-center">Sites</span>
-          <span className="w-40">Progress</span>
-          <span className="w-32">Agencies</span>
-          <span className="w-16" />
-        </div>
-      )}
-
-      <div className="space-y-2.5">
-        {isLoading && (
-          <>
-            {[...Array(4)].map((_, i) => (
-              <div key={i} className="h-20 rounded-xl border border-slate-200 bg-slate-50 animate-pulse" />
-            ))}
-          </>
-        )}
-
-        {/* Every row is the click target — the whole card links straight
-            into the campaign. Edit/Delete stop propagation so they act on
-            the row without also triggering the navigation underneath. */}
-        {!isLoading && pagedRows.map(({ campaign: c, poCount, siteTotal, pct, agencyIds }) => (
-          <Link
-            key={c.id}
-            to={`/client/campaigns/${c.id}`}
-            className="block"
-          >
-            <Card className="p-4 lg:p-5 hover:border-blue-300 hover:shadow-md transition cursor-pointer">
-              <div className="flex flex-wrap lg:flex-nowrap items-center gap-4 lg:gap-6">
-                <div className="flex items-start gap-3 flex-1 min-w-0">
-                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-50 to-violet-100 flex items-center justify-center shrink-0 mt-0.5">
-                    <Megaphone className="w-5 h-5 text-violet-600" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-semibold text-slate-900 truncate">{c.name}</span>
-                      <CampaignStatusBadge status={c.status} />
-                    </div>
-                    {c.description && <p className="text-xs text-slate-500 mt-0.5 line-clamp-1 max-w-md">{c.description}</p>}
-                    {(c.start_date || c.end_date) && (
-                      <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
-                        <Calendar className="w-3 h-3" />
-                        {c.start_date ? new Date(c.start_date).toLocaleDateString('en-IN') : '—'} → {c.end_date ? new Date(c.end_date).toLocaleDateString('en-IN') : '—'}
-                      </p>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-center w-24 shrink-0">
-                  <div className="flex items-center gap-1.5 text-sm text-slate-700 font-medium">
-                    <ShoppingCart className="w-3.5 h-3.5 text-slate-400" /> {poCount}
-                  </div>
-                </div>
-                <div className="flex items-center justify-center w-20 shrink-0">
-                  <div className="flex items-center gap-1.5 text-sm text-slate-700 font-medium">
-                    <Store className="w-3.5 h-3.5 text-slate-400" /> {siteTotal}
-                  </div>
-                </div>
-                <div className="w-full lg:w-40 shrink-0">
-                  <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                    <span className="lg:hidden">Progress</span><span>{pct != null ? `${Math.round(pct)}%` : '—'}</span>
-                  </div>
-                  <ProgressBar pct={pct} />
-                </div>
-                <div className="w-full lg:w-32 shrink-0">
-                  {agencyIds.length > 0 ? (
-                    <div className="flex flex-wrap gap-1">
-                      {agencyIds.slice(0, 3).map((id) => {
-                        const info = agencyCodeById.get(id);
-                        if (!info) return null;
-                        return (
-                          <span key={id} title={info.name} className="inline-flex items-center justify-center w-7 h-6 rounded-md bg-slate-100 text-slate-600 text-[11px] font-semibold">
-                            {info.code}
-                          </span>
-                        );
-                      })}
-                      {agencyIds.length > 3 && (
-                        <span className="inline-flex items-center px-1.5 h-6 rounded-md bg-slate-100 text-slate-500 text-[11px] font-medium">
-                          +{agencyIds.length - 3}
-                        </span>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="text-xs text-slate-300">—</span>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-1 shrink-0 ml-auto lg:ml-0">
-                  <button onClick={(e) => openEdit(c, e)} title="Edit campaign" className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition"><Pencil className="w-3.5 h-3.5" /></button>
-                  <button onClick={(e) => confirmDelete(c, e)} title="Delete campaign" className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition"><Trash2 className="w-3.5 h-3.5" /></button>
-                </div>
-              </div>
-            </Card>
-          </Link>
-        ))}
-
-        {!isLoading && sortedRows.length === 0 && (
-          <Card>
-            <EmptyState
-              icon={<Megaphone className="w-12 h-12" />}
-              title={campaigns && campaigns.length > 0 ? 'No campaigns match these filters' : 'No campaigns yet'}
-              subtitle={campaigns && campaigns.length > 0 ? 'Try clearing a filter' : 'Create your first campaign, then add Work Orders under it'}
-            />
-          </Card>
-        )}
-      </div>
-
-      {!isLoading && sortedRows.length > 0 && (
-        <Card className="mt-3">
-          <Pagination
-            page={safePage}
-            pageSize={pageSize}
-            totalItems={sortedRows.length}
-            onPageChange={setPage}
-            onPageSizeChange={(n) => { setPageSize(n); setPage(0); }}
-            pageSizeOptions={PAGE_SIZE_OPTIONS}
-            itemLabel="campaigns"
-          />
-        </Card>
-      )}
 
       <Modal open={modalOpen} onClose={closeModal} title={editTarget ? 'Edit Campaign' : 'New Campaign'} size="md">
         <div className="space-y-4">
@@ -557,18 +530,6 @@ export default function ClientCampaignsPage() {
         danger
       />
     </div>
-  );
-}
-
-function KpiCard({ icon, iconClass, label, value }: { icon: React.ReactNode; iconClass: string; label: string; value: string }) {
-  return (
-    <Card className="p-4 flex items-center gap-3">
-      <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${iconClass}`}>{icon}</div>
-      <div className="min-w-0">
-        <p className="text-xl font-bold text-slate-900 leading-tight">{value}</p>
-        <p className="text-xs text-slate-500 truncate">{label}</p>
-      </div>
-    </Card>
   );
 }
 

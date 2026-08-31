@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Camera, X, RotateCcw, Check, Loader2 } from 'lucide-react';
+import { Camera, X, RotateCcw, Check, Loader2, ImageIcon } from 'lucide-react';
 
 // A real, live camera preview (not just a native file-picker intent).
 // `input capture="environment"` sometimes opens the photo gallery instead
@@ -109,15 +109,50 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
     input.click();
   }
 
+  // Lets the user pick an existing photo from their phone's gallery
+  // instead of taking a live one — useful when there's no network/GPS,
+  // the live camera won't open, or the person already has the photo
+  // saved (e.g. taken earlier and only now uploading it).
+  function chooseFromGallery() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    // No `capture` attribute here on purpose: this opens the photo
+    // gallery/library picker rather than launching the live camera.
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        streamRef.current?.getTracks().forEach((t) => t.stop());
+        onCapture(reader.result as string, file.name);
+        onClose();
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  }
+
   if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-[100] bg-black flex flex-col">
       <div className="flex items-center justify-between px-4 py-3 text-white">
         <span className="font-medium text-sm">{title || 'Take Photo'}</span>
-        <button onClick={() => { streamRef.current?.getTracks().forEach((t) => t.stop()); onClose(); }} className="p-1.5">
-          <X className="w-6 h-6" />
-        </button>
+        <div className="flex items-center gap-1">
+          {!shot && (
+            <button
+              onClick={chooseFromGallery}
+              className="flex items-center gap-1.5 text-xs font-medium bg-white/10 px-3 py-1.5 rounded-full"
+            >
+              <ImageIcon className="w-4 h-4" />
+              Gallery
+            </button>
+          )}
+          <button onClick={() => { streamRef.current?.getTracks().forEach((t) => t.stop()); onClose(); }} className="p-1.5">
+            <X className="w-6 h-6" />
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 relative flex items-center justify-center bg-black overflow-hidden">
@@ -134,6 +169,10 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
             <p className="text-sm text-slate-300">Couldn't access the camera directly (permission denied or unavailable).</p>
             <button onClick={fallbackToNativePicker} className="bg-blue-600 text-white font-medium px-4 py-2.5 rounded-lg text-sm">
               Open Camera App Instead
+            </button>
+            <button onClick={chooseFromGallery} className="flex items-center gap-2 bg-slate-700 text-white font-medium px-4 py-2.5 rounded-lg text-sm">
+              <ImageIcon className="w-4 h-4" />
+              Upload from Gallery Instead
             </button>
           </div>
         )}

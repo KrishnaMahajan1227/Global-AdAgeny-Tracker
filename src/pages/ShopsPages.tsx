@@ -12,7 +12,10 @@ import { Client, Project, Campaign, Shop, WorkType, WorkItem, SurveyPhoto, Board
 import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
+<<<<<<< HEAD
 import { formatDim } from '@/lib/units';
+=======
+>>>>>>> c4b0233f320ffb617406b26077d4086abb29c61c
 import { geocodeAddress, buildAddressQuery } from '@/lib/geocode';
 import { findShopHeaderRow, findExtraHeaders, buildShopRows, resolveZoneIds, type ParsedShopRow } from '@/lib/shopBulkUpload';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';

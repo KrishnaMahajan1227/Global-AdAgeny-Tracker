@@ -918,3 +918,18 @@ export const ROLE_LABELS: Record<string, string> = {
 
 export const OFFICE_ROLES: Role[] = ['agency_owner', 'admin', 'client_manager', 'designer', 'printing', 'accounts', 'demo'];
 export const FIELD_ROLES: Role[] = ['surveyor', 'installer'];
+
+/** Return shape of the get_shared_shop_view RPC (migration 0049) — the
+ * only thing PublicShopSharePage.tsx is allowed to see. Deliberately
+ * narrow: no rate/₹, no PO number, no owner/contact phone, no GPS, no
+ * client name — see that migration's header for why. */
+export interface SharedShopView {
+  shop_name: string;
+  city: string | null;
+  state: string | null;
+  zone_name: string | null;
+  status: string;
+  total_boards: number;
+  installed_boards: number;
+  photo_url: string | null;
+}

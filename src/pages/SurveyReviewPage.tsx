@@ -5,11 +5,10 @@ import { useAuth } from '@/lib/auth';
 import { Drawer, StatusBadge, EmptyState, PageHeader, Textarea, Select } from '@/components/ui';
 import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
-import { renderMarkedImage, buildBoardLabel } from '@/lib/markingUtils';
+import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import type { SurveyPhoto, BoardMarking, WorkItem, POLineItemWorkContext } from '@/lib/types';
 import { computePOVariance } from '@/lib/poVariance';
 import { CheckCircle2, XCircle, AlertCircle, FileText, ChevronRight, MapPin, StickyNote } from 'lucide-react';
-import { useEffect } from 'react';
 import { Link } from 'react-router-dom';
 
 type ReviewAction = 'approve' | 'reject' | 'correction';
@@ -677,8 +676,20 @@ function POBudgetReviewPanel({
 }
 
 // Shows the marked board photos for a submitted survey, so Admin/Owner can
-// actually see what the surveyor marked before approving/rejecting —
-// previously this modal showed no photos at all.
+// This used to render photos itself with a sequential for-await loop that
+// committed React state exactly once, after every photo finished — so a
+// single photo whose renderMarkedImage() call failed or hung (a CORS
+// hiccup, a slow network) silently dropped every photo after it from that
+// one state commit, and the whole batch could end up showing just the
+// first photo marked (or none at all) even though every photo genuinely
+// had valid markings. src/components/MarkedPhotoGrid.tsx already fixes
+// exactly this — each photo renders as its own independent, timed-out-
+// isolated promise and updates the instant it's ready — but was never
+// actually wired up here (or in ShopsPages.tsx / InstallerPage.tsx, which
+// each had their own copy of the same bug). Now this component only
+// fetches the data; MarkedPhotoGrid owns all the rendering, so the owner
+// sees exactly the same reliable marked photos the agency and client
+// sides already do.
 function ReviewMarkedPhotos({ surveyId }: { surveyId: string }) {
   const { data: photos } = useQuery({
     queryKey: ['review-survey-photos', surveyId],
@@ -713,51 +724,12 @@ function ReviewMarkedPhotos({ surveyId }: { surveyId: string }) {
     enabled: !!surveyId,
   });
 
-  const [renderedById, setRenderedById] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const entries: Record<string, string> = {};
-      for (const photo of photos || []) {
-        const photoMarkings = (markings || []).filter((m) => m.survey_photo_id === photo.id);
-        const points = photoMarkings.map((m) => m.points);
-        if (points.some((set) => set.length >= 3) && photo.photo_url) {
-          try {
-            const labels = photoMarkings.map((m) => {
-              const item = (workItems || []).find((it) => it.id === m.work_item_id);
-              if (!item) return null;
-              return buildBoardLabel({ workTypeName: item.work_type_name, width: item.survey_width, height: item.survey_height, unit: item.survey_unit });
-            });
-            const { dataUrl } = await renderMarkedImage(photo.photo_url, points, { labels });
-            entries[photo.id] = dataUrl;
-          } catch { /* fall back to plain photo */ }
-        }
-      }
-      if (!cancelled) setRenderedById(entries);
-    })();
-    return () => { cancelled = true; };
-  }, [photos, markings, workItems]);
-
   return (
     <div className="space-y-2">
       <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
         Survey Photos{photos && photos.length > 0 ? ` (${photos.length})` : ''}
       </p>
-      {!photos || photos.length === 0 ? (
-        <p className="text-xs text-slate-400">No survey photos.</p>
-      ) : (
-        <div className="grid grid-cols-3 gap-2">
-          {photos.map((photo) => (
-            <div key={photo.id} className="relative rounded-lg overflow-hidden border border-slate-200">
-              <img src={renderedById[photo.id] || photo.photo_url} alt="Survey" className="w-full aspect-square object-cover" />
-              {renderedById[photo.id] && (
-                <span className="absolute top-1 right-1 bg-blue-600 text-white text-[9px] font-medium px-1 py-0.5 rounded">Marked</span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+      <MarkedPhotoGrid photos={photos || []} markings={markings || []} workItems={workItems || []} />
     </div>
   );
 }

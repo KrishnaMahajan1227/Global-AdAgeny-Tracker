@@ -6,10 +6,7 @@ import { Drawer, StatusBadge, EmptyState, PageHeader, Textarea, Select } from '@
 import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
-<<<<<<< HEAD
 import { formatDim } from '@/lib/units';
-=======
->>>>>>> c4b0233f320ffb617406b26077d4086abb29c61c
 import type { SurveyPhoto, BoardMarking, WorkItem, POLineItemWorkContext } from '@/lib/types';
 import { computePOVariance } from '@/lib/poVariance';
 import { CheckCircle2, XCircle, AlertCircle, FileText, ChevronRight, MapPin, StickyNote } from 'lucide-react';

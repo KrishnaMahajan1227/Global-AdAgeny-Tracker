@@ -10,6 +10,7 @@ import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { InstallationPhotoGrid } from '@/components/InstallationPhotoGrid';
 import { ShopForm, emptyShopFormValues } from '@/components/ShopForm';
 import { findShopHeaderRow, findExtraHeaders, buildShopRows, resolveZoneIds, type ParsedShopRow } from '@/lib/shopBulkUpload';
+import { formatDim } from '@/lib/units';
 import { logAudit, notifyLinkedOrg } from '@/lib/helpers';
 import type { PurchaseOrder, ClientPOLineItemProgress, SurveyPhoto, BoardMarking, WorkItem } from '@/lib/types';
 import { STATUS_LABELS } from '@/lib/types';
@@ -1260,7 +1261,7 @@ export default function ClientPODetailPage() {
                         <div key={wi.id} className="flex items-center justify-between text-sm bg-slate-50 rounded-lg px-3 py-2">
                           <span className="text-slate-700">{wi.work_type_name || 'Board'}</span>
                           <span className="text-slate-500 text-xs">
-                            {wi.survey_width && wi.survey_height ? `${wi.survey_width}×${wi.survey_height} ${wi.survey_unit || ''}` : '—'}
+                            {wi.survey_width && wi.survey_height ? `${formatDim(wi.survey_width)}×${formatDim(wi.survey_height)} ${wi.survey_unit || ''}` : '—'}
                             {wi.survey_quantity ? ` · Qty ${wi.survey_quantity}` : ''}
                           </span>
                         </div>

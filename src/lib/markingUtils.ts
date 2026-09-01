@@ -4,6 +4,8 @@
 // PERCENTAGES (0-100) of image width/height so they stay correct no matter
 // what size the image is later rendered/exported at.
 
+import { formatDim } from './units';
+
 export type MarkPoint = { x: number; y: number };
 
 export function loadImage(src: string): Promise<HTMLImageElement> {
@@ -175,8 +177,8 @@ export function buildBoardLabel(opts: {
   height?: number | string | null;
   unit?: string | null;
 }): string | null {
-  const w = typeof opts.width === 'string' ? parseFloat(opts.width) : opts.width;
-  const h = typeof opts.height === 'string' ? parseFloat(opts.height) : opts.height;
+  const w = formatDim(opts.width);
+  const h = formatDim(opts.height);
   const dims = w && h ? `${w}×${h} ${opts.unit || 'ft'}` : '';
   const name = (opts.workTypeName || '').trim();
   if (!name && !dims) return null;

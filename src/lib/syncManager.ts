@@ -110,7 +110,12 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
           survey_height: h,
           survey_unit: 'ft',
           survey_quantity: qty,
-          survey_area: w * h * qty,
+          // w and h are already rounded (toFeet does it), but their
+          // product can still land on more than 2 decimals (e.g.
+          // 6.56 * 3.28 = 21.5168) — round the area too so it's never
+          // the odd-one-out decimal on a screen that otherwise shows
+          // clean numbers.
+          survey_area: Math.round(w * h * qty * 100) / 100,
           survey_notes: item.notes || null,
           status: 'surveyed',
           // Section 8 — auto-resolved in the wizard when the shop's PO has

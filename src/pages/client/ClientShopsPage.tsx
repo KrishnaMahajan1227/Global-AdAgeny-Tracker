@@ -8,6 +8,7 @@ import { ShopForm, emptyShopFormValues, type ShopFormValues } from '@/components
 import { findShopHeaderRow, findExtraHeaders, buildShopRows, resolveZoneIds, type ParsedShopRow } from '@/lib/shopBulkUpload';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { InstallationPhotoGrid } from '@/components/InstallationPhotoGrid';
+import { formatDim } from '@/lib/units';
 import { logAudit } from '@/lib/helpers';
 import { STATUS_LABELS, type PurchaseOrder, type Campaign, type ClientAgencyLink, type SurveyPhoto, type BoardMarking, type WorkItem } from '@/lib/types';
 import {
@@ -944,7 +945,7 @@ export default function ClientShopsPage() {
                         <div key={wi.id} className="flex items-center justify-between text-sm bg-slate-50 rounded-lg px-3 py-2">
                           <span className="text-slate-700">{wi.work_type_name || 'Board'}</span>
                           <span className="text-slate-500 text-xs">
-                            {wi.survey_width && wi.survey_height ? `${wi.survey_width}×${wi.survey_height} ${wi.survey_unit || ''}` : '—'}
+                            {wi.survey_width && wi.survey_height ? `${formatDim(wi.survey_width)}×${formatDim(wi.survey_height)} ${wi.survey_unit || ''}` : '—'}
                             {wi.survey_quantity ? ` · Qty ${wi.survey_quantity}` : ''}
                           </span>
                         </div>

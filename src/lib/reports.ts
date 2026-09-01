@@ -4,6 +4,7 @@ import * as XLSX from 'xlsx';
 import pptxgen from 'pptxgenjs';
 import { Shop, WorkItem, Survey, SurveyPhoto, InstallationJob, InstallationProof, Invoice, InvoiceItem, Organization, Client, BoardMarking, DesignVersion, DesignVersionItem, VehicleLoadLogRow } from './types';
 import { renderMarkedImage, toJpegDataUrl, loadImage, buildBoardLabel, numberMarkingsByPhoto } from './markingUtils';
+import { formatDim } from './units';
 
 function formatCurrency(amount: number, currency: string = 'INR') {
   const symbols: Record<string, string> = { INR: 'Rs', USD: '$', EUR: '€' };
@@ -393,9 +394,9 @@ async function drawSurveySection(doc: jsPDF, entry: SurveyReportEntry, org: Orga
     `${i + 1}`,
     item.work_type_name || 'N/A',
     item.material || 'N/A',
-    `${item.survey_width || 0} x ${item.survey_height || 0} ${item.survey_unit || 'ft'}`,
+    `${formatDim(item.survey_width) || 0} x ${formatDim(item.survey_height) || 0} ${item.survey_unit || 'ft'}`,
     `${item.survey_quantity || 1}`,
-    `${item.survey_area || 0} sq ${item.survey_unit || 'ft'}`,
+    `${item.survey_area ? Math.round(item.survey_area) : 0} sq ${item.survey_unit || 'ft'}`,
     item.survey_notes || '',
   ]);
 
@@ -525,9 +526,9 @@ async function drawInstallationSection(doc: jsPDF, entry: InstallationReportEntr
   const tableData = installedItems.map((item, i) => [
     `${i + 1}`,
     item.work_type_name || 'N/A',
-    `${item.installed_width || 0} x ${item.installed_height || 0} ${item.installed_unit || 'ft'}`,
+    `${formatDim(item.installed_width) || 0} x ${formatDim(item.installed_height) || 0} ${item.installed_unit || 'ft'}`,
     `${item.installed_quantity || 1}`,
-    `${item.installed_area || 0} sq ft`,
+    `${item.installed_area ? Math.round(item.installed_area) : 0} sq ft`,
     item.installed_notes || '',
   ]);
 
@@ -893,9 +894,9 @@ async function drawFinalClientSection(doc: jsPDF, entry: FinalReportEntry, org: 
     `${i + 1}`,
     item.work_type_name || 'N/A',
     item.material || 'N/A',
-    `${item.survey_width || 0} x ${item.survey_height || 0} ${item.survey_unit || 'ft'}`,
-    `${item.installed_width || item.survey_width || 0} x ${item.installed_height || item.survey_height || 0}`,
-    `${item.survey_area || 0}`,
+    `${formatDim(item.survey_width) || 0} x ${formatDim(item.survey_height) || 0} ${item.survey_unit || 'ft'}`,
+    `${formatDim(item.installed_width ?? item.survey_width) || 0} x ${formatDim(item.installed_height ?? item.survey_height) || 0}`,
+    `${item.survey_area ? Math.round(item.survey_area) : 0}`,
   ]);
 
   autoTable(doc, {
@@ -1124,7 +1125,7 @@ export function exportShopsToExcel(
 
   const shopRows = shops.map((shop) => {
     const items = workItems.filter((w) => w.shop_id === shop.id);
-    const totalArea = items.reduce((sum, i) => sum + (i.survey_area || 0), 0);
+    const totalArea = Math.round(items.reduce((sum, i) => sum + (i.survey_area || 0), 0));
     return {
       'Shop Name': shop.name,
       'Client': shopClientName(shop),
@@ -1182,7 +1183,7 @@ export function exportMultiSheetExcel(
         'City': shop.city || '',
         'Status': shop.status,
         'Work Items': items.length,
-        'Total Area': items.reduce((s, i) => s + (i.survey_area || 0), 0),
+        'Total Area': Math.round(items.reduce((s, i) => s + (i.survey_area || 0), 0)),
       };
     });
     appendSheetWithLinks(wb, stage.name, rows);
@@ -1628,9 +1629,9 @@ export async function generatePreApprovalPPT(
       { text: `${i + 1}` },
       { text: item.work_type_name || 'N/A' },
       { text: item.material || 'N/A' },
-      { text: `${item.survey_width || 0} x ${item.survey_height || 0} ${item.survey_unit || 'ft'}` },
+      { text: `${formatDim(item.survey_width) || 0} x ${formatDim(item.survey_height) || 0} ${item.survey_unit || 'ft'}` },
       { text: `${item.survey_quantity || 1}` },
-      { text: `${item.survey_area || 0} sq ft` },
+      { text: `${item.survey_area ? Math.round(item.survey_area) : 0} sq ft` },
     ]);
 
     slide.addTable(
@@ -1730,9 +1731,9 @@ export async function generateFinalInstallationPPT(
       const tableRows = items.map((item, i) => [
         { text: `${i + 1}` },
         { text: item.work_type_name || 'N/A' },
-        { text: `${item.installed_width || 0} x ${item.installed_height || 0} ${item.installed_unit || 'ft'}` },
+        { text: `${formatDim(item.installed_width) || 0} x ${formatDim(item.installed_height) || 0} ${item.installed_unit || 'ft'}` },
         { text: `${item.installed_quantity || 1}` },
-        { text: `${item.installed_area || 0} sq ft` },
+        { text: `${item.installed_area ? Math.round(item.installed_area) : 0} sq ft` },
       ]);
 
       slide.addTable(

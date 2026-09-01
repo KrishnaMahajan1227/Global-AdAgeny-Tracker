@@ -14,7 +14,7 @@ import { syncAllPendingDrafts, syncDraft } from '@/lib/syncManager';
 import { CameraCapture } from '@/components/CameraCapture';
 import { BoardMarkerCanvas } from '@/components/BoardMarkerCanvas';
 import { fillMissingShopCoordinates, buildAddressQuery } from '@/lib/geocode';
-import { LENGTH_UNIT_OPTIONS, areaSqFt } from '@/lib/units';
+import { LENGTH_UNIT_OPTIONS, areaSqFt, formatDim } from '@/lib/units';
 import { renderMarkedImage, buildBoardLabel, type MarkPoint } from '@/lib/markingUtils';
 import { useLiveLocationTracking, LocationShareIndicator } from '@/lib/locationTracking';
 import { buildMultiStopNavigationUrl, formatDistance, formatDuration } from '@/lib/routeOptimization';
@@ -1250,7 +1250,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                   <div className="flex justify-between"><span className="text-slate-500">Shop:</span><span className="text-slate-900 font-medium">{shop?.name}</span></div>
                   <div className="flex justify-between"><span className="text-slate-500">Photos:</span><span className="text-slate-900 font-medium">{photos.length}</span></div>
                   <div className="flex justify-between"><span className="text-slate-500">Boards:</span><span className="text-slate-900 font-medium">{workItems.length}</span></div>
-                  <div className="flex justify-between"><span className="text-slate-500">Total Area:</span><span className="text-slate-900 font-medium">{totalArea.toFixed(2)} sq ft</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">Total Area:</span><span className="text-slate-900 font-medium">{Math.round(totalArea)} sq ft</span></div>
                   <div className="flex justify-between items-center">
                     <span className="text-slate-500">GPS:</span>
                     {gpsStatus === 'captured' ? (
@@ -1304,7 +1304,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                                 {!marked && '⚠ '}{w.work_type_name || 'Board'} {n + 1}
                               </span>
                               <span className="text-slate-500">
-                                {w.width || '0'} {w.unit} × {w.height || '0'} {w.heightUnit || w.unit}{(parseInt(w.quantity) || 1) > 1 ? ` × ${w.quantity}` : ''}
+                                {formatDim(w.width) ?? '0'} {w.unit} × {formatDim(w.height) ?? '0'} {w.heightUnit || w.unit}{(parseInt(w.quantity) || 1) > 1 ? ` × ${w.quantity}` : ''}
                               </span>
                             </div>
                           );
@@ -1334,7 +1334,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
               <FileText className="w-12 h-12 text-blue-500 mx-auto mb-3" />
               <h2 className="text-lg font-bold text-slate-900 mb-2">Ready to Submit</h2>
               <p className="text-sm text-slate-500 mb-4">
-                {shop?.name} - {photos.length} photos, {workItems.length} boards, {totalArea.toFixed(2)} sq ft
+                {shop?.name} - {photos.length} photos, {workItems.length} boards, {Math.round(totalArea)} sq ft
               </p>
               {submitError && (
                 <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg p-2 mb-4 text-left">

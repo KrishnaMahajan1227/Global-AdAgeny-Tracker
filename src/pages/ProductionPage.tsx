@@ -7,6 +7,7 @@ import { VehicleLoadLogView } from '@/components/VehicleLoadLogView';
 import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { WorkItem, ProductionItem, WorkItemComponent, COMPONENT_STATUSES, VehicleLoadShopSummary, VehicleLoadStats } from '@/lib/types';
+import { formatDim } from '@/lib/units';
 import {
   Printer, ChevronRight, ChevronDown, ChevronLeft, Search, MapPin, Phone, User, Layers,
   CheckCircle2, Circle, MinusCircle, Pencil, Check, X, ListChecks,
@@ -118,8 +119,8 @@ function mapsHref(address: string) {
 }
 
 function boardLabel(item: WorkItem) {
-  const w = item.approved_width ?? item.survey_width;
-  const h = item.approved_height ?? item.survey_height;
+  const w = formatDim(item.approved_width ?? item.survey_width);
+  const h = formatDim(item.approved_height ?? item.survey_height);
   const unit = item.approved_unit ?? item.survey_unit ?? 'ft';
   const dims = w && h ? `${w}×${h} ${unit}` : null;
   const targetQty = item.approved_quantity ?? item.survey_quantity ?? 1;

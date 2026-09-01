@@ -7,12 +7,14 @@ import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { WorkItem, SurveyPhoto, BoardMarking, DesignVersion, DesignVersionItem, Shop, Organization } from '@/lib/types';
 import { numberMarkingsByPhoto } from '@/lib/markingUtils';
+import { formatDim } from '@/lib/units';
 import { buildDesignComparisonRows, generateDesignComparisonPDF, generateDesignComparisonPPT } from '@/lib/reports';
 import { DesignMarkingPreview } from '@/components/DesignMarkingPreview';
+import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import {
   Palette, Upload, ChevronRight, ChevronDown, ChevronLeft, FileImage, FileText, CheckCircle2, Circle,
   X, Search, MapPin, Phone, User, Layers, Lock, Plus, FileDown,
-  Presentation, Calendar, Hash, Clock, Eye, PackageCheck, LayoutList, Loader2, Filter, ArrowUpDown, AlertTriangle, Send,
+  Presentation, Calendar, Hash, Clock, Eye, PackageCheck, LayoutList, Loader2, Filter, ArrowUpDown, AlertTriangle, Send, Camera,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
@@ -30,8 +32,8 @@ const BOARD_TOGGLEABLE_STATUSES = ['approved', 'designing', 'designed'];
 const PAGE_SIZE = 20;
 
 function boardLabel(item: WorkItem) {
-  const w = item.approved_width ?? item.survey_width;
-  const h = item.approved_height ?? item.survey_height;
+  const w = formatDim(item.approved_width ?? item.survey_width);
+  const h = formatDim(item.approved_height ?? item.survey_height);
   const unit = item.approved_unit ?? item.survey_unit ?? 'ft';
   const qty = item.approved_quantity ?? item.survey_quantity ?? 1;
   const dims = w && h ? `${w}×${h} ${unit}` : null;
@@ -1355,6 +1357,29 @@ export default function DesignerPage() {
                           </div>
                         ) : (
                           <p className="text-xs text-slate-400 mb-3 italic">No boards recorded from survey for this shop yet.</p>
+                        )}
+
+                        {/* Full survey photos, each with EVERY marking it carries
+                            drawn together on the one photo — not just one board's
+                            outline at a time like the per-board list above. A shop
+                            where two boards were marked on the same shopfront shot
+                            needs to be seen that way (both outlines, at once) for
+                            the design to actually match how the site is laid out,
+                            not just each board's isolated size. Same MarkedPhotoGrid
+                            every other role (owner review, agency, installer,
+                            client) already sees, so nothing looks different or
+                            missing here specifically for the designer. */}
+                        {(detail?.photos.length || 0) > 0 && (
+                          <div className="mb-3 border border-slate-200 rounded-lg overflow-hidden bg-white">
+                            <div className="px-3 py-2 bg-slate-50 border-b border-slate-100">
+                              <span className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
+                                <Camera className="w-3.5 h-3.5" /> Survey photos ({detail!.photos.length})
+                              </span>
+                            </div>
+                            <div className="p-3">
+                              <MarkedPhotoGrid photos={detail!.photos} markings={detail!.markings} workItems={detail!.items} />
+                            </div>
+                          </div>
                         )}
 
                         {/* Uploaded design versions — each annotated with exactly

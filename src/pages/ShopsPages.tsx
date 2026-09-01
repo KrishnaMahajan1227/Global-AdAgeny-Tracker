@@ -11,7 +11,8 @@ import {
 import { Client, Project, Campaign, Shop, WorkType, WorkItem, SurveyPhoto, BoardMarking, Zone, PurchaseOrder, POLineItem, WorkItemComponent } from '@/lib/types';
 import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
-import { renderMarkedImage, buildBoardLabel } from '@/lib/markingUtils';
+import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
+import { formatDim } from '@/lib/units';
 import { geocodeAddress, buildAddressQuery } from '@/lib/geocode';
 import { findShopHeaderRow, findExtraHeaders, buildShopRows, resolveZoneIds, type ParsedShopRow } from '@/lib/shopBulkUpload';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
@@ -2881,92 +2882,16 @@ function WorkItemStageRow({
     );
   }
   const u = unit || '';
+  const w = formatDim(width);
+  const h = formatDim(height);
+  const a = area != null ? Math.round(area) : null;
   return (
     <div className="flex justify-between">
       <span className="text-slate-500">{label}</span>
       <span className="text-slate-900">
-        {width}×{height} {u} · Qty {quantity ?? 1}{area != null ? ` · ${area} sq ${u}` : ''}
+        {w}×{h} {u} · Qty {quantity ?? 1}{a != null ? ` · ${a} sq ${u}` : ''}
       </span>
     </div>
   );
 }
 
-function MarkedPhotoGrid({ photos, markings, workItems }: { photos: SurveyPhoto[]; markings: BoardMarking[]; workItems: WorkItem[] }) {
-  const [renderedById, setRenderedById] = useState<Record<string, string>>({});
-  const [lightbox, setLightbox] = useState<string | null>(null);
-
-  const markingsByPhotoId = new Map<string, BoardMarking[]>();
-  for (const m of markings) {
-    const list = markingsByPhotoId.get(m.survey_photo_id) || [];
-    list.push(m);
-    markingsByPhotoId.set(m.survey_photo_id, list);
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const entries: Record<string, string> = {};
-      for (const photo of photos) {
-        const photoMarkings = markingsByPhotoId.get(photo.id) || [];
-        const allPoints = photoMarkings.map((m) => m.points);
-        if (allPoints.some((set) => set.length >= 3) && photo.photo_url) {
-          try {
-            const labels = photoMarkings.map((m) => boardLabelFor(m.work_item_id));
-            const { dataUrl } = await renderMarkedImage(photo.photo_url, allPoints, { labels });
-            entries[photo.id] = dataUrl;
-          } catch {
-            // fall back to plain photo below
-          }
-        }
-      }
-      if (!cancelled) setRenderedById(entries);
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [photos, markings]);
-
-  function workItemLabel(workItemId: string | null) {
-    if (!workItemId) return null;
-    return workItems.find((w) => w.id === workItemId)?.work_type_name || null;
-  }
-
-  // Full on-photo caption (work type + dimensions) for a given board — this
-  // is what gets burned onto the image itself, not just listed underneath.
-  function boardLabelFor(workItemId: string | null) {
-    if (!workItemId) return null;
-    const item = workItems.find((w) => w.id === workItemId);
-    if (!item) return null;
-    return buildBoardLabel({ workTypeName: item.work_type_name, width: item.survey_width, height: item.survey_height, unit: item.survey_unit });
-  }
-
-  return (
-    <div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        {photos.map((photo) => {
-          const photoMarkings = markingsByPhotoId.get(photo.id) || [];
-          const src = renderedById[photo.id] || photo.photo_url;
-          const label = photoMarkings.map((m) => workItemLabel(m.work_item_id)).filter(Boolean).join(', ');
-          return (
-            <button key={photo.id} onClick={() => setLightbox(src)} className="text-left">
-              <div className="relative rounded-lg overflow-hidden border border-slate-200">
-                <img src={src} alt="Survey" className="w-full aspect-square object-cover" />
-                {photoMarkings.length > 0 && (
-                  <span className="absolute top-1.5 right-1.5 bg-blue-600 text-white text-[10px] font-medium px-1.5 py-0.5 rounded">
-                    Marked
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-slate-500 mt-1 truncate">{label || photo.photo_type}</p>
-            </button>
-          );
-        })}
-      </div>
-
-      {lightbox && (
-        <div onClick={() => setLightbox(null)} className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4 cursor-zoom-out">
-          <img src={lightbox} alt="Marked board" className="max-w-full max-h-full rounded-lg" />
-        </div>
-      )}
-    </div>
-  );
-}

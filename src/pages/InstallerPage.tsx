@@ -6,8 +6,9 @@ import { Card, Select, Textarea } from '@/components/ui';
 import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { CameraCapture } from '@/components/CameraCapture';
+import { formatDim } from '@/lib/units';
 import { useLiveLocationTracking, LocationShareIndicator } from '@/lib/locationTracking';
-import { renderMarkedImage, buildBoardLabel } from '@/lib/markingUtils';
+import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { computeImageHash, hammingDistance, DUPLICATE_HASH_THRESHOLD } from '@/lib/imageHash';
 import { haversineDistanceMeters, GPS_DISTANCE_FLAG_METERS } from '@/lib/geoDistance';
 import type { SurveyPhoto, BoardMarking, WorkItem } from '@/lib/types';
@@ -252,7 +253,7 @@ function MaterialsToBring({ items }: { items: WorkItem[] }) {
           <div key={it.id} className="flex items-center justify-between text-xs text-slate-700">
             <span className="truncate pr-2">
               {it.material || it.work_type_name || 'Item'}
-              {it.approved_width && it.approved_height ? ` — ${it.approved_width}×${it.approved_height} ${it.approved_unit || ''}` : ''}
+              {it.approved_width && it.approved_height ? ` — ${formatDim(it.approved_width)}×${formatDim(it.approved_height)} ${it.approved_unit || ''}` : ''}
             </span>
             <span className="font-semibold text-slate-900 shrink-0">×{it.approved_quantity || 1}</span>
           </div>
@@ -850,7 +851,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                       >
                         <div className="min-w-0">
                           <p className="font-medium text-slate-900 truncate">{it.material || it.work_type_name || 'Item'}</p>
-                          <p className="text-xs text-slate-500">{it.approved_width}×{it.approved_height} {it.approved_unit} · Approved Qty {approvedQty}</p>
+                          <p className="text-xs text-slate-500">{formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit} · Approved Qty {approvedQty}</p>
                         </div>
                         <input
                           type="number"
@@ -965,9 +966,9 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                     <div key={it.id} className="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2 text-sm">
                       <div>
                         <p className="font-medium text-slate-900">{it.material || it.work_type_name || 'Item'}</p>
-                        <p className="text-xs text-slate-500">{it.approved_width}×{it.approved_height} {it.approved_unit} · Qty {it.approved_quantity || 1}</p>
+                        <p className="text-xs text-slate-500">{formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit} · Qty {it.approved_quantity || 1}</p>
                       </div>
-                      <p className="text-xs font-semibold text-blue-600">{it.approved_area?.toFixed?.(2) ?? ''} sq {it.approved_unit}</p>
+                      <p className="text-xs font-semibold text-blue-600">{it.approved_area != null ? Math.round(it.approved_area) : ''} sq {it.approved_unit}</p>
                     </div>
                   ))}
                 </div>
@@ -1050,43 +1051,15 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
 // tell at a glance which marking is which board. Tapping a thumbnail opens
 // a full-size view so a small grid image never has to be squinted at to
 // see exactly where to install.
+// `photos` can be more than one image, and any single photo can carry more
+// than one marking (e.g. a wide shopfront shot with two boards marked on
+// it). Both cases are handled by MarkedPhotoGrid below, which renders
+// every photo's markings independently — no single slow/failed photo can
+// hold up or hide the others, and every marking on a shared photo draws
+// as its own numbered polygon. Tapping a thumbnail opens a full-size view
+// so a small grid image never has to be squinted at to see exactly where
+// to install.
 function ApprovedSpecsCard({ items, photos, markings }: { items: WorkItem[]; photos: SurveyPhoto[]; markings: BoardMarking[] }) {
-  const [renderedById, setRenderedById] = useState<Record<string, string>>({});
-  const [lightbox, setLightbox] = useState<string | null>(null);
-
-  function labelForItem(workItemId: string | null) {
-    if (!workItemId) return null;
-    const item = items.find((it) => it.id === workItemId);
-    if (!item) return null;
-    return buildBoardLabel({
-      workTypeName: item.work_type_name,
-      width: item.approved_width ?? item.survey_width,
-      height: item.approved_height ?? item.survey_height,
-      unit: item.approved_unit ?? item.survey_unit,
-    });
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const entries: Record<string, string> = {};
-      for (const photo of photos) {
-        const photoMarkings = markings.filter((m) => m.survey_photo_id === photo.id);
-        const points = photoMarkings.map((m) => m.points);
-        if (points.some((set) => set.length >= 3) && photo.photo_url) {
-          try {
-            const labels = photoMarkings.map((m) => labelForItem(m.work_item_id));
-            const { dataUrl } = await renderMarkedImage(photo.photo_url, points, { labels });
-            entries[photo.id] = dataUrl;
-          } catch { /* fall back to plain photo */ }
-        }
-      }
-      if (!cancelled) setRenderedById(entries);
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [photos, markings]);
-
   if (items.length === 0 && photos.length === 0) return null;
 
   return (
@@ -1102,7 +1075,7 @@ function ApprovedSpecsCard({ items, photos, markings }: { items: WorkItem[]; pho
             <div key={it.id} className="flex items-center justify-between bg-blue-50 rounded-lg px-3 py-2 text-sm">
               <div>
                 <p className="font-medium text-slate-900">{it.material || it.work_type_name || 'Item'}</p>
-                <p className="text-xs text-slate-500">{it.approved_width}×{it.approved_height} {it.approved_unit}{it.approved_notes ? ` · ${it.approved_notes}` : ''}</p>
+                <p className="text-xs text-slate-500">{formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}{it.approved_notes ? ` · ${it.approved_notes}` : ''}</p>
               </div>
               <p className="text-sm font-bold text-blue-700 shrink-0 pl-2">×{it.approved_quantity || 1}</p>
             </div>
@@ -1113,35 +1086,8 @@ function ApprovedSpecsCard({ items, photos, markings }: { items: WorkItem[]; pho
       {photos.length > 0 && (
         <>
           <p className="text-xs text-slate-400 mb-1.5">Survey mein jaha mark kiya gaya waha hi lagana hai — photo par tap karke bada dekh sakte ho:</p>
-          <div className="grid grid-cols-3 gap-2">
-            {photos.map((photo) => {
-              const photoMarkings = markings.filter((m) => m.survey_photo_id === photo.id);
-              const src = renderedById[photo.id] || photo.photo_url;
-              const boardLabels = photoMarkings.map((m) => labelForItem(m.work_item_id)).filter(Boolean) as string[];
-              return (
-                <button key={photo.id} type="button" onClick={() => setLightbox(src)} className="text-left">
-                  <div className="relative rounded-lg overflow-hidden border border-slate-200">
-                    <img src={src} alt="Approved installation scene" className="w-full aspect-square object-cover" />
-                    {renderedById[photo.id] && (
-                      <span className="absolute top-1 right-1 bg-blue-600 text-white text-[9px] font-medium px-1 py-0.5 rounded">
-                        {boardLabels.length > 1 ? `${boardLabels.length} Marked` : 'Marked'}
-                      </span>
-                    )}
-                  </div>
-                  {boardLabels.length > 0 && (
-                    <p className="text-[10px] text-slate-500 mt-1 leading-tight">{boardLabels.join(', ')}</p>
-                  )}
-                </button>
-              );
-            })}
-          </div>
+          <MarkedPhotoGrid photos={photos} markings={markings} workItems={items} />
         </>
-      )}
-
-      {lightbox && (
-        <div onClick={() => setLightbox(null)} className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4 cursor-zoom-out">
-          <img src={lightbox} alt="Marked board — full size" className="max-w-full max-h-full rounded-lg" />
-        </div>
       )}
     </Card>
   );

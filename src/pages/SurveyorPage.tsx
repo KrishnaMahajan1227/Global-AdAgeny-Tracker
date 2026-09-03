@@ -12,7 +12,7 @@ import {
 } from '@/lib/offlineDb';
 import { syncAllPendingDrafts, syncDraft } from '@/lib/syncManager';
 import { CameraCapture } from '@/components/CameraCapture';
-import { VoiceMicButton } from '@/components/VoiceMicButton';
+import { VoiceMicButton, VoiceSizeButton } from '@/components/VoiceMicButton';
 import { BoardMarkerCanvas } from '@/components/BoardMarkerCanvas';
 import { fillMissingShopCoordinates, buildAddressQuery } from '@/lib/geocode';
 import { LENGTH_UNIT_OPTIONS, areaSqFt, formatDim } from '@/lib/units';
@@ -1186,11 +1186,23 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                               })}
                             </div>
                           </div>
+                          {/* One-tap combined capture — "10 by 15" fills both
+                              Width and Height together, instead of opening
+                              the mic separately for each field. Typing +
+                              the unit dropdowns below are unaffected either
+                              way; this is just a faster way to fill them. */}
+                          <VoiceSizeButton
+                            onValues={(values) => setWorkItems(workItems.map((w, i) => {
+                              if (i !== idx) return w;
+                              const next = { ...w, width: values[0] ?? w.width };
+                              if (values[1] != null) next.height = values[1];
+                              return next;
+                            }))}
+                          />
                           <div className="grid grid-cols-2 gap-3">
                             <Input
                               label="Width" type="number" value={item.width} step="any"
                               onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, width: v } : w))}
-                              addon={<VoiceMicButton mode="number" fieldLabel="Width" onValue={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, width: v } : w))} />}
                             />
                             <Select label="Width Unit" value={item.unit} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, unit: v } : w))} options={LENGTH_UNIT_OPTIONS} />
                           </div>
@@ -1198,7 +1210,6 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                             <Input
                               label="Height" type="number" value={item.height} step="any"
                               onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, height: v } : w))}
-                              addon={<VoiceMicButton mode="number" fieldLabel="Height" onValue={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, height: v } : w))} />}
                             />
                             {/* Height gets its own unit — a board's height is sometimes
                                 genuinely measured differently than its width (e.g. a

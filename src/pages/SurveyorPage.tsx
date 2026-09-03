@@ -12,6 +12,7 @@ import {
 } from '@/lib/offlineDb';
 import { syncAllPendingDrafts, syncDraft } from '@/lib/syncManager';
 import { CameraCapture } from '@/components/CameraCapture';
+import { VoiceMicButton } from '@/components/VoiceMicButton';
 import { BoardMarkerCanvas } from '@/components/BoardMarkerCanvas';
 import { fillMissingShopCoordinates, buildAddressQuery } from '@/lib/geocode';
 import { LENGTH_UNIT_OPTIONS, areaSqFt, formatDim } from '@/lib/units';
@@ -509,6 +510,9 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   const [draftReady, setDraftReady] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Hidden native file input backing the "Gallery" quick-pick shortcut on
+  // the main Photos & Boards screen (see the button next to Take Photo).
+  const galleryInputRef = useRef<HTMLInputElement>(null);
 
   // Which photo is currently open for marking + measurements on the
   // Photos & Boards step. null means "show the photo gallery / take a new
@@ -1085,9 +1089,41 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
             )}
 
             {!currentPhotoLocalId && (
-              <button onClick={() => setCameraOpen(true)} className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white font-bold py-4 rounded-xl text-lg">
-                <Camera className="w-6 h-6" /> {photos.length === 0 ? 'Take Photo' : 'Take Another Photo'}
-              </button>
+              <div className="flex gap-2">
+                <button onClick={() => setCameraOpen(true)} className="flex-1 flex items-center justify-center gap-2 bg-blue-600 text-white font-bold py-4 rounded-xl text-lg">
+                  <Camera className="w-6 h-6" /> {photos.length === 0 ? 'Take Photo' : 'Take Another'}
+                </button>
+                {/* Gallery picker straight on this screen — previously it
+                    only lived inside the live-camera view, so picking an
+                    existing photo meant waiting for the camera to open
+                    first just to tap "Gallery". This does the exact same
+                    thing (opens the OS photo picker, no live camera
+                    stream involved) but one tap away instead of two. The
+                    in-camera Gallery button still works as before — this
+                    is an added shortcut, not a replacement. */}
+                <button
+                  onClick={() => galleryInputRef.current?.click()}
+                  className="flex-shrink-0 flex flex-col items-center justify-center gap-1 bg-slate-100 text-slate-700 font-medium px-4 rounded-xl border border-slate-200"
+                  aria-label="Choose from Gallery"
+                >
+                  <Image className="w-5 h-5" />
+                  <span className="text-[10px]">Gallery</span>
+                </button>
+                <input
+                  ref={galleryInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = () => handlePhotoCaptured(reader.result as string, file.name);
+                    reader.readAsDataURL(file);
+                    e.target.value = '';
+                  }}
+                />
+              </div>
             )}
 
             {currentPhotoLocalId && (() => {
@@ -1151,11 +1187,19 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                             </div>
                           </div>
                           <div className="grid grid-cols-2 gap-3">
-                            <Input label="Width" type="number" value={item.width} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, width: v } : w))} step="any" />
+                            <Input
+                              label="Width" type="number" value={item.width} step="any"
+                              onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, width: v } : w))}
+                              addon={<VoiceMicButton mode="number" fieldLabel="Width" onValue={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, width: v } : w))} />}
+                            />
                             <Select label="Width Unit" value={item.unit} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, unit: v } : w))} options={LENGTH_UNIT_OPTIONS} />
                           </div>
                           <div className="grid grid-cols-2 gap-3">
-                            <Input label="Height" type="number" value={item.height} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, height: v } : w))} step="any" />
+                            <Input
+                              label="Height" type="number" value={item.height} step="any"
+                              onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, height: v } : w))}
+                              addon={<VoiceMicButton mode="number" fieldLabel="Height" onValue={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, height: v } : w))} />}
+                            />
                             {/* Height gets its own unit — a board's height is sometimes
                                 genuinely measured differently than its width (e.g. a
                                 strip that's "10 ft wide, 8 in deep"), and forcing one
@@ -1163,14 +1207,35 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                                 compute a silently wrong area. */}
                             <Select label="Height Unit" value={item.heightUnit || item.unit} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, heightUnit: v } : w))} options={LENGTH_UNIT_OPTIONS} />
                           </div>
-                          <Input label="Quantity" type="number" value={item.quantity} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, quantity: v } : w))} />
-                          <Textarea label="Notes" value={item.notes} onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, notes: v } : w))} rows={2} />
+                          <Input
+                            label="Quantity" type="number" value={item.quantity}
+                            onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, quantity: v } : w))}
+                            addon={<VoiceMicButton mode="number" fieldLabel="Quantity" onValue={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, quantity: v } : w))} />}
+                          />
+                          <Textarea
+                            label="Notes" value={item.notes} rows={2}
+                            onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, notes: v } : w))}
+                            addon={<VoiceMicButton mode="text" fieldLabel="Notes" onValue={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, notes: w.notes ? `${w.notes} ${v}` : v } : w))} />}
+                          />
                           <div className="bg-blue-50 rounded-lg p-3 text-center">
-                            <p className="text-xs text-blue-600">Size Taken</p>
+                            <p className="text-xs text-blue-600">Size Taken (as measured)</p>
                             <p className="text-lg font-bold text-blue-700">
                               {item.width || 0} {item.unit} × {item.height || 0} {item.heightUnit || item.unit}
                               {(parseInt(item.quantity) || 1) > 1 ? ` × ${item.quantity}` : ''}
                             </p>
+                            {/* Mixed units (e.g. width in feet, height in inch) are
+                                real and common on-site — this always shows the final,
+                                properly-converted sq.ft figure right here, the same
+                                number that gets saved to the survey and used by every
+                                agency downstream (design, PO tracking, billing all run
+                                on sq.ft regardless of what unit was convenient to
+                                measure in on-site). */}
+                            {(item.width || item.height) && (
+                              <p className="text-xs text-blue-500 mt-1">
+                                = {areaSqFt(parseFloat(item.width) || 0, item.unit, parseFloat(item.height) || 0, item.heightUnit || item.unit).toFixed(2)} sq.ft
+                                {(parseInt(item.quantity) || 1) > 1 ? ` per pc × ${item.quantity} = ${area.toFixed(2)} sq.ft total` : ' (final, converted)'}
+                              </p>
+                            )}
                           </div>
                           {(() => {
                             const lineItem = poLineItemsForShop?.find((li) => li.id === item.po_line_item_id);

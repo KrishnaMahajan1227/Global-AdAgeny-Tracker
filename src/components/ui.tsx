@@ -381,6 +381,7 @@ export function Input({
   placeholder,
   step,
   min,
+  addon,
 }: {
   label: string;
   type?: string;
@@ -390,22 +391,30 @@ export function Input({
   placeholder?: string;
   step?: string;
   min?: string;
+  /** Optional element (e.g. a voice-input mic button) rendered to the
+   *  right of the input, inside the same row as the field itself. Purely
+   *  additive — every existing caller that doesn't pass this renders
+   *  exactly as before. */
+  addon?: ReactNode;
 }) {
   return (
     <div>
       <label className="block text-sm font-medium text-slate-700 mb-1">
         {label} {required && <span className="text-red-500">*</span>}
       </label>
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        required={required}
-        placeholder={placeholder}
-        step={step}
-        min={min}
-        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition text-slate-900"
-      />
+      <div className="flex items-center gap-2">
+        <input
+          type={type}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          required={required}
+          placeholder={placeholder}
+          step={step}
+          min={min}
+          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition text-slate-900"
+        />
+        {addon}
+      </div>
     </div>
   );
 }
@@ -495,6 +504,7 @@ export function Textarea({
   required,
   placeholder,
   rows = 3,
+  addon,
 }: {
   label: string;
   value: string;
@@ -502,20 +512,27 @@ export function Textarea({
   required?: boolean;
   placeholder?: string;
   rows?: number;
+  /** Optional element (e.g. a voice-dictation mic button), rendered
+   *  floating in the top-right corner of the textarea. Purely additive —
+   *  omitting it renders exactly as before. */
+  addon?: ReactNode;
 }) {
   return (
     <div>
       <label className="block text-sm font-medium text-slate-700 mb-1">
         {label} {required && <span className="text-red-500">*</span>}
       </label>
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        required={required}
-        placeholder={placeholder}
-        rows={rows}
-        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition text-slate-900 resize-none"
-      />
+      <div className="relative">
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          required={required}
+          placeholder={placeholder}
+          rows={rows}
+          className={`w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition text-slate-900 resize-none ${addon ? 'pr-11' : ''}`}
+        />
+        {addon && <div className="absolute top-2 right-2">{addon}</div>}
+      </div>
     </div>
   );
 }

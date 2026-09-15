@@ -35,7 +35,7 @@ export default defineConfig({
         // the ceiling so it still gets precached instead of silently dropped
         // from offline support. Doesn't change anything about what's cached,
         // just stops the build from erroring out / skipping this file.
-        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+        maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         // Never let the service worker intercept Supabase API/auth/storage/realtime calls —
         // those must always hit the network (or fail explicitly) so data stays consistent.
         navigateFallbackDenylist: [/^\/api\//],

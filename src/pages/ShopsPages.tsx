@@ -12,16 +12,17 @@ import { Client, Project, Campaign, Shop, WorkType, WorkItem, SurveyPhoto, Board
 import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
-import { formatDim } from '@/lib/units';
+import { formatDim, LENGTH_UNIT_OPTIONS } from '@/lib/units';
 import { fulfillmentTypeLabel } from '@/lib/poUtilization';
 import { geocodeAddress, buildAddressQuery } from '@/lib/geocode';
 import { findShopHeaderRow, findExtraHeaders, buildShopRows, resolveZoneIds, type ParsedShopRow } from '@/lib/shopBulkUpload';
+import { runBackfillPipeline, type BackfillStage } from '@/lib/backfillPipeline';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
 import {
   Plus, Pencil, Trash2, Store, MapPin, ArrowLeft, Search, CheckCircle2, UserPlus, CheckSquare, Square,
   Ruler, FileText, Palette, Wrench, Users, AlertCircle, XCircle, Clock, Camera, LocateFixed, Loader2, Layers,
   ListChecks, Building2, Lock, ListOrdered, UploadCloud, ChevronRight, Ban, Phone,
-  ChevronLeft, ChevronsLeft, ChevronsRight, X, RotateCcw,
+  ChevronLeft, ChevronsLeft, ChevronsRight, X, RotateCcw, FastForward, PlusCircle,
 } from 'lucide-react';
 
 // Page sizes offered on the Shops list. Kept modest (not "show all") on
@@ -926,6 +927,116 @@ export function ShopsPage() {
     enabled: !!orgId,
   });
 
+  // ---- ADD SHOP (Already In Progress) — for shops whose survey/design/
+  // production already happened outside the app entirely (nothing here
+  // yet, not even the shop row). Creates the shop, then runs the exact
+  // same backfill pipeline the existing-shop panel on Shop Detail uses,
+  // so it ends up in exactly the same state either way. ----
+  const [fastTrackOpen, setFastTrackOpen] = useState(false);
+  const [ftForm, setFtForm] = useState({
+    name: '', client_id: '', project_id: '', owner_name: '', contact_phone: '',
+    address: '', city: '', district: '', zone_id: '', state: '', purchase_order_id: '',
+  });
+  const [ftStage, setFtStage] = useState<BackfillStage>('production_done');
+  type FtItem = { key: string; workTypeId: string; workTypeName: string; material: string; width: string; height: string; unit: string; quantity: string };
+  const [ftItems, setFtItems] = useState<FtItem[]>([
+    { key: crypto.randomUUID(), workTypeId: '', workTypeName: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' },
+  ]);
+  const [ftSurveyorId, setFtSurveyorId] = useState('');
+  const [ftDesignerId, setFtDesignerId] = useState('');
+  const [ftProductionId, setFtProductionId] = useState('');
+  const [ftInstallerId, setFtInstallerId] = useState('');
+  const [ftNote, setFtNote] = useState('');
+
+  const { data: ftPeople } = useQuery({
+    queryKey: ['org-people-all-roles', orgId],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, full_name, role')
+        .eq('organization_id', orgId)
+        .in('role', ['surveyor', 'designer', 'printing', 'installer'])
+        .eq('is_active', true)
+        .order('full_name');
+      if (error) throw new Error(`Could not load team members: ${error.message}`);
+      return data as { id: string; full_name: string; role: string }[];
+    },
+    enabled: !!orgId && fastTrackOpen,
+  });
+  const { data: ftWorkTypes } = useQuery({
+    queryKey: ['org-work-types', orgId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('work_types').select('id, name').eq('organization_id', orgId).eq('is_active', true).order('name');
+      if (error) throw new Error(`Could not load work types: ${error.message}`);
+      return data as { id: string; name: string }[];
+    },
+    enabled: !!orgId && fastTrackOpen,
+  });
+
+  function resetFastTrack() {
+    setFtForm({ name: '', client_id: '', project_id: '', owner_name: '', contact_phone: '', address: '', city: '', district: '', zone_id: '', state: '', purchase_order_id: '' });
+    setFtStage('production_done');
+    setFtItems([{ key: crypto.randomUUID(), workTypeId: '', workTypeName: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }]);
+    setFtSurveyorId(''); setFtDesignerId(''); setFtProductionId(''); setFtInstallerId(''); setFtNote('');
+  }
+
+  const fastTrackMutation = useMutation({
+    mutationFn: async () => {
+      if (!orgId || !profile) throw new Error('Not signed in — try again in a moment.');
+      if (!ftForm.name.trim()) throw new Error('Shop name is required.');
+      if (!ftForm.client_id) throw new Error('Pick a client first.');
+
+      let latitude: number | null = null;
+      let longitude: number | null = null;
+      const addrQuery = buildAddressQuery(ftForm);
+      if (addrQuery) {
+        try {
+          const result = await geocodeAddress(addrQuery);
+          latitude = result.lat;
+          longitude = result.lng;
+        } catch {
+          // Couldn't auto-locate — save without coordinates, same as the
+          // normal Add Shop form; can be located later from Edit Shop.
+        }
+      }
+
+      const { data: newShop, error: shopError } = await supabase.from('shops').insert({
+        organization_id: orgId,
+        name: ftForm.name.trim(), client_id: ftForm.client_id, project_id: ftForm.project_id || null,
+        owner_name: ftForm.owner_name.trim(), contact_phone: ftForm.contact_phone.trim(),
+        address: ftForm.address.trim(), city: ftForm.city.trim(), district: ftForm.district.trim(),
+        zone_id: ftForm.zone_id || null, state: ftForm.state.trim(), latitude, longitude,
+        purchase_order_id: ftForm.purchase_order_id || null,
+        status: 'pending',
+      }).select('id, name, status').single();
+      if (shopError) throw new Error(`Could not create shop: ${shopError.message}`);
+
+      await logAudit('shops', newShop.id, 'insert', null, null, null, `Created shop: ${newShop.name} (Already In Progress)`);
+
+      try {
+        await runBackfillPipeline({
+          orgId, shopId: newShop.id, shopName: newShop.name, shopStatusBefore: newShop.status, actorId: profile.id,
+          stage: ftStage, items: ftItems, surveyorId: ftSurveyorId, designerId: ftDesignerId,
+          productionId: ftProductionId, installerId: ftInstallerId, note: ftNote,
+          workTypes: ftWorkTypes || [], existingAssignments: [],
+        });
+      } catch (err) {
+        // The shop itself was created successfully even if the backfill
+        // half fails partway (e.g. a bad item row) — say so clearly
+        // rather than leaving the person thinking nothing happened, so
+        // they know to go finish it from the shop's own Backfill panel
+        // instead of re-submitting this form and creating a duplicate shop.
+        throw new Error(`Shop "${newShop.name}" was created, but backfilling its data failed: ${(err as Error).message}. Open the shop and use its Backfill panel to finish.`);
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['shops-locations', orgId] });
+      setFastTrackOpen(false);
+      resetFastTrack();
+    },
+  });
+
   // Campaigns — client-owned, but any campaign with at least one Work
   // Order assigned to this agency is visible here (RLS already scopes
   // this the same way the Campaigns/Projects page's client-campaigns
@@ -1217,13 +1328,39 @@ export function ShopsPage() {
         // was built to fix, just across many shops at once).
         const { data: existing, error: existingError } = await supabase
           .from('shop_assignments')
-          .select('shop_id, user_id, role, status')
+          .select('id, shop_id, user_id, role, status')
           .in('shop_id', targetShops.map((s) => s.id))
           .eq('role', bulkRole);
         if (existingError) throw new Error(`Could not check existing assignments: ${existingError.message}`);
         for (const shop of targetShops) {
           const dup = (existing || []).find((a) => a.shop_id === shop.id && a.user_id === bulkUserId && a.status !== 'declined');
           if (dup) { skipped++; continue; }
+
+          // Reassigning this shop's role to a NEW person — whoever was
+          // actively holding it before (status 'assigned', i.e. not yet
+          // completed) must be taken off it here, or they keep seeing the
+          // shop in their own queue/workload forever even though someone
+          // else now owns it. This is what made a reassign look like it
+          // "didn't reflect" for the new person: the old assignee's copy
+          // never went away, and dashboards summing open assignments kept
+          // counting both.
+          const previousHolders = (existing || []).filter(
+            (a) => a.shop_id === shop.id && a.user_id !== bulkUserId && a.status === 'assigned'
+          );
+          for (const prev of previousHolders) {
+            const { error: supersedeError } = await supabase
+              .from('shop_assignments')
+              .update({ status: 'declined' })
+              .eq('id', prev.id);
+            if (supersedeError) { failed++; continue; }
+            await createNotification(
+              prev.user_id,
+              'Reassigned',
+              `You've been reassigned off ${shop.name} — it now belongs to someone else.`,
+              'info'
+            );
+          }
+
           const { error } = await supabase.from('shop_assignments').insert({
             organization_id: orgId,
             shop_id: shop.id,
@@ -1480,6 +1617,15 @@ export function ShopsPage() {
             >
               <UploadCloud className="w-4 h-4" /> Bulk Upload
             </button>
+            {canBulkAssign && (
+              <button
+                onClick={() => { resetFastTrack(); setFastTrackOpen(true); }}
+                className="flex items-center gap-2 bg-white text-amber-700 border border-amber-300 hover:bg-amber-50 px-3.5 py-2 rounded-lg font-medium text-sm transition"
+                title="For shops already surveyed/designed/produced outside the app"
+              >
+                <FastForward className="w-4 h-4" /> Add Shop (In Progress)
+              </button>
+            )}
             <button onClick={openAdd} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium text-sm transition">
               <Plus className="w-4 h-4" /> Add Shop
             </button>
@@ -2117,6 +2263,149 @@ export function ShopsPage() {
         confirmLabel={bulkRemoveMutation.isPending ? 'Working...' : (profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Delete' : 'Cancel Shops')}
         danger
       />
+
+      <Modal open={fastTrackOpen} onClose={() => setFastTrackOpen(false)} title="Add Shop — Already In Progress" size="lg">
+        <div className="space-y-5">
+          <p className="text-sm text-slate-600">
+            For a shop that doesn't exist in the app at all yet, but has already been surveyed / designed /
+            produced elsewhere. This creates the shop and its history in one go, so only Installation
+            is left to run through the normal app flow.
+          </p>
+
+          <div>
+            <h3 className="text-xs font-medium text-slate-500 uppercase tracking-wide mb-2">Shop Details</h3>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Shop Name" value={ftForm.name} onChange={(v) => setFtForm((f) => ({ ...f, name: v }))} required />
+              <Select label="Client" value={ftForm.client_id} onChange={(v) => setFtForm((f) => ({ ...f, client_id: v, project_id: '' }))} options={[{ value: '', label: 'Select client...' }, ...(clients || []).map((c) => ({ value: c.id, label: c.name }))]} required />
+              <Select label="Project (optional)" value={ftForm.project_id} onChange={(v) => setFtForm((f) => ({ ...f, project_id: v }))} options={[{ value: '', label: 'None' }, ...(projects || []).filter((p) => !ftForm.client_id || p.client_id === ftForm.client_id).map((p) => ({ value: p.id, label: p.name }))]} />
+              <Select label="Purchase Order (optional)" value={ftForm.purchase_order_id} onChange={(v) => setFtForm((f) => ({ ...f, purchase_order_id: v }))} options={[{ value: '', label: 'None' }, ...(purchaseOrders || []).filter((p) => !ftForm.client_id || p.client_id === ftForm.client_id).map((p) => ({ value: p.id, label: p.po_number }))]} />
+              <Input label="Owner Name" value={ftForm.owner_name} onChange={(v) => setFtForm((f) => ({ ...f, owner_name: v }))} />
+              <Input label="Contact Phone" value={ftForm.contact_phone} onChange={(v) => setFtForm((f) => ({ ...f, contact_phone: v }))} />
+              <Input label="Address" value={ftForm.address} onChange={(v) => setFtForm((f) => ({ ...f, address: v }))} />
+              <Input label="City" value={ftForm.city} onChange={(v) => setFtForm((f) => ({ ...f, city: v }))} />
+              <Input label="District" value={ftForm.district} onChange={(v) => setFtForm((f) => ({ ...f, district: v }))} />
+              <Combobox label="State" value={ftForm.state} onChange={(v) => setFtForm((f) => ({ ...f, state: v }))} options={INDIA_STATES} />
+              <Select label="Zone (optional)" value={ftForm.zone_id} onChange={(v) => setFtForm((f) => ({ ...f, zone_id: v }))} options={[{ value: '', label: 'None' }, ...(zones || []).map((z) => ({ value: z.id, label: z.name }))]} />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-xs font-medium text-slate-500 uppercase tracking-wide">How far has this shop already progressed?</label>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {([
+                { value: 'design_pending', label: 'Survey done', hint: 'Design still to happen in-app' },
+                { value: 'production_pending', label: 'Survey + Design done', hint: 'Production still to happen in-app' },
+                { value: 'production_done', label: 'Survey + Design + Production done', hint: 'Ready for Installation' },
+                { value: 'dispatched', label: '...and vehicle already left', hint: 'Same as above, marked Dispatched' },
+              ] as { value: BackfillStage; label: string; hint: string }[]).map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setFtStage(opt.value)}
+                  className={`text-left border rounded-lg p-2.5 text-xs transition ${
+                    ftStage === opt.value ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-500' : 'border-slate-200 hover:bg-slate-50'
+                  }`}
+                >
+                  <p className="font-medium text-slate-900">{opt.label}</p>
+                  <p className="text-slate-500 mt-0.5">{opt.hint}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <Select
+            label="Surveyed by (optional — defaults to you)"
+            value={ftSurveyorId}
+            onChange={setFtSurveyorId}
+            options={[{ value: '', label: 'Me (entering this data)' }, ...(ftPeople || []).filter((p) => p.role === 'surveyor').map((p) => ({ value: p.id, label: p.full_name }))]}
+          />
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Boards / Items</label>
+              <button
+                type="button"
+                onClick={() => setFtItems((prev) => [...prev, { key: crypto.randomUUID(), workTypeId: '', workTypeName: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }])}
+                className="flex items-center gap-1 text-xs font-medium text-blue-600"
+              >
+                <PlusCircle className="w-3.5 h-3.5" /> Add item
+              </button>
+            </div>
+            <div className="space-y-3">
+              {ftItems.map((item, idx) => (
+                <div key={item.key} className="border border-slate-200 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-slate-500">Item {idx + 1}</span>
+                    {ftItems.length > 1 && (
+                      <button type="button" onClick={() => setFtItems((prev) => prev.filter((_, i) => i !== idx))} className="text-slate-400 hover:text-red-600">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Select
+                      label="Work type"
+                      value={item.workTypeId}
+                      onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, workTypeId: v } : it)))}
+                      options={[{ value: '', label: 'Custom / not listed' }, ...(ftWorkTypes || []).map((w) => ({ value: w.id, label: w.name }))]}
+                    />
+                    <Input label="Or type a name" value={item.workTypeName} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, workTypeName: v } : it)))} />
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    <Input label="Width" type="number" value={item.width} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, width: v } : it)))} />
+                    <Input label="Height" type="number" value={item.height} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, height: v } : it)))} />
+                    <Select label="Unit" value={item.unit} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, unit: v } : it)))} options={LENGTH_UNIT_OPTIONS} />
+                    <Input label="Qty" type="number" value={item.quantity} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, quantity: v } : it)))} />
+                  </div>
+                  <Input label="Material (optional)" value={item.material} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, material: v } : it)))} />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {ftStage !== 'design_pending' && (
+            <Select
+              label="Designed by (optional)"
+              value={ftDesignerId}
+              onChange={setFtDesignerId}
+              options={[{ value: '', label: 'Not specified' }, ...(ftPeople || []).filter((p) => p.role === 'designer').map((p) => ({ value: p.id, label: p.full_name }))]}
+            />
+          )}
+
+          {(ftStage === 'production_done' || ftStage === 'dispatched') && (
+            <>
+              <Select
+                label="Produced by (optional)"
+                value={ftProductionId}
+                onChange={setFtProductionId}
+                options={[{ value: '', label: 'Not specified' }, ...(ftPeople || []).filter((p) => p.role === 'printing').map((p) => ({ value: p.id, label: p.full_name }))]}
+              />
+              <Select
+                label="Assign installer now (optional)"
+                value={ftInstallerId}
+                onChange={setFtInstallerId}
+                options={[{ value: '', label: "Don't assign yet" }, ...(ftPeople || []).filter((p) => p.role === 'installer').map((p) => ({ value: p.id, label: p.full_name }))]}
+              />
+            </>
+          )}
+
+          <Textarea label="Note (optional)" value={ftNote} onChange={(v) => setFtNote(v)} placeholder="e.g. Completed in March before this shop was added to the system" />
+
+          {fastTrackMutation.isError && (
+            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">
+              {(fastTrackMutation.error as Error).message}
+            </p>
+          )}
+
+          <button
+            onClick={() => fastTrackMutation.mutate()}
+            disabled={fastTrackMutation.isPending}
+            className="w-full bg-amber-600 hover:bg-amber-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
+          >
+            {fastTrackMutation.isPending ? 'Saving...' : 'Create Shop with Backfilled Data'}
+          </button>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -2128,6 +2417,23 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const [assignModal, setAssignModal] = useState<'surveyor' | 'installer' | null>(null);
   const [assignUserId, setAssignUserId] = useState('');
   const canAssign = profile?.role === 'agency_owner' || profile?.role === 'admin' || profile?.role === 'demo';
+
+  // ---- BACKFILL (Owner/Admin entering work already completed outside
+  // the app — survey/design/production done on paper or another system,
+  // only Installation is left to actually run in-app). See
+  // backfillMutation below for exactly what this writes. ----
+  const [backfillOpen, setBackfillOpen] = useState(false);
+  const [backfillStage, setBackfillStage] = useState<BackfillStage>('production_done');
+  type BackfillItem = { key: string; workTypeId: string; workTypeName: string; material: string; width: string; height: string; unit: string; quantity: string };
+  const [backfillItems, setBackfillItems] = useState<BackfillItem[]>([
+    { key: crypto.randomUUID(), workTypeId: '', workTypeName: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' },
+  ]);
+  const [backfillSurveyorId, setBackfillSurveyorId] = useState('');
+  const [backfillDesignerId, setBackfillDesignerId] = useState('');
+  const [backfillProductionId, setBackfillProductionId] = useState('');
+  const [backfillInstallerId, setBackfillInstallerId] = useState('');
+  const [backfillNote, setBackfillNote] = useState('');
+  const [backfillConfirmDuplicate, setBackfillConfirmDuplicate] = useState(false);
 
   const { data: shop } = useQuery({
     queryKey: ['shop', shopId],
@@ -2270,6 +2576,71 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     enabled: !!shopId,
   });
 
+  // People-pickers + work types for the Backfill form — one query per
+  // role, only fetched once the panel is actually open.
+  const { data: backfillPeople } = useQuery({
+    queryKey: ['org-people-all-roles', orgId],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, full_name, role')
+        .eq('organization_id', orgId)
+        .in('role', ['surveyor', 'designer', 'printing', 'installer'])
+        .eq('is_active', true)
+        .order('full_name');
+      if (error) throw new Error(`Could not load team members: ${error.message}`);
+      return data as { id: string; full_name: string; role: string }[];
+    },
+    enabled: !!orgId && backfillOpen,
+  });
+  const { data: backfillWorkTypes } = useQuery({
+    queryKey: ['org-work-types', orgId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('work_types').select('id, name').eq('organization_id', orgId).eq('is_active', true).order('name');
+      if (error) throw new Error(`Could not load work types: ${error.message}`);
+      return data as { id: string; name: string }[];
+    },
+    enabled: !!orgId && backfillOpen,
+  });
+
+  // Guardrail: this tool inserts a brand-new survey/design_task/
+  // production_order — it's built for shops that have NOTHING in the app
+  // yet. If any of those already exist (survey done through the real
+  // Survey Review flow, say), running it again would create a second,
+  // duplicate set of pipeline records rather than filling a gap. Detected
+  // here so the form can warn instead of silently doubling things up.
+  const shopHasExistingPipelineData = (surveys && surveys.length > 0) || (designTasks && designTasks.length > 0) || (productionOrders && productionOrders.length > 0);
+
+  const backfillMutation = useMutation({
+    mutationFn: async () => {
+      if (!shop || !profile || !orgId) throw new Error('Shop not loaded yet — try again in a moment.');
+      if (shopHasExistingPipelineData && !backfillConfirmDuplicate) {
+        throw new Error('This shop already has survey/design/production data in the app — tick the confirmation checkbox to proceed anyway.');
+      }
+      await runBackfillPipeline({
+        orgId, shopId, shopName: shop.name, shopStatusBefore: shop.status, actorId: profile.id,
+        stage: backfillStage, items: backfillItems, surveyorId: backfillSurveyorId, designerId: backfillDesignerId,
+        productionId: backfillProductionId, installerId: backfillInstallerId, note: backfillNote,
+        workTypes: backfillWorkTypes || [], existingAssignments: assignments || [],
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shop', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shop-surveys', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shop-design-tasks', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shop-production', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shop-assignments', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['installer-assignments'] });
+      queryClient.invalidateQueries({ queryKey: ['installer-work'] });
+      setBackfillOpen(false);
+      setBackfillItems([{ key: crypto.randomUUID(), workTypeId: '', workTypeName: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }]);
+      setBackfillSurveyorId(''); setBackfillDesignerId(''); setBackfillProductionId(''); setBackfillInstallerId('');
+      setBackfillNote(''); setBackfillConfirmDuplicate(false); setBackfillStage('production_done');
+    },
+  });
+
   // Surveyors/installers to assign — previously there was no screen
   // anywhere in the app to create a `shop_assignments` row, so a new shop
   // could never actually get a surveyor or installer without someone
@@ -2305,6 +2676,25 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       );
       if (dup) throw new Error('This person is already assigned to this role on this shop.');
 
+      // This button doubles as "Reassign" — clicking it again with a
+      // different person is how an Admin/Owner hands the shop's surveyor
+      // or installer over to someone else. Whoever was actively holding
+      // that role before (status 'assigned', not yet completed) needs to
+      // be taken off it now, otherwise the old person keeps this shop in
+      // their own queue and workload count forever, and this exact
+      // Assignments list keeps showing both of them — which is what made
+      // a reassign look like it wasn't reflecting for the new person.
+      const previousHolders = (assignments || []).filter(
+        (a) => a.role === assignModal && a.user_id !== assignUserId && a.status === 'assigned'
+      );
+      for (const prev of previousHolders) {
+        const { error: supersedeError } = await supabase
+          .from('shop_assignments')
+          .update({ status: 'declined' })
+          .eq('id', prev.id);
+        if (supersedeError) throw new Error(`Could not remove previous ${assignModal}: ${supersedeError.message}`);
+      }
+
       const { error: insertError } = await supabase.from('shop_assignments').insert({
         organization_id: orgId,
         shop_id: shopId,
@@ -2322,12 +2712,33 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       }
 
       const worker = (fieldWorkers || []).find((w) => w.id === assignUserId);
-      await logAudit('shop_assignments', null, 'insert', 'role', null, assignModal, `Assigned ${worker?.full_name || 'user'} as ${assignModal} for ${shop.name}`);
+      const action = previousHolders.length > 0 ? 'reassign' : 'insert';
+      const logMessage = previousHolders.length > 0
+        ? `Reassigned ${assignModal} for ${shop.name} to ${worker?.full_name || 'user'}`
+        : `Assigned ${worker?.full_name || 'user'} as ${assignModal} for ${shop.name}`;
+      await logAudit('shop_assignments', null, action, 'role', null, assignModal, logMessage);
       await createNotification(assignUserId, 'New Assignment', `You've been assigned as ${assignModal} for ${shop.name}`, 'info', assignModal === 'surveyor' ? '/survey' : undefined);
+      for (const prev of previousHolders) {
+        await createNotification(
+          prev.user_id,
+          'Reassigned',
+          `You've been reassigned off ${shop.name} as ${assignModal} — it now belongs to ${worker?.full_name || 'someone else'}.`,
+          'info'
+        );
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['shop-assignments', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop', shopId] });
+      // The person who just got reassigned off this shop is on a
+      // completely different screen (their own Surveyor/Installer
+      // dashboard), so their query cache needs invalidating from here —
+      // otherwise Realtime/polling eventually catches it, but not
+      // instantly, and it can look like the reassignment "didn't take".
+      queryClient.invalidateQueries({ queryKey: ['surveyor-assignments'] });
+      queryClient.invalidateQueries({ queryKey: ['installer-assignments'] });
+      queryClient.invalidateQueries({ queryKey: ['installer-work'] });
+      queryClient.invalidateQueries({ queryKey: ['team-workload-drilldown'] });
       setAssignModal(null);
       setAssignUserId('');
     },
@@ -2617,6 +3028,35 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           ) : <p className="text-sm text-slate-400">No assignments yet</p>}
         </Card>
 
+        {/* Backfill — Owner/Admin entering work that's already done
+            outside the app (survey/design/production happened on paper
+            or another system before this shop existed here). Only
+            offered up to the point production actually finishes —
+            Installation itself always runs through the real
+            Installer flow, never backfilled, since that's the step
+            that's actually left to do. */}
+        {canAssign && shop && !['production_done', 'dispatched', 'installation_pending', 'installing', 'installation_review', 'installed', 'billed', 'cancelled'].includes(shop.status) && (
+          <Card className="p-6 border-amber-200 bg-amber-50/40">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+                  <FastForward className="w-5 h-5 text-amber-600" /> Backfill Completed Work
+                </h2>
+                <p className="text-xs text-slate-500 mt-1 max-w-md">
+                  Already surveyed / designed / produced outside the app? Fill in what's already
+                  done here — the shop lands at the right stage and only Installation is left to run normally.
+                </p>
+              </div>
+              <button
+                onClick={() => setBackfillOpen(true)}
+                className="shrink-0 flex items-center gap-1 text-xs font-medium text-amber-700 border border-amber-300 bg-white px-2.5 py-1.5 rounded-lg"
+              >
+                <FastForward className="w-3.5 h-3.5" /> Backfill
+              </button>
+            </div>
+          </Card>
+        )}
+
         {/* Work Items */}
         <Card className="p-6">
           <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
@@ -2883,6 +3323,143 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
             className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
           >
             {assignMutation.isPending ? 'Assigning...' : 'Assign'}
+          </button>
+        </div>
+      </Modal>
+
+      <Modal open={backfillOpen} onClose={() => setBackfillOpen(false)} title="Backfill Completed Work" size="lg">
+        <div className="space-y-5">
+          <p className="text-sm text-slate-600">
+            Shop: <span className="font-medium text-slate-900">{shop.name}</span> — enter what's already
+            been done outside the app. Everything here gets recorded exactly as if it went through
+            the normal Survey Review / Design / Production screens.
+          </p>
+
+          {shopHasExistingPipelineData && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700 space-y-2">
+              <p className="font-medium">This shop already has survey/design/production data in the app.</p>
+              <p className="text-xs">Running this will add a second, separate set of records rather than filling anything in — check the Work Items / Timeline below first. Only continue if you're sure.</p>
+              <label className="flex items-center gap-2 text-xs font-medium">
+                <input type="checkbox" checked={backfillConfirmDuplicate} onChange={(e) => setBackfillConfirmDuplicate(e.target.checked)} />
+                I understand this may create duplicate records — continue anyway
+              </label>
+            </div>
+          )}
+
+          <div>
+            <label className="text-xs font-medium text-slate-500 uppercase tracking-wide">How far has this shop already progressed?</label>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {([
+                { value: 'design_pending', label: 'Survey done', hint: 'Design still to happen in-app' },
+                { value: 'production_pending', label: 'Survey + Design done', hint: 'Production still to happen in-app' },
+                { value: 'production_done', label: 'Survey + Design + Production done', hint: 'Ready for Installation' },
+                { value: 'dispatched', label: '...and vehicle already left', hint: 'Same as above, marked Dispatched' },
+              ] as { value: BackfillStage; label: string; hint: string }[]).map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setBackfillStage(opt.value)}
+                  className={`text-left border rounded-lg p-2.5 text-xs transition ${
+                    backfillStage === opt.value ? 'border-amber-500 bg-amber-50 ring-1 ring-amber-500' : 'border-slate-200 hover:bg-slate-50'
+                  }`}
+                >
+                  <p className="font-medium text-slate-900">{opt.label}</p>
+                  <p className="text-slate-500 mt-0.5">{opt.hint}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <Select
+            label="Surveyed by (optional — defaults to you)"
+            value={backfillSurveyorId}
+            onChange={setBackfillSurveyorId}
+            options={[{ value: '', label: 'Me (entering this data)' }, ...(backfillPeople || []).filter((p) => p.role === 'surveyor').map((p) => ({ value: p.id, label: p.full_name }))]}
+          />
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Boards / Items</label>
+              <button
+                type="button"
+                onClick={() => setBackfillItems((prev) => [...prev, { key: crypto.randomUUID(), workTypeId: '', workTypeName: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }])}
+                className="flex items-center gap-1 text-xs font-medium text-blue-600"
+              >
+                <PlusCircle className="w-3.5 h-3.5" /> Add item
+              </button>
+            </div>
+            <div className="space-y-3">
+              {backfillItems.map((item, idx) => (
+                <div key={item.key} className="border border-slate-200 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-slate-500">Item {idx + 1}</span>
+                    {backfillItems.length > 1 && (
+                      <button type="button" onClick={() => setBackfillItems((prev) => prev.filter((_, i) => i !== idx))} className="text-slate-400 hover:text-red-600">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Select
+                      label="Work type"
+                      value={item.workTypeId}
+                      onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, workTypeId: v } : it)))}
+                      options={[{ value: '', label: 'Custom / not listed' }, ...(backfillWorkTypes || []).map((w) => ({ value: w.id, label: w.name }))]}
+                    />
+                    <Input label="Or type a name" value={item.workTypeName} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, workTypeName: v } : it)))} />
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    <Input label="Width" type="number" value={item.width} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, width: v } : it)))} />
+                    <Input label="Height" type="number" value={item.height} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, height: v } : it)))} />
+                    <Select label="Unit" value={item.unit} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, unit: v } : it)))} options={LENGTH_UNIT_OPTIONS} />
+                    <Input label="Qty" type="number" value={item.quantity} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, quantity: v } : it)))} />
+                  </div>
+                  <Input label="Material (optional)" value={item.material} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, material: v } : it)))} />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {backfillStage !== 'design_pending' && (
+            <Select
+              label="Designed by (optional)"
+              value={backfillDesignerId}
+              onChange={setBackfillDesignerId}
+              options={[{ value: '', label: 'Not specified' }, ...(backfillPeople || []).filter((p) => p.role === 'designer').map((p) => ({ value: p.id, label: p.full_name }))]}
+            />
+          )}
+
+          {(backfillStage === 'production_done' || backfillStage === 'dispatched') && (
+            <>
+              <Select
+                label="Produced by (optional)"
+                value={backfillProductionId}
+                onChange={setBackfillProductionId}
+                options={[{ value: '', label: 'Not specified' }, ...(backfillPeople || []).filter((p) => p.role === 'printing').map((p) => ({ value: p.id, label: p.full_name }))]}
+              />
+              <Select
+                label="Assign installer now (optional)"
+                value={backfillInstallerId}
+                onChange={setBackfillInstallerId}
+                options={[{ value: '', label: "Don't assign yet" }, ...(backfillPeople || []).filter((p) => p.role === 'installer').map((p) => ({ value: p.id, label: p.full_name }))]}
+              />
+            </>
+          )}
+
+          <Textarea label="Note (optional)" value={backfillNote} onChange={(v) => setBackfillNote(v)} placeholder="e.g. Completed in March before this shop was added to the system" />
+
+          {backfillMutation.isError && (
+            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">
+              {(backfillMutation.error as Error).message}
+            </p>
+          )}
+
+          <button
+            onClick={() => backfillMutation.mutate()}
+            disabled={backfillMutation.isPending}
+            className="w-full bg-amber-600 hover:bg-amber-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
+          >
+            {backfillMutation.isPending ? 'Saving...' : 'Save Backfilled Data'}
           </button>
         </div>
       </Modal>

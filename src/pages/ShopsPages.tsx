@@ -16,13 +16,14 @@ import { formatDim, LENGTH_UNIT_OPTIONS } from '@/lib/units';
 import { fulfillmentTypeLabel } from '@/lib/poUtilization';
 import { geocodeAddress, buildAddressQuery } from '@/lib/geocode';
 import { findShopHeaderRow, findExtraHeaders, buildShopRows, resolveZoneIds, type ParsedShopRow } from '@/lib/shopBulkUpload';
-import { runBackfillPipeline, type BackfillStage } from '@/lib/backfillPipeline';
+import { runBackfillPipeline, BACKFILL_INELIGIBLE_STATUSES, type BackfillStage } from '@/lib/backfillPipeline';
+import { downloadBulkBackfillTemplate, parseBulkBackfillWorkbook, type BulkBackfillParsedShop, type BulkBackfillShopRow } from '@/lib/bulkBackfillExcel';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
 import {
   Plus, Pencil, Trash2, Store, MapPin, ArrowLeft, Search, CheckCircle2, UserPlus, CheckSquare, Square,
   Ruler, FileText, Palette, Wrench, Users, AlertCircle, XCircle, Clock, Camera, LocateFixed, Loader2, Layers,
   ListChecks, Building2, Lock, ListOrdered, UploadCloud, ChevronRight, Ban, Phone,
-  ChevronLeft, ChevronsLeft, ChevronsRight, X, RotateCcw, FastForward, PlusCircle,
+  ChevronLeft, ChevronsLeft, ChevronsRight, X, RotateCcw, FastForward, PlusCircle, Download,
 } from 'lucide-react';
 
 // Page sizes offered on the Shops list. Kept modest (not "show all") on
@@ -947,6 +948,9 @@ export function ShopsPage() {
   const [ftProductionId, setFtProductionId] = useState('');
   const [ftInstallerId, setFtInstallerId] = useState('');
   const [ftNote, setFtNote] = useState('');
+  const [ftSurveyPhotos, setFtSurveyPhotos] = useState<File[]>([]);
+  const [ftDesignFiles, setFtDesignFiles] = useState<File[]>([]);
+  const [bulkBackfillOpen, setBulkBackfillOpen] = useState(false);
 
   const { data: ftPeople } = useQuery({
     queryKey: ['org-people-all-roles', orgId],
@@ -961,7 +965,7 @@ export function ShopsPage() {
       if (error) throw new Error(`Could not load team members: ${error.message}`);
       return data as { id: string; full_name: string; role: string }[];
     },
-    enabled: !!orgId && fastTrackOpen,
+    enabled: !!orgId && (fastTrackOpen || bulkBackfillOpen),
   });
   const { data: ftWorkTypes } = useQuery({
     queryKey: ['org-work-types', orgId],
@@ -978,6 +982,7 @@ export function ShopsPage() {
     setFtStage('production_done');
     setFtItems([{ key: crypto.randomUUID(), workTypeId: '', workTypeName: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }]);
     setFtSurveyorId(''); setFtDesignerId(''); setFtProductionId(''); setFtInstallerId(''); setFtNote('');
+    setFtSurveyPhotos([]); setFtDesignFiles([]);
   }
 
   const fastTrackMutation = useMutation({
@@ -1019,6 +1024,7 @@ export function ShopsPage() {
           stage: ftStage, items: ftItems, surveyorId: ftSurveyorId, designerId: ftDesignerId,
           productionId: ftProductionId, installerId: ftInstallerId, note: ftNote,
           workTypes: ftWorkTypes || [], existingAssignments: [],
+          surveyPhotos: ftSurveyPhotos, designFiles: ftDesignFiles,
         });
       } catch (err) {
         // The shop itself was created successfully even if the backfill
@@ -1034,6 +1040,160 @@ export function ShopsPage() {
       queryClient.invalidateQueries({ queryKey: ['shops-locations', orgId] });
       setFastTrackOpen(false);
       resetFastTrack();
+    },
+  });
+
+  // ---- BULK BACKFILL — the multi-shop version, for shops that already
+  // exist in the app (added earlier, or via a normal bulk shop upload)
+  // but have no survey/design/production data yet. Every shop can be at
+  // a different real stage with different boards, so this works off an
+  // Excel round-trip (download → fill → upload) instead of one shared
+  // form, then runs the exact same runBackfillPipeline used everywhere
+  // else, once per shop. ----
+  const [bbFile, setBbFile] = useState<File | null>(null);
+  const [bbParseError, setBbParseError] = useState('');
+  const [bbParsedShops, setBbParsedShops] = useState<BulkBackfillParsedShop[] | null>(null);
+  const [bbResults, setBbResults] = useState<{ shopId: string; shopName: string; ok: boolean; message: string }[] | null>(null);
+
+  const { data: eligibleShops } = useQuery({
+    queryKey: ['shops-eligible-for-backfill', orgId],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('shops')
+        .select('id, name, contact_phone, city, status')
+        .eq('organization_id', orgId)
+        .not('status', 'in', `(${BACKFILL_INELIGIBLE_STATUSES.join(',')})`)
+        .order('name')
+        .limit(2000);
+      if (error) throw new Error(`Could not load shops: ${error.message}`);
+      return data as BulkBackfillShopRow[];
+    },
+    enabled: !!orgId && bulkBackfillOpen,
+  });
+
+  function resetBulkBackfill() {
+    setBbFile(null); setBbParseError(''); setBbParsedShops(null); setBbResults(null);
+  }
+
+  function handleBulkBackfillFile(file: File) {
+    setBbFile(file); setBbParseError(''); setBbParsedShops(null); setBbResults(null);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target?.result, { type: 'binary' });
+        const parsed = parseBulkBackfillWorkbook(wb);
+        if ('error' in parsed) { setBbParseError(parsed.error); return; }
+        if (parsed.shops.length === 0) { setBbParseError('No shop rows found — did you fill in the downloaded template?'); return; }
+        setBbParsedShops(parsed.shops);
+      } catch (err) {
+        setBbParseError(`Could not read this file: ${(err as Error).message}`);
+      }
+    };
+    reader.onerror = () => setBbParseError('Could not read this file.');
+    reader.readAsBinaryString(file);
+  }
+
+  function downloadBulkBackfillTemplateFile() {
+    const people = ftPeople || [];
+    downloadBulkBackfillTemplate({
+      shops: eligibleShops || [],
+      surveyors: people.filter((p) => p.role === 'surveyor').map((p) => p.full_name),
+      designers: people.filter((p) => p.role === 'designer').map((p) => p.full_name),
+      productionPeople: people.filter((p) => p.role === 'printing').map((p) => p.full_name),
+      installers: people.filter((p) => p.role === 'installer').map((p) => p.full_name),
+      clients: (clients || []).map((c) => c.name),
+    });
+  }
+
+  const bulkBackfillMutation = useMutation({
+    mutationFn: async () => {
+      if (!orgId || !profile) throw new Error('Not signed in — try again in a moment.');
+      const rows = bbParsedShops || [];
+      if (rows.length === 0) throw new Error('No rows to process.');
+
+      const existingIds = rows.filter((s) => !s.isNew).map((s) => s.shopId);
+      const { data: existingAssignRows } = existingIds.length > 0
+        ? await supabase.from('shop_assignments').select('shop_id, role, status').in('shop_id', existingIds)
+        : { data: [] as { shop_id: string; role: string; status: string }[] };
+      const assignByShop = new Map<string, { role: string; status: string }[]>();
+      for (const a of existingAssignRows || []) {
+        const arr = assignByShop.get(a.shop_id) || [];
+        arr.push(a);
+        assignByShop.set(a.shop_id, arr);
+      }
+
+      const people = ftPeople || [];
+      // '' = not specified (fine — pipeline falls back sensibly);
+      // '__NOTFOUND__' = a name was typed but doesn't match anyone, which
+      // should stop that shop rather than silently guess who was meant.
+      const resolveId = (name: string, role: string): string => {
+        if (!name) return '';
+        const match = people.find((p) => p.role === role && p.full_name.toLowerCase() === name.toLowerCase());
+        return match ? match.id : '__NOTFOUND__';
+      };
+
+      const results: { shopId: string; shopName: string; ok: boolean; message: string }[] = [];
+      for (const s of rows) {
+        const existingMeta = s.isNew ? null : (eligibleShops || []).find((sh) => sh.id === s.shopId);
+        const displayName = s.shopName || existingMeta?.name || s.shopId || '(unnamed)';
+        if (!s.stage) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: s.stageRaw ? `Stage "${s.stageRaw}" not recognized` : 'Stage left blank' }); continue; }
+        if (s.items.length === 0) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'No item rows with Width, Height and Qty filled in' }); continue; }
+        if (!s.isNew && !existingMeta) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'Shop not found in this org — was it deleted, or is the Shop ID wrong?' }); continue; }
+        if (s.isNew && !s.shopName) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'New shop needs a Shop Name' }); continue; }
+
+        try {
+          const surveyorId = resolveId(s.surveyor, 'surveyor');
+          if (surveyorId === '__NOTFOUND__') throw new Error(`Surveyor "${s.surveyor}" doesn't match any active surveyor`);
+          const designerId = resolveId(s.designer, 'designer');
+          if (designerId === '__NOTFOUND__') throw new Error(`Designer "${s.designer}" doesn't match any active designer`);
+          const productionId = resolveId(s.production, 'printing');
+          if (productionId === '__NOTFOUND__') throw new Error(`Production person "${s.production}" doesn't match any active production team member`);
+          const installerId = resolveId(s.installer, 'installer');
+          if (installerId === '__NOTFOUND__') throw new Error(`Installer "${s.installer}" doesn't match any active installer`);
+
+          let targetShopId: string;
+          let targetShopName: string;
+          let targetShopStatus: string;
+          let existingAssignments: { role: string; status: string }[];
+
+          if (s.isNew) {
+            const client = (clients || []).find((c) => c.name.toLowerCase() === s.clientName.toLowerCase());
+            if (!client) throw new Error(s.clientName ? `Client "${s.clientName}" doesn't match any client in this org` : 'New shop needs a "Client" name');
+            const { data: newShop, error: shopError } = await supabase.from('shops').insert({
+              organization_id: orgId, name: s.shopName, client_id: client.id,
+              owner_name: s.ownerName, contact_phone: s.phone, address: s.address,
+              city: s.city, district: s.district, state: s.state, status: 'pending',
+            }).select('id, name, status').single();
+            if (shopError) throw new Error(`Could not create shop: ${shopError.message}`);
+            await logAudit('shops', newShop.id, 'insert', null, null, null, `Created shop: ${newShop.name} (Bulk Backfill)`);
+            targetShopId = newShop.id; targetShopName = newShop.name; targetShopStatus = newShop.status;
+            existingAssignments = [];
+          } else {
+            targetShopId = s.shopId; targetShopName = existingMeta!.name; targetShopStatus = existingMeta!.status;
+            existingAssignments = assignByShop.get(s.shopId) || [];
+          }
+
+          await runBackfillPipeline({
+            orgId, shopId: targetShopId, shopName: targetShopName, shopStatusBefore: targetShopStatus, actorId: profile.id,
+            stage: s.stage, note: s.note,
+            items: s.items.map((it) => ({ workTypeId: '', workTypeName: it.workType, material: it.material, width: it.width, height: it.height, unit: it.unit, quantity: it.quantity })),
+            surveyorId, designerId, productionId, installerId,
+            workTypes: [], existingAssignments,
+          });
+          results.push({ shopId: s.key, shopName: targetShopName, ok: true, message: s.isNew ? 'Shop created + backfilled' : 'Backfilled' });
+        } catch (err) {
+          results.push({ shopId: s.key, shopName: displayName, ok: false, message: (err as Error).message });
+        }
+      }
+      return results;
+    },
+    onSuccess: (results) => {
+      setBbResults(results);
+      queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['shops-locations', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['shops-eligible-for-backfill', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['installer-assignments'] });
+      queryClient.invalidateQueries({ queryKey: ['installer-work'] });
     },
   });
 
@@ -1624,6 +1784,15 @@ export function ShopsPage() {
                 title="For shops already surveyed/designed/produced outside the app"
               >
                 <FastForward className="w-4 h-4" /> Add Shop (In Progress)
+              </button>
+            )}
+            {canBulkAssign && (
+              <button
+                onClick={() => { resetBulkBackfill(); setBulkBackfillOpen(true); }}
+                className="flex items-center gap-2 bg-white text-amber-700 border border-amber-300 hover:bg-amber-50 px-3.5 py-2 rounded-lg font-medium text-sm transition"
+                title="Backfill many already-added shops at once via Excel"
+              >
+                <ListOrdered className="w-4 h-4" /> Bulk Backfill
               </button>
             )}
             <button onClick={openAdd} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium text-sm transition">
@@ -2363,6 +2532,25 @@ export function ShopsPage() {
             </div>
           </div>
 
+          <div>
+            <label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Survey Photos (optional)</label>
+            <input
+              type="file" accept="image/*" multiple
+              onChange={(e) => setFtSurveyPhotos((prev) => [...prev, ...Array.from(e.target.files || [])])}
+              className="mt-1 block w-full text-xs text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border file:border-slate-300 file:bg-white file:text-xs file:font-medium"
+            />
+            {ftSurveyPhotos.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {ftSurveyPhotos.map((f, i) => (
+                  <span key={`${f.name}-${i}`} className="flex items-center gap-1 text-xs bg-slate-100 border border-slate-200 rounded-full px-2 py-1">
+                    {f.name}
+                    <button type="button" onClick={() => setFtSurveyPhotos((prev) => prev.filter((_, j) => j !== i))}><X className="w-3 h-3" /></button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
           {ftStage !== 'design_pending' && (
             <Select
               label="Designed by (optional)"
@@ -2370,6 +2558,27 @@ export function ShopsPage() {
               onChange={setFtDesignerId}
               options={[{ value: '', label: 'Not specified' }, ...(ftPeople || []).filter((p) => p.role === 'designer').map((p) => ({ value: p.id, label: p.full_name }))]}
             />
+          )}
+
+          {ftStage !== 'design_pending' && (
+            <div>
+              <label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Design File(s) (optional)</label>
+              <input
+                type="file" accept="image/*,application/pdf" multiple
+                onChange={(e) => setFtDesignFiles((prev) => [...prev, ...Array.from(e.target.files || [])])}
+                className="mt-1 block w-full text-xs text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border file:border-slate-300 file:bg-white file:text-xs file:font-medium"
+              />
+              {ftDesignFiles.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {ftDesignFiles.map((f, i) => (
+                    <span key={`${f.name}-${i}`} className="flex items-center gap-1 text-xs bg-slate-100 border border-slate-200 rounded-full px-2 py-1">
+                      {f.name}
+                      <button type="button" onClick={() => setFtDesignFiles((prev) => prev.filter((_, j) => j !== i))}><X className="w-3 h-3" /></button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           {(ftStage === 'production_done' || ftStage === 'dispatched') && (
@@ -2406,6 +2615,101 @@ export function ShopsPage() {
           </button>
         </div>
       </Modal>
+
+      <Modal open={bulkBackfillOpen} onClose={() => setBulkBackfillOpen(false)} title="Bulk Backfill" size="lg">
+        <div className="space-y-5">
+          <p className="text-sm text-slate-600">
+            Fill in an Excel file (one row per board, grouped by shop) and upload it back here — for shops
+            already in the app with no survey/design/production data yet, and for shops that don't exist
+            in the app at all (leave Shop ID blank and fill in the shop's details, and it gets created
+            first). Each shop is written through exactly the same logic as the single-shop Backfill panel.
+          </p>
+
+          <div className="border border-slate-200 rounded-lg p-4 space-y-2">
+            <p className="text-sm font-medium text-slate-900">Step 1 — Download the template</p>
+            <p className="text-xs text-slate-500">{eligibleShops ? `${eligibleShops.length} existing shop${eligibleShops.length === 1 ? '' : 's'} need backfilling, plus blank rows for brand-new shops.` : 'Loading shops...'}</p>
+            <button
+              type="button"
+              onClick={downloadBulkBackfillTemplateFile}
+              disabled={!eligibleShops || !ftPeople || !clients}
+              className="flex items-center gap-2 text-sm font-medium text-blue-600 border border-blue-200 bg-blue-50 px-3 py-1.5 rounded-lg disabled:opacity-50"
+            >
+              <Download className="w-4 h-4" /> Download Template ({eligibleShops?.length ?? 0} existing shops)
+            </button>
+          </div>
+
+          <div className="border border-slate-200 rounded-lg p-4 space-y-2">
+            <p className="text-sm font-medium text-slate-900">Step 2 — Upload the filled file</p>
+            <input
+              type="file" accept=".xlsx,.xls"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleBulkBackfillFile(f); }}
+              className="block w-full text-xs text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border file:border-slate-300 file:bg-white file:text-xs file:font-medium"
+            />
+            {bbFile && <p className="text-xs text-slate-500">{bbFile.name}</p>}
+            {bbParseError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{bbParseError}</p>}
+          </div>
+
+          {bbParsedShops && !bbResults && (
+            <div className="border border-slate-200 rounded-lg p-4 space-y-3">
+              <p className="text-sm font-medium text-slate-900">Step 3 — Review &amp; run</p>
+              <div className="max-h-56 overflow-y-auto space-y-1">
+                {bbParsedShops.map((s) => {
+                  const meta = s.isNew ? null : (eligibleShops || []).find((sh) => sh.id === s.shopId);
+                  const client = s.isNew ? (clients || []).find((c) => c.name.toLowerCase() === s.clientName.toLowerCase()) : null;
+                  const valid = !!s.stage && s.items.length > 0 && (s.isNew ? !!s.shopName && !!client : !!meta);
+                  const reason = !s.stage ? `Bad stage: "${s.stageRaw}"`
+                    : s.items.length === 0 ? 'No items'
+                    : s.isNew && !s.shopName ? 'New shop needs a name'
+                    : s.isNew && !client ? `Client "${s.clientName}" not found`
+                    : !s.isNew && !meta ? 'Shop not found' : '';
+                  return (
+                    <div key={s.key} className="flex items-center justify-between text-xs py-1 border-b border-slate-100 last:border-0">
+                      <span className="text-slate-700">
+                        {meta?.name || s.shopName || s.shopId}
+                        {s.isNew && <span className="ml-1 text-amber-600 font-medium">(new)</span>}
+                      </span>
+                      <span className={valid ? 'text-slate-500' : 'text-red-600 font-medium'}>
+                        {valid ? `${s.items.length} item${s.items.length === 1 ? '' : 's'} · ${s.stageRaw}` : reason}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              {bulkBackfillMutation.isError && (
+                <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">
+                  {(bulkBackfillMutation.error as Error).message}
+                </p>
+              )}
+              <button
+                onClick={() => bulkBackfillMutation.mutate()}
+                disabled={bulkBackfillMutation.isPending}
+                className="w-full bg-amber-600 hover:bg-amber-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
+              >
+                {bulkBackfillMutation.isPending ? `Processing ${bbParsedShops.length} shops...` : `Run Backfill for ${bbParsedShops.length} Shops`}
+              </button>
+            </div>
+          )}
+
+          {bbResults && (
+            <div className="border border-slate-200 rounded-lg p-4 space-y-2">
+              <p className="text-sm font-medium text-slate-900">
+                {bbResults.filter((r) => r.ok).length} succeeded, {bbResults.filter((r) => !r.ok).length} failed
+              </p>
+              <div className="max-h-56 overflow-y-auto space-y-1">
+                {bbResults.map((r) => (
+                  <div key={r.shopId} className="flex items-center justify-between text-xs py-1 border-b border-slate-100 last:border-0">
+                    <span className="text-slate-700">{r.shopName}</span>
+                    <span className={r.ok ? 'text-emerald-600' : 'text-red-600'}>{r.message}</span>
+                  </div>
+                ))}
+              </div>
+              <button onClick={() => { resetBulkBackfill(); }} className="text-xs font-medium text-blue-600">
+                Upload another file
+              </button>
+            </div>
+          )}
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -2434,6 +2738,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const [backfillInstallerId, setBackfillInstallerId] = useState('');
   const [backfillNote, setBackfillNote] = useState('');
   const [backfillConfirmDuplicate, setBackfillConfirmDuplicate] = useState(false);
+  const [backfillSurveyPhotos, setBackfillSurveyPhotos] = useState<File[]>([]);
+  const [backfillDesignFiles, setBackfillDesignFiles] = useState<File[]>([]);
 
   const { data: shop } = useQuery({
     queryKey: ['shop', shopId],
@@ -2622,12 +2928,14 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         stage: backfillStage, items: backfillItems, surveyorId: backfillSurveyorId, designerId: backfillDesignerId,
         productionId: backfillProductionId, installerId: backfillInstallerId, note: backfillNote,
         workTypes: backfillWorkTypes || [], existingAssignments: assignments || [],
+        surveyPhotos: backfillSurveyPhotos, designFiles: backfillDesignFiles,
       });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['shop', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-surveys', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shop-survey-photos', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-design-tasks', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-production', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-assignments', shopId] });
@@ -2638,6 +2946,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       setBackfillItems([{ key: crypto.randomUUID(), workTypeId: '', workTypeName: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }]);
       setBackfillSurveyorId(''); setBackfillDesignerId(''); setBackfillProductionId(''); setBackfillInstallerId('');
       setBackfillNote(''); setBackfillConfirmDuplicate(false); setBackfillStage('production_done');
+      setBackfillSurveyPhotos([]); setBackfillDesignFiles([]);
     },
   });
 
@@ -3035,7 +3344,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
             Installation itself always runs through the real
             Installer flow, never backfilled, since that's the step
             that's actually left to do. */}
-        {canAssign && shop && !['production_done', 'dispatched', 'installation_pending', 'installing', 'installation_review', 'installed', 'billed', 'cancelled'].includes(shop.status) && (
+        {canAssign && shop && !BACKFILL_INELIGIBLE_STATUSES.includes(shop.status) && (
           <Card className="p-6 border-amber-200 bg-amber-50/40">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -3420,6 +3729,25 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
             </div>
           </div>
 
+          <div>
+            <label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Survey Photos (optional)</label>
+            <input
+              type="file" accept="image/*" multiple
+              onChange={(e) => setBackfillSurveyPhotos((prev) => [...prev, ...Array.from(e.target.files || [])])}
+              className="mt-1 block w-full text-xs text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border file:border-slate-300 file:bg-white file:text-xs file:font-medium"
+            />
+            {backfillSurveyPhotos.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {backfillSurveyPhotos.map((f, i) => (
+                  <span key={`${f.name}-${i}`} className="flex items-center gap-1 text-xs bg-slate-100 border border-slate-200 rounded-full px-2 py-1">
+                    {f.name}
+                    <button type="button" onClick={() => setBackfillSurveyPhotos((prev) => prev.filter((_, j) => j !== i))}><X className="w-3 h-3" /></button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
           {backfillStage !== 'design_pending' && (
             <Select
               label="Designed by (optional)"
@@ -3427,6 +3755,27 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
               onChange={setBackfillDesignerId}
               options={[{ value: '', label: 'Not specified' }, ...(backfillPeople || []).filter((p) => p.role === 'designer').map((p) => ({ value: p.id, label: p.full_name }))]}
             />
+          )}
+
+          {backfillStage !== 'design_pending' && (
+            <div>
+              <label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Design File(s) (optional)</label>
+              <input
+                type="file" accept="image/*,application/pdf" multiple
+                onChange={(e) => setBackfillDesignFiles((prev) => [...prev, ...Array.from(e.target.files || [])])}
+                className="mt-1 block w-full text-xs text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border file:border-slate-300 file:bg-white file:text-xs file:font-medium"
+              />
+              {backfillDesignFiles.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {backfillDesignFiles.map((f, i) => (
+                    <span key={`${f.name}-${i}`} className="flex items-center gap-1 text-xs bg-slate-100 border border-slate-200 rounded-full px-2 py-1">
+                      {f.name}
+                      <button type="button" onClick={() => setBackfillDesignFiles((prev) => prev.filter((_, j) => j !== i))}><X className="w-3 h-3" /></button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           {(backfillStage === 'production_done' || backfillStage === 'dispatched') && (

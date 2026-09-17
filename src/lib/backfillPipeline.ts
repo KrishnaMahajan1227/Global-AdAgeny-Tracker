@@ -11,6 +11,17 @@ import { areaSqFt } from './units';
 
 export type BackfillStage = 'design_pending' | 'production_pending' | 'production_done' | 'dispatched';
 
+/** A shop at or past this point has real, in-app progress worth
+ *  protecting — Backfill (single or bulk) is offered only for shops
+ *  still earlier than this, so it's never used to silently overwrite
+ *  genuine production/installation history. Shared by the single-shop
+ *  panel, the "Add Shop (In Progress)" flow's eligibility, and the Bulk
+ *  Backfill template/upload. */
+export const BACKFILL_INELIGIBLE_STATUSES = [
+  'production_done', 'dispatched', 'installation_pending', 'installing',
+  'installation_review', 'installed', 'billed', 'cancelled',
+];
+
 export interface BackfillItemInput {
   workTypeId: string;
   workTypeName: string;
@@ -38,6 +49,17 @@ export interface BackfillParams {
   /** Existing shop_assignments for this shop, so a surveyor/installer
    *  assignment is never inserted twice (a fresh shop passes []). */
   existingAssignments: { role: string; status: string }[];
+  /** Site/board photos from the survey — uploaded to the same
+   *  `survey-photos` bucket, same path convention, same DB row shape a
+   *  real survey submission produces. Optional — a shop can be
+   *  backfilled with no photos on hand. */
+  surveyPhotos?: File[];
+  /** Final design artwork — uploaded to `design-files`, inserted as an
+   *  approved design_versions row (version 1) and linked to every
+   *  backfilled work item, same as a real Designer upload+approval. Only
+   *  used when the target stage includes design. */
+  designFiles?: File[];
+  designSource?: 'agency_designed' | 'client_provided';
 }
 
 /** Throws with a user-facing message on the first failed write. */
@@ -63,6 +85,23 @@ export async function runBackfillPipeline(params: BackfillParams): Promise<void>
     review_note: note,
   }).select('id').single();
   if (surveyError) throw new Error(`Could not create survey record: ${surveyError.message}`);
+
+  // Survey photos — same bucket, same "{org}/{survey}/{ts}-{name}" path
+  // convention, same survey_photos row shape a real survey submission
+  // writes (syncManager.ts), tagged photo_type 'survey' so they render
+  // in the same gallery as an in-app capture would.
+  for (const file of params.surveyPhotos || []) {
+    const path = `${orgId}/${surveyRow.id}/${Date.now()}-${file.name}`;
+    const { error: uploadError } = await supabase.storage.from('survey-photos').upload(path, file);
+    if (uploadError) throw new Error(`Could not upload photo "${file.name}": ${uploadError.message}`);
+    const { data: urlData } = supabase.storage.from('survey-photos').getPublicUrl(path);
+    const { error: photoInsertError } = await supabase.from('survey_photos').insert({
+      organization_id: orgId, survey_id: surveyRow.id, shop_id: shopId,
+      storage_path: path, photo_url: urlData.publicUrl, photo_type: 'survey',
+      caption: 'Backfilled — from outside the app',
+    });
+    if (photoInsertError) throw new Error(`Could not save photo record for "${file.name}": ${photoInsertError.message}`);
+  }
 
   const itemStatus = stage === 'design_pending' ? 'approved' : stage === 'production_pending' ? 'design_approved' : 'production_done';
   const insertedItems: { id: string; quantity: number }[] = [];
@@ -108,6 +147,38 @@ export async function runBackfillPipeline(params: BackfillParams): Promise<void>
     if (taskError) throw new Error(`Could not create design task: ${taskError.message}`);
     designTaskId = taskRow.id;
     shopStatus = 'production_pending';
+
+    // Design artwork — same bucket/path convention and design_versions
+    // shape DesignerPage's own upload writes, saved straight in as an
+    // already-approved version 1 and linked to every backfilled board,
+    // exactly like an uploaded-then-approved batch would end up.
+    const designFiles = params.designFiles || [];
+    if (designFiles.length > 0) {
+      const newVersionIds: string[] = [];
+      for (let i = 0; i < designFiles.length; i++) {
+        const file = designFiles[i];
+        const versionNum = i + 1;
+        const path = `${orgId}/${designTaskId}/v${versionNum}-${file.name}`;
+        const { error: uploadError } = await supabase.storage.from('design-files').upload(path, file);
+        if (uploadError) throw new Error(`Could not upload design file "${file.name}": ${uploadError.message}`);
+        const { data: urlData } = supabase.storage.from('design-files').getPublicUrl(path);
+        const { data: versionRow, error: versionError } = await supabase.from('design_versions').insert({
+          organization_id: orgId, design_task_id: designTaskId, version_number: versionNum,
+          storage_path: path, file_url: urlData.publicUrl, file_name: file.name,
+          uploaded_by: actorId, notes: note, status: 'approved',
+          source: params.designSource || 'agency_designed',
+        }).select('id').single();
+        if (versionError) throw new Error(`Could not save design version for "${file.name}": ${versionError.message}`);
+        newVersionIds.push(versionRow.id);
+      }
+      const links = newVersionIds.flatMap((versionId) =>
+        insertedItems.map((it) => ({ organization_id: orgId, design_version_id: versionId, work_item_id: it.id }))
+      );
+      if (links.length > 0) {
+        const { error: linkError } = await supabase.from('design_version_items').insert(links);
+        if (linkError) throw new Error(`Could not link design file to boards: ${linkError.message}`);
+      }
+    }
 
     if (stage === 'production_done' || stage === 'dispatched') {
       const { data: orderRow, error: orderError } = await supabase.from('production_orders').insert({

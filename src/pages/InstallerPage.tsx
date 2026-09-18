@@ -565,13 +565,13 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     }
   }
 
-  async function handlePhotoCaptured(dataUrl: string, fileName: string) {
+  async function handlePhotoCaptured(dataUrl: string, fileName: string, forcedAngle?: 'front' | 'side' | 'other') {
     // cameraFor doubles as the angle here ('front' / 'side' / 'other') —
     // photo_type stays the constant 'installed' (matches the existing
     // check constraint); angle is the new, separate column that Section 7
     // actually needs the multi-angle requirement enforced against.
-    const angle = cameraFor as 'front' | 'side' | 'other' | null;
-    setCameraFor(null);
+    const angle = forcedAngle || (cameraFor as 'front' | 'side' | 'other' | null);
+    if (!forcedAngle) setCameraFor(null);
     if (!angle || !profile || !jobId) return;
 
     // Geo-tag stamp burned onto the photo itself (site name, address,
@@ -636,7 +636,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       console.error('[handlePhotoCaptured] duplicate-hash check failed (non-fatal):', hashErr);
     }
 
-    const { data: inserted } = await supabase.from('installation_proofs').insert({
+    const proofPayload: any = {
       organization_id: profile.organization_id,
       installation_job_id: jobId,
       shop_id: shopId,
@@ -651,7 +651,19 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       gps_lat: gps?.lat || null,
       gps_lng: gps?.lng || null,
       gps_accuracy: gps?.accuracy || null,
-    }).select('id').single();
+    };
+    let insertResult = await supabase.from('installation_proofs').insert(proofPayload).select('id').single();
+    // Compatibility with deployments where the work_item_id migration has not
+    // reached PostgREST's schema cache yet. The proof itself must never be lost.
+    if (insertResult.error && /work_item_id|schema cache|column/i.test(insertResult.error.message || '')) {
+      const { work_item_id: _ignored, ...legacyPayload } = proofPayload;
+      insertResult = await supabase.from('installation_proofs').insert(legacyPayload).select('id').single();
+    }
+    if (insertResult.error) {
+      await supabase.storage.from('installation-proof').remove([path]);
+      throw new Error(`Could not save installation photo: ${insertResult.error.message}`);
+    }
+    const inserted = insertResult.data;
 
     if (duplicateFlag && inserted) {
       const { data: admins } = await supabase.from('profiles').select('id').eq('organization_id', profile.organization_id).in('role', ['agency_owner', 'admin']);
@@ -660,7 +672,34 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       }
     }
 
-    setProofPhotos([...proofPhotos, { url: urlData.publicUrl, type: 'installed', angle }]);
+    setProofPhotos((current) => [...current, { url: urlData.publicUrl, type: 'installed', angle }]);
+  }
+
+
+  async function handleInstallationFileSelection(files: FileList | null) {
+    if (!files?.length) return;
+    if (approvedItems.length > 1 && !selectedProofWorkItemId) {
+      alert('Select the exact work item / measurement before uploading photos.');
+      return;
+    }
+    const selected = Array.from(files);
+    let uploaded = 0;
+    const failures: string[] = [];
+    for (const file of selected) {
+      try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(reader.error || new Error('Could not read file'));
+          reader.readAsDataURL(file);
+        });
+        await handlePhotoCaptured(dataUrl, file.name, 'other');
+        uploaded += 1;
+      } catch (err: any) {
+        failures.push(`${file.name}: ${err?.message || 'Upload failed'}`);
+      }
+    }
+    if (failures.length) alert(`${uploaded} of ${selected.length} photos uploaded.\n${failures.join('\n')}`);
   }
 
   async function completeInstallation() {
@@ -684,7 +723,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
             installed_height: h,
             installed_unit: item.approved_unit,
             installed_quantity: qty,
-            installed_area: item.approved_area ?? w * h * qty,
+            installed_area: item.approved_area ?? Math.round(areaSqFt(w, item.approved_unit || 'ft', h, item.approved_unit || 'ft') * qty * 100) / 100,
             installed_notes: installNotes || item.approved_notes || null,
             installed_at: new Date().toISOString(),
             status: 'installed',
@@ -921,7 +960,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                 <Package className="w-5 h-5 text-blue-600" />
                 <span className="font-medium text-slate-900">Kitna Maal Gaya</span>
               </div>
-              <p className="text-xs text-slate-500 mb-3">Har board ka utna number bharo jitna gaadi mein rakha hai. Approved quantity pehle se bhari hai — sirf badlo agar kam ja raha hai.</p>
+              <p className="text-xs text-slate-500 mb-3">Enter the quantity actually loaded for each work item. The approved quantity is prefilled — change it only if fewer units were loaded.</p>
 
               {approvedItems.length > 0 ? (
                 <div className="space-y-2">
@@ -960,7 +999,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               onClick={() => {
                 if (materialCheckConfirmed) { setStep(3); return; }
                 const missing = approvedItems.some((it) => materialLoadedQty[it.id] === undefined || materialLoadedQty[it.id] === '');
-                if (missing) { alert('Har board ka loaded quantity bharo, uske baad hi aage badh sakte ho.'); return; }
+                if (missing) { alert('Enter the loaded quantity for every work item before continuing.'); return; }
                 confirmMaterialCheck();
               }}
               disabled={materialCheckSaving}
@@ -976,20 +1015,20 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
 
         {step === 3 && (
           <div className="space-y-4">
-            <p className="text-sm text-slate-600">Installation ho jaane ke baad kaam ki photo lo. Kam se kam 1 photo lena zaroori hai — client jitni angles maangta hai, utni le sakte ho.</p>
+            <p className="text-sm text-slate-600">After installation, capture or upload proof photos. At least one photo is required; add as many angles as the client requires.</p>
 
-            {approvedItems.length > 0 && <Card className="p-3 border-blue-100 bg-blue-50/40"><label className="block text-xs font-semibold text-slate-700 mb-1">Photo kis board / measurement ka hai?</label><select value={selectedProofWorkItemId} onChange={(e) => setSelectedProofWorkItemId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="">{approvedItems.length === 1 ? 'Only board — auto linked' : 'Select board before taking photo...'}</option>{approvedItems.map((it, idx) => <option key={it.id} value={it.id}>Board {idx + 1} · {it.work_type_name || it.material || 'Item'} · {formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}</option>)}</select><p className="text-[10px] text-slate-500 mt-1">Every captured installation photo is stored against this exact work item, so Owner/Admin sees Survey → Design → Installed proof together.</p></Card>}
+            {approvedItems.length > 0 && <Card className="p-3 border-blue-100 bg-blue-50/40"><label className="block text-xs font-semibold text-slate-700 mb-1">Which work item / measurement is this proof for?</label><select value={selectedProofWorkItemId} onChange={(e) => setSelectedProofWorkItemId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="">{approvedItems.length === 1 ? 'Only board — auto linked' : 'Select board before taking photo...'}</option>{approvedItems.map((it, idx) => <option key={it.id} value={it.id}>Board {idx + 1} · {it.work_type_name || it.material || 'Item'} · {formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}</option>)}</select><p className="text-[10px] text-slate-500 mt-1">Every captured installation photo is stored against this exact work item, so Owner/Admin sees Survey → Design → Installed proof together.</p></Card>}
 
             <div className="grid grid-cols-2 gap-2">
               <button
-                onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Pehle exact board / measurement select karo.'); return; } setCameraFor('front'); }}
+                onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Select the exact work item / measurement first.'); return; } setCameraFor('front'); }}
                 className={`flex flex-col items-center justify-center gap-1 border-2 font-bold py-3.5 rounded-xl ${proofPhotos.some((p) => p.angle === 'front') ? 'bg-green-50 border-green-300 text-green-700' : 'bg-blue-50 border-blue-200 text-blue-700'}`}
               >
                 <Camera className="w-5 h-5" />
                 <span className="text-sm">{proofPhotos.some((p) => p.angle === 'front') ? 'Front ✓ (retake)' : 'Front Photo'}</span>
               </button>
               <button
-                onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Pehle exact board / measurement select karo.'); return; } setCameraFor('side'); }}
+                onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Select the exact work item / measurement first.'); return; } setCameraFor('side'); }}
                 className={`flex flex-col items-center justify-center gap-1 border-2 font-bold py-3.5 rounded-xl ${proofPhotos.some((p) => p.angle === 'side') ? 'bg-green-50 border-green-300 text-green-700' : 'bg-blue-50 border-blue-200 text-blue-700'}`}
               >
                 <Camera className="w-5 h-5" />
@@ -998,11 +1037,16 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
             </div>
 
             <button
-              onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Pehle exact board / measurement select karo.'); return; } setCameraFor('other'); }}
+              onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Select the exact work item / measurement first.'); return; } setCameraFor('other'); }}
               className="w-full flex items-center justify-center gap-2 text-slate-500 text-sm font-medium py-2"
             >
-              <Camera className="w-4 h-4" /> Ek aur photo jodo (optional)
+              <Camera className="w-4 h-4" /> Add another camera photo (optional)
             </button>
+
+            <label className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-blue-200 bg-blue-50/50 text-blue-700 text-sm font-semibold py-3 rounded-xl cursor-pointer hover:bg-blue-50">
+              <ImagePlus className="w-4 h-4" /> Upload one or multiple installation photos
+              <input type="file" accept="image/*" multiple className="hidden" onChange={(e) => { handleInstallationFileSelection(e.target.files); e.currentTarget.value = ''; }} />
+            </label>
 
             {proofPhotos.length > 0 && (
               <div className="grid grid-cols-3 gap-2">
@@ -1024,7 +1068,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
 
             <button
               onClick={() => {
-                if (proofPhotos.length === 0) { alert('Aage badhne se pehle kam se kam 1 photo lo.'); return; }
+                if (proofPhotos.length === 0) { alert('Add at least one installation photo before continuing.'); return; }
                 setStep(4);
               }}
               className="w-full bg-slate-900 text-white font-medium py-3 rounded-lg"
@@ -1056,7 +1100,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                         <p className="font-medium text-slate-900">{it.material || it.work_type_name || 'Item'}</p>
                         <p className="text-xs text-slate-500">{formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit} · Qty {it.approved_quantity || 1}</p>
                       </div>
-                      <p className="text-xs font-semibold text-blue-600">{it.approved_area != null ? Math.round(it.approved_area) : ''} sq {it.approved_unit}</p>
+                      <p className="text-xs font-semibold text-blue-600">{it.approved_area != null ? Math.round(it.approved_area) : ''} sq.ft</p>
                     </div>
                   ))}
                 </div>
@@ -1451,7 +1495,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
     }
   }
 
-  async function handlePhotoCaptured(dataUrl: string, fileName: string) {
+  async function handlePhotoCaptured(dataUrl: string, fileName: string, forcedAngle?: 'front' | 'side' | 'other') {
     const angle = nextAngle;
     setCameraOpen(false);
     if (!profile || !jobId || !shopId) return;

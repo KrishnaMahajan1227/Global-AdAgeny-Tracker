@@ -12,7 +12,7 @@ import { Client, Project, Campaign, Shop, WorkType, WorkItem, SurveyPhoto, Board
 import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
-import { formatDim, LENGTH_UNIT_OPTIONS } from '@/lib/units';
+import { formatDim, LENGTH_UNIT_OPTIONS, toFeet } from '@/lib/units';
 import { fulfillmentTypeLabel } from '@/lib/poUtilization';
 import { geocodeAddress, buildAddressQuery } from '@/lib/geocode';
 import { findShopHeaderRow, findExtraHeaders, buildShopRows, resolveZoneIds, type ParsedShopRow } from '@/lib/shopBulkUpload';
@@ -2929,10 +2929,12 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       if (!editWorkItem) return;
       const width = Number(workItemForm.width), height = Number(workItemForm.height), quantity = Math.max(1, Number(workItemForm.quantity) || 1);
       if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new Error('Enter valid width and height.');
+      const widthFt = toFeet(width, workItemForm.unit), heightFt = toFeet(height, workItemForm.unit);
+      const area = Math.round(widthFt * heightFt * quantity * 100) / 100;
       const payload = {
         work_type_name: workItemForm.work_type_name.trim() || null, material: workItemForm.material.trim() || null,
-        survey_width: width, survey_height: height, survey_unit: workItemForm.unit, survey_quantity: quantity,
-        approved_width: width, approved_height: height, approved_unit: workItemForm.unit, approved_quantity: quantity,
+        survey_width: widthFt, survey_height: heightFt, survey_unit: 'ft', survey_quantity: quantity, survey_area: area,
+        approved_width: widthFt, approved_height: heightFt, approved_unit: 'ft', approved_quantity: quantity, approved_area: area,
       };
       if (editWorkItem.id === '__new__') {
         const { error } = await supabase.from('work_items').insert({ organization_id: orgId, shop_id: shopId, ...payload, status: 'approved' });
@@ -3214,7 +3216,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         for (const it of backfillItems) {
           if (!it.width.trim() || !it.height.trim() || !it.quantity.trim()) continue;
           const width = Number(it.width), height = Number(it.height), quantity = Math.max(1, Number(it.quantity) || 1);
-          const payload: any = { work_type_id: it.workTypeId || null, work_type_name: it.workTypeName.trim() || null, material: it.material.trim() || null, survey_width: width, survey_height: height, survey_unit: it.unit, survey_quantity: quantity, approved_width: width, approved_height: height, approved_unit: it.unit, approved_quantity: quantity };
+          const widthFt = toFeet(width, it.unit), heightFt = toFeet(height, (it as any).heightUnit || it.unit); const area = Math.round(widthFt * heightFt * quantity * 100) / 100;
+          const payload: any = { work_type_id: it.workTypeId || null, work_type_name: it.workTypeName.trim() || null, material: it.material.trim() || null, survey_width: widthFt, survey_height: heightFt, survey_unit: 'ft', survey_quantity: quantity, survey_area: area, approved_width: widthFt, approved_height: heightFt, approved_unit: 'ft', approved_quantity: quantity, approved_area: area };
           if (backfillStage === 'production_done' || backfillStage === 'dispatched') { payload.produced_quantity = quantity; payload.produced_at = new Date().toISOString(); }
           const exists = (workItems || []).some((w) => w.id === it.key);
           const q = exists ? supabase.from('work_items').update(payload).eq('id', it.key) : supabase.from('work_items').insert({ organization_id: orgId, shop_id: shopId, status: backfillStage === 'design_pending' ? 'approved' : backfillStage === 'production_pending' ? 'design_approved' : 'production_done', ...payload });

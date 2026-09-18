@@ -7,7 +7,7 @@
 // shop first and then runs this immediately after.
 import { supabase } from './supabase';
 import { logAudit, createNotification } from './helpers';
-import { areaSqFt } from './units';
+import { areaSqFt, toFeet } from './units';
 
 export type BackfillStage = 'design_pending' | 'production_pending' | 'production_done' | 'dispatched';
 
@@ -109,7 +109,9 @@ export async function runBackfillPipeline(params: BackfillParams): Promise<void>
     const width = parseFloat(it.width) || 0;
     const height = parseFloat(it.height) || 0;
     const quantity = Math.max(1, parseInt(it.quantity, 10) || 1);
-    const area = areaSqFt(width, it.unit, height, it.unit) * quantity;
+    const widthFt = toFeet(width, it.unit);
+    const heightFt = toFeet(height, (it as any).heightUnit || it.unit);
+    const area = Math.round(widthFt * heightFt * quantity * 100) / 100;
     const payload: Record<string, unknown> = {
       organization_id: orgId,
       shop_id: shopId,
@@ -117,8 +119,8 @@ export async function runBackfillPipeline(params: BackfillParams): Promise<void>
       work_type_id: it.workTypeId || null,
       work_type_name: it.workTypeName.trim() || workTypes.find((w) => w.id === it.workTypeId)?.name || null,
       material: it.material.trim() || null,
-      survey_width: width, survey_height: height, survey_unit: it.unit, survey_quantity: quantity, survey_area: area,
-      approved_width: width, approved_height: height, approved_unit: it.unit, approved_quantity: quantity, approved_area: area,
+      survey_width: widthFt, survey_height: heightFt, survey_unit: 'ft', survey_quantity: quantity, survey_area: area,
+      approved_width: widthFt, approved_height: heightFt, approved_unit: 'ft', approved_quantity: quantity, approved_area: area,
       status: itemStatus,
     };
     if (itemStatus === 'production_done') {

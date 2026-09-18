@@ -14,10 +14,11 @@ export const LENGTH_UNIT_OPTIONS = [
 ];
 
 const TO_FEET: Record<string, number> = {
-  ft: 1,
-  in: 1 / 12,
-  m: 3.28084,
-  cm: 3.28084 / 100,
+  ft: 1, feet: 1, foot: 1, "'": 1,
+  in: 1 / 12, inch: 1 / 12, inches: 1 / 12, '"': 1 / 12,
+  m: 3.280839895013123, meter: 3.280839895013123, meters: 3.280839895013123, metre: 3.280839895013123, metres: 3.280839895013123,
+  cm: 0.03280839895013123, centimeter: 0.03280839895013123, centimeters: 0.03280839895013123, centimetre: 0.03280839895013123, centimetres: 0.03280839895013123,
+  mm: 0.003280839895013123, millimeter: 0.003280839895013123, millimeters: 0.003280839895013123,
 };
 
 /** Rounds a measurement to the nearest whole number for DISPLAY only — the
@@ -36,7 +37,8 @@ export function formatDim(value: number | string | null | undefined): number | n
 }
 
 export function toFeet(value: number, unit: string): number {
-  const factor = TO_FEET[unit] ?? 1;
+  const normalized = String(unit || 'ft').trim().toLowerCase();
+  const factor = TO_FEET[normalized] ?? 1;
   // Rounded to 2 decimals (about 1/8 inch) — the raw conversion factors
   // for inches (1/12), meters (3.28084) and centimeters essentially never
   // land on a clean number (e.g. "5 in" was saving as
@@ -47,10 +49,10 @@ export function toFeet(value: number, unit: string): number {
   // displayed (Survey Review, Shop detail, Installer specs, PDF/PPT
   // exports), not just here. Rounding once, at the single point every
   // measurement funnels through, fixes all of those at once.
-  return Math.round(value * factor * 100) / 100;
+  return value * factor;
 }
 
 /** Area in sq ft from a width/height pair that may each be in a different unit. */
 export function areaSqFt(width: number, widthUnit: string, height: number, heightUnit: string): number {
-  return toFeet(width, widthUnit) * toFeet(height, heightUnit);
+  return Math.round(toFeet(width, widthUnit) * toFeet(height, heightUnit) * 10000) / 10000;
 }

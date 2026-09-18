@@ -350,7 +350,7 @@ export default function ReportsPage() {
       const combined = downloadMode === 'combined';
 
       if (PER_SHOP_REPORT_TYPES.has(type) && filteredShops.length === 0) {
-        setNotice({ kind: 'error', message: 'Pehle filters se kam se kam ek shop select karein.' });
+        setNotice({ kind: 'error', message: 'Select at least one shop using the filters first.' });
         return;
       }
 

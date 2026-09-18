@@ -65,30 +65,30 @@ export function isVoiceInputSupported(): boolean {
   return getSpeechRecognitionCtor() !== null;
 }
 
-/** Human-readable (Hinglish) reason for a recognition failure, shown right
+/** Human-readable reason for a recognition failure, shown right
  *  next to the mic button so "voice isn't working" always has a visible,
  *  actionable cause instead of just doing nothing. */
 export function describeVoiceError(code: string | null): string | null {
   if (!code) return null;
   switch (code) {
     case 'not-supported':
-      return "Ye browser/app voice support nahi karta — type kar do.";
+      return "Voice input is not supported in this browser or app. Please type instead.";
     case 'insecure-context':
-      return "Voice sirf https wali ya installed app pe chalta hai.";
+      return "Voice input requires HTTPS or the installed app.";
     case 'not-allowed':
     case 'permission-denied':
     case 'service-not-allowed':
-      return "Mic permission band hai — phone Settings me is app ko mic access do.";
+      return "Microphone permission is disabled. Allow microphone access in your device settings.";
     case 'no-speech':
-      return "Kuch sunayi nahi diya — shor kam jagah try karo ya dubara bolo.";
+      return "No speech was detected. Try again in a quieter place.";
     case 'network':
-      return "Voice ke liye internet chahiye — signal kamzor hai, type kar do.";
+      return "Voice input needs an internet connection. Check your connection or type instead.";
     case 'audio-capture':
-      return "Mic nahi mila — check karo koi aur app mic use to nahi kar raha.";
+      return "No microphone was found. Check that another app is not using it.";
     case 'aborted':
       return null; // user themself cancelled — no need to alarm them
     default:
-      return "Voice input me dikkat aayi — dubara try karo ya type kar do.";
+      return "Voice input failed. Try again or type instead.";
   }
 }
 
@@ -101,15 +101,15 @@ export function describeVoiceError(code: string | null): string | null {
 // ---------------------------------------------------------------------
 export const VOICE_LANGUAGE_OPTIONS: { value: string; label: string }[] = [
   { value: 'en-IN', label: 'English (India)' },
-  { value: 'hi-IN', label: 'हिंदी Hindi' },
-  { value: 'mr-IN', label: 'मराठी Marathi' },
-  { value: 'gu-IN', label: 'ગુજરાતી Gujarati' },
-  { value: 'bn-IN', label: 'বাংলা Bengali' },
-  { value: 'ta-IN', label: 'தமிழ் Tamil' },
-  { value: 'te-IN', label: 'తెలుగు Telugu' },
-  { value: 'kn-IN', label: 'ಕನ್ನಡ Kannada' },
-  { value: 'pa-IN', label: 'ਪੰਜਾਬੀ Punjabi' },
-  { value: 'ml-IN', label: 'മലയാളം Malayalam' },
+  { value: 'hi-IN', label: 'Hindi' },
+  { value: 'mr-IN', label: 'Marathi' },
+  { value: 'gu-IN', label: 'Gujarati' },
+  { value: 'bn-IN', label: 'Bengali' },
+  { value: 'ta-IN', label: 'Tamil' },
+  { value: 'te-IN', label: 'Telugu' },
+  { value: 'kn-IN', label: 'Kannada' },
+  { value: 'pa-IN', label: 'Punjabi' },
+  { value: 'ml-IN', label: 'Malayalam' },
   { value: 'ur-IN', label: 'اردو Urdu' },
 ];
 

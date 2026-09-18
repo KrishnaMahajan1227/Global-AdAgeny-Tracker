@@ -29,6 +29,9 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
     let cancelled = false;
     async function start() {
       try {
+        // Best-effort landscape lock on browsers/PWAs that support it. iOS
+        // Safari may ignore this; captured pixels are still normalized below.
+        try { await (screen.orientation as any)?.lock?.('landscape'); } catch { /* unsupported */ }
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: 'environment' }, width: { ideal: 1600 }, height: { ideal: 1200 }, aspectRatio: { ideal: 4 / 3 } },
           audio: false,
@@ -65,17 +68,31 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
     const vw = video.videoWidth;
     const vh = video.videoHeight;
     if (!vw || !vh) return;
-    const outW = Math.max(1200, vw >= vh ? vw : vh);
+    const portraitSensor = vh > vw;
+    const orientedW = portraitSensor ? vh : vw;
+    const orientedH = portraitSensor ? vw : vh;
+    const outW = Math.max(1600, orientedW);
     const outH = Math.round(outW * 3 / 4);
     canvas.width = outW;
     canvas.height = outH;
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, outW, outH);
-    const scale = Math.min(outW / vw, outH / vh);
-    const dw = Math.round(vw * scale);
-    const dh = Math.round(vh * scale);
-    ctx.drawImage(video, 0, 0, vw, vh, Math.round((outW - dw) / 2), Math.round((outH - dh) / 2), dw, dh);
-    setShot(canvas.toDataURL('image/jpeg', 0.85));
+    const scale = Math.min(outW / orientedW, outH / orientedH);
+    const dw = orientedW * scale;
+    const dh = orientedH * scale;
+    if (portraitSensor) {
+      // Phones may return portrait sensor pixels even while the installer is
+      // physically holding the phone landscape. Rotate the captured PIXELS
+      // into the required printable landscape orientation, without cropping.
+      ctx.save();
+      ctx.translate(outW / 2, outH / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.drawImage(video, -dh / 2, -dw / 2, dh, dw);
+      ctx.restore();
+    } else {
+      ctx.drawImage(video, (outW - dw) / 2, (outH - dh) / 2, dw, dh);
+    }
+    setShot(canvas.toDataURL('image/jpeg', 0.92));
   }
 
   function confirm() {
@@ -174,9 +191,9 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
         )}   
      
         {!shot && (
-          <video ref={videoRef} playsInline muted className={`w-full aspect-[4/3] max-h-full object-contain bg-black ${status === 'live' ? 'block' : 'hidden'}`} />
+          <video ref={videoRef} playsInline muted className={`w-full h-full object-contain bg-black ${status === 'live' ? 'block' : 'hidden'}`} />
         )}
-        {shot && <img src={shot} alt="Captured" className="w-full aspect-[4/3] max-h-full object-contain bg-black" />}
+        {shot && <img src={shot} alt="Captured" className="w-full h-full object-contain bg-black" />}
       </div>
 
       <div className="p-6 flex items-center justify-center gap-8 bg-black">

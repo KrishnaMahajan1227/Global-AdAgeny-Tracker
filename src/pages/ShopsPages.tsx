@@ -2824,6 +2824,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const [editWorkItem, setEditWorkItem] = useState<WorkItem | null>(null);
   const [workItemForm, setWorkItemForm] = useState({ work_type_name: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' });
   const [photoUploading, setPhotoUploading] = useState(false);
+  const [evidencePreview, setEvidencePreview] = useState<{ src: string; label: string } | null>(null);
   const [surveyPhotoUploadOpen, setSurveyPhotoUploadOpen] = useState(false);
   const [surveyPhotoUploadFiles, setSurveyPhotoUploadFiles] = useState<File[]>([]);
   const [surveyPhotoItemIds, setSurveyPhotoItemIds] = useState<Set<string>>(new Set());
@@ -3029,10 +3030,27 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     } finally { setPhotoUploading(false); }
   };
   const deleteDetailPhoto = async (photo: SurveyPhoto) => {
-    if (!window.confirm('Delete this photo permanently?')) return;
+    if (!window.confirm('Delete this survey photo permanently? This cannot be undone.')) return;
+    // Remove mapping rows first so this also works on deployments without cascade FKs.
+    const { error: linkErr } = await supabase.from('survey_photo_items').delete().eq('survey_photo_id', photo.id);
+    if (linkErr && !/survey_photo_items|schema cache|could not find the table/i.test(linkErr.message || '')) throw linkErr;
+    await supabase.from('board_markings').delete().eq('survey_photo_id', photo.id);
+    const { error } = await supabase.from('survey_photos').delete().eq('id', photo.id);
+    if (error) throw error;
     if (photo.storage_path) await supabase.storage.from('survey-photos').remove([photo.storage_path]);
-    const { error } = await supabase.from('survey_photos').delete().eq('id', photo.id); if (error) throw error;
-    queryClient.invalidateQueries({ queryKey: ['shop-survey-photos', shopId] });
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['shop-survey-photos', shopId] }),
+      queryClient.invalidateQueries({ queryKey: ['shop-survey-photo-items', shopId] }),
+      queryClient.invalidateQueries({ queryKey: ['shop-board-markings', shopId] }),
+    ]);
+  };
+
+  const deleteInstallationProof = async (proof: any) => {
+    if (!window.confirm('Delete this installation photo permanently? This cannot be undone.')) return;
+    const { error } = await supabase.from('installation_proofs').delete().eq('id', proof.id);
+    if (error) throw error;
+    if (proof.storage_path) await supabase.storage.from('installation-proof').remove([proof.storage_path]);
+    await queryClient.invalidateQueries({ queryKey: ['shop-installations', shopId] });
   };
 
   const { data: surveyPhotoItems } = useQuery({
@@ -3761,13 +3779,13 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                     const surveyForItem = (surveyPhotos || []).filter((p) => (surveyPhotoItems || []).some((x) => x.survey_photo_id === p.id && x.work_item_id === item.id) || (boardMarkings || []).some((m) => m.survey_photo_id === p.id && m.work_item_id === item.id));
                     const designForItem = (designTasks || []).flatMap((d: any) => (d.design_versions || []).filter((v: any) => (v.design_version_items || []).some((x: any) => x.work_item_id === item.id)));
                     const installForItem = (installations || []).flatMap((inst: any) => (inst.installation_proofs || []).filter((proof: any) => proof.work_item_id === item.id));
-                    const Thumb = ({ src, label, href }: { src: string; label: string; href?: string }) => <a href={href || src} target="_blank" rel="noreferrer" className="group relative shrink-0 block" title="Hover to preview · click to open"><img src={src} className="w-16 h-16 rounded-lg object-cover border border-slate-200 shadow-sm"/><span className="absolute bottom-1 left-1 bg-black/65 text-white text-[9px] px-1.5 py-0.5 rounded">{label}</span><div className="hidden group-hover:flex fixed inset-0 z-[120] pointer-events-none items-center justify-center bg-slate-950/75 p-10"><div className="max-w-[90vw] max-h-[88vh] rounded-xl overflow-hidden shadow-2xl bg-white p-2"><img src={src} className="max-w-[88vw] max-h-[84vh] object-contain"/></div></div></a>;
+                    const Thumb = ({ src, label, onDelete }: { src: string; label: string; onDelete?: () => void }) => <div className="relative shrink-0"><button type="button" onClick={() => setEvidencePreview({ src, label })} className="block rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" title="Click to preview"><img src={src} className="w-16 h-16 rounded-lg object-cover border border-slate-200 shadow-sm"/><span className="absolute bottom-1 left-1 bg-black/65 text-white text-[9px] px-1.5 py-0.5 rounded pointer-events-none">{label}</span></button>{canCrudShop && onDelete && <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete photo" className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-white border border-red-200 text-red-600 shadow flex items-center justify-center hover:bg-red-50"><Trash2 className="w-3.5 h-3.5"/></button>}</div>;
                     return <div className="mt-4 pt-4 border-t border-slate-200">
                       <div className="flex items-center justify-between mb-3"><p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Complete evidence · this work item</p><div className="flex gap-2">{canCrudShop && <><button onClick={() => { setSurveyPhotoTargetItemId(item.id); setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700">+ Survey photos</button><button onClick={() => { setDesignUploadTargetItemId(item.id); setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set([item.id])); setDesignUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-violet-200 bg-violet-50 text-violet-700">+ Designs</button></>}</div></div>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-blue-800">SURVEY / BEFORE</p><span className="text-[10px] text-blue-600">{surveyForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`S${i+1}`} />) : <span className="text-xs text-slate-400 py-5">No mapped survey photo</span>}</div></div>
+                        <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-blue-800">SURVEY / BEFORE</p><span className="text-[10px] text-blue-600">{surveyForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`S${i+1}`} onDelete={() => void deleteDetailPhoto(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped survey photo</span>}</div></div>
                         <div className="rounded-lg bg-violet-50/50 border border-violet-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-violet-800">DESIGN / ARTWORK</p><span className="text-[10px] text-violet-600">{designForItem.length} file(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{designForItem.length ? designForItem.map((v:any)=> v.file_url?.match(/\.(png|jpe?g|webp|gif)(\?|$)/i) ? <Thumb key={v.id} src={v.file_url} label={`v${v.version_number}`} /> : <a key={v.id} href={v.file_url} target="_blank" rel="noreferrer" className="w-16 h-16 rounded-lg border border-violet-200 bg-white text-violet-700 flex flex-col items-center justify-center text-[10px] font-semibold shrink-0"><Palette className="w-4 h-4 mb-1"/>v{v.version_number}</a>) : <span className="text-xs text-slate-400 py-5">No mapped design</span>}</div></div>
-                        <div className="rounded-lg bg-emerald-50/50 border border-emerald-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-emerald-800">INSTALLATION / AFTER</p><span className="text-[10px] text-emerald-600">{installForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{installForItem.length ? installForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`I${i+1}`} />) : <span className="text-xs text-slate-400 py-5">No mapped installation proof</span>}</div></div>
+                        <div className="rounded-lg bg-emerald-50/50 border border-emerald-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-emerald-800">INSTALLATION / AFTER</p><span className="text-[10px] text-emerald-600">{installForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{installForItem.length ? installForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`I${i+1}`} onDelete={() => void deleteInstallationProof(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped installation proof</span>}</div></div>
                       </div>
                     </div>;
                   })()}
@@ -3821,6 +3839,10 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         </Card>
 
       </div>
+
+      <Modal open={!!evidencePreview} onClose={() => setEvidencePreview(null)} title={evidencePreview?.label ? `Photo preview · ${evidencePreview.label}` : 'Photo preview'} size="lg">
+        {evidencePreview && <div className="bg-slate-950 rounded-xl min-h-[60vh] flex items-center justify-center p-3"><img src={evidencePreview.src} alt={evidencePreview.label} className="max-w-full max-h-[75vh] object-contain rounded-lg" /></div>}
+      </Modal>
 
       <Modal open={!!assignModal} onClose={() => setAssignModal(null)} title={`Assign ${assignModal === 'installer' ? 'Installer' : assignModal === 'designer' ? 'Designer' : 'Surveyor'}`}>
         <div className="space-y-4">

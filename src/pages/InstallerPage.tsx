@@ -949,7 +949,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               expandedItemId={expandedInstallItemId}
               onToggleItem={(itemId) => setExpandedInstallItemId((current) => current === itemId ? null : itemId)}
               proofPhotos={proofPhotos}
-              onTakePhoto={(itemId) => { setSelectedProofWorkItemId(itemId); setCameraFor('installed'); }}
+              onTakePhoto={(itemId) => { setSelectedProofWorkItemId(itemId); setCameraFor('front'); }}
               onUploadPhotos={(itemId, files) => { setSelectedProofWorkItemId(itemId); void handleInstallationFileSelection(files, itemId); }}
               onDeletePhoto={(photo) => void deleteInstallationPhoto(photo)}
             />

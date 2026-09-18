@@ -58,20 +58,24 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
     if (!video) return;
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d')!;
-    // Installation/survey evidence is standardized to landscape. Capture the
-    // camera's native frame and rotate portrait streams into a landscape JPEG
-    // so exported proof packs have one consistent orientation.
-    const rawLandscape = video.videoWidth >= video.videoHeight;
-    if (rawLandscape) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // Evidence must be landscape, but NEVER rotate the pixels: on many phones
+    // a portrait camera stream already has its orientation applied by the browser.
+    // Rotating that frame again makes the saved proof appear sideways. For a
+    // portrait stream we instead take a centred 4:3 landscape crop.
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh) return;
+    if (vw >= vh) {
+      canvas.width = vw;
+      canvas.height = vh;
+      ctx.drawImage(video, 0, 0, vw, vh);
     } else {
-      canvas.width = video.videoHeight;
-      canvas.height = video.videoWidth;
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate(Math.PI / 2);
-      ctx.drawImage(video, -video.videoWidth / 2, -video.videoHeight / 2);
+      const targetRatio = 4 / 3;
+      const sourceHeight = Math.min(vh, vw / targetRatio);
+      const sourceY = Math.max(0, (vh - sourceHeight) / 2);
+      canvas.width = vw;
+      canvas.height = Math.round(vw / targetRatio);
+      ctx.drawImage(video, 0, sourceY, vw, sourceHeight, 0, 0, canvas.width, canvas.height);
     }
     setShot(canvas.toDataURL('image/jpeg', 0.85));
   }

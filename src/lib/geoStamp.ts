@@ -33,19 +33,21 @@ export interface GeoStampInfo {
  * signal is still real proof and shouldn't be blocked from uploading.
  */
 
-/** Rotates portrait evidence into landscape without cropping. */
+/** Normalizes evidence to landscape without ever rotating already-oriented pixels. */
 export async function ensureLandscape(dataUrl: string): Promise<string> {
   const img = await loadImage(dataUrl);
   const w = img.naturalWidth || img.width;
   const h = img.naturalHeight || img.height;
   if (w >= h) return dataUrl;
   const canvas = document.createElement('canvas');
-  canvas.width = h; canvas.height = w;
+  const targetRatio = 4 / 3;
+  const sourceHeight = Math.min(h, w / targetRatio);
+  const sourceY = Math.max(0, (h - sourceHeight) / 2);
+  canvas.width = w;
+  canvas.height = Math.round(w / targetRatio);
   const ctx = canvas.getContext('2d');
   if (!ctx) return dataUrl;
-  ctx.translate(canvas.width / 2, canvas.height / 2);
-  ctx.rotate(Math.PI / 2);
-  ctx.drawImage(img, -w / 2, -h / 2, w, h);
+  ctx.drawImage(img, 0, sourceY, w, sourceHeight, 0, 0, canvas.width, canvas.height);
   return canvas.toDataURL('image/jpeg', 0.92);
 }
 

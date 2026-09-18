@@ -518,6 +518,52 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     createJob();
   }, [profile, shop, shopId, jobId]);
 
+  // Resume an interrupted shop exactly from persisted server evidence.
+  // Photos are uploaded immediately, so switching to another shop never
+  // discards completed captures. When this shop is opened again, reload the
+  // proof rows and their Work Item mappings instead of starting with an empty
+  // in-memory photo list.
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from('installation_proofs')
+        .select('id,storage_path,photo_url,photo_type,angle,work_item_id')
+        .eq('installation_job_id', jobId)
+        .order('captured_at');
+      if (cancelled) return;
+      if (error) {
+        // work_item_id may be absent on an older schema cache; retry legacy.
+        if (/work_item_id|schema cache|column/i.test(error.message || '')) {
+          const legacy = await supabase.from('installation_proofs').select('id,storage_path,photo_url,photo_type,angle').eq('installation_job_id', jobId).order('captured_at');
+          if (!cancelled && !legacy.error) setProofPhotos((legacy.data || []).map((p: any) => ({ id: p.id, storagePath: p.storage_path, url: p.photo_url, type: p.photo_type || 'installed', angle: p.angle || 'other' })));
+        }
+        return;
+      }
+      setProofPhotos((data || []).map((p: any) => ({ id: p.id, storagePath: p.storage_path, url: p.photo_url, type: p.photo_type || 'installed', angle: p.angle || 'other', workItemId: p.work_item_id || undefined })));
+    })();
+    return () => { cancelled = true; };
+  }, [jobId]);
+
+  // Lightweight per-shop UI draft. Uploaded photos themselves live in
+  // Supabase (above); this only restores where the installer was in the UI.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(`adroute-install-draft:${shopId}`);
+      if (!raw) return;
+      const d = JSON.parse(raw);
+      if (d.step === 1 || d.step === 4) setStep(d.step);
+      if (typeof d.expandedInstallItemId === 'string') setExpandedInstallItemId(d.expandedInstallItemId);
+      if (typeof d.selectedProofWorkItemId === 'string') setSelectedProofWorkItemId(d.selectedProofWorkItemId);
+      if (typeof d.installNotes === 'string') setInstallNotes(d.installNotes);
+    } catch { /* ignore a damaged local draft */ }
+  }, [shopId]);
+
+  useEffect(() => {
+    try { localStorage.setItem(`adroute-install-draft:${shopId}`, JSON.stringify({ step, expandedInstallItemId, selectedProofWorkItemId, installNotes })); } catch { /* storage unavailable */ }
+  }, [shopId, step, expandedInstallItemId, selectedProofWorkItemId, installNotes]);
+
   // GPS
   useEffect(() => {
     if (gpsStatus === 'idle') {
@@ -855,6 +901,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       }
 
       queryClient.invalidateQueries();
+      try { localStorage.removeItem(`adroute-install-draft:${shopId}`); } catch { /* ignore */ }
       setCompleted(true);
     } catch (err: any) {
       console.error('[completeInstallation] failed:', err);
@@ -963,7 +1010,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                 <div className="grid grid-cols-4 gap-2">
                   {proofPhotos.map((p, i) => (
                     <div key={`${p.url}-${i}`} className="relative rounded-lg overflow-hidden bg-slate-100 aspect-[4/3]">
-                      <img src={p.url} alt="Installation proof" className="w-full h-full object-cover" />
+                      <img src={p.url} alt="Installation proof" className="w-full h-full object-contain bg-slate-100" />
                       <button onClick={() => void deleteInstallationPhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5 shadow" aria-label="Delete photo"><Trash2 className="w-3 h-3" /></button>
                     </div>
                   ))}
@@ -1165,7 +1212,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <p className="text-xs text-slate-400 mt-2">These are the measurements approved by your Admin/Owner during survey review — installed as-is, no need to re-enter them.</p>
               <div className="mt-4 border-t border-slate-100 pt-4">
                 <div className="flex items-center justify-between mb-3"><p className="text-sm font-semibold text-slate-900">Installation Photo Review</p><span className="text-xs font-semibold text-blue-600">{proofPhotos.length} photos</span></div>
-                <div className="space-y-3">{approvedItems.map((it, idx) => { const ps = proofPhotos.filter((p) => p.workItemId === it.id); if (!ps.length) return null; return <div key={it.id}><p className="text-xs font-semibold text-slate-600 mb-1.5">{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {ps.length} photo{ps.length > 1 ? 's' : ''}</p><div className="grid grid-cols-3 gap-2">{ps.map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt="Installation proof" className="w-full h-full object-cover"/><button type="button" onClick={() => void deleteInstallationPhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5" aria-label="Delete photo"><Trash2 className="w-3 h-3"/></button></div>)}</div></div>; })}</div>
+                <div className="space-y-3">{approvedItems.map((it, idx) => { const ps = proofPhotos.filter((p) => p.workItemId === it.id); if (!ps.length) return null; return <div key={it.id}><p className="text-xs font-semibold text-slate-600 mb-1.5">{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {ps.length} photo{ps.length > 1 ? 's' : ''}</p><div className="grid grid-cols-3 gap-2">{ps.map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt="Installation proof" className="w-full h-full object-contain bg-slate-100"/><button type="button" onClick={() => void deleteInstallationPhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5" aria-label="Delete photo"><Trash2 className="w-3 h-3"/></button></div>)}</div></div>; })}</div>
               </div>
               <div className="mt-3">
                 <Textarea label="Note for reviewer (optional)" value={installNotes} onChange={setInstallNotes} rows={2} />
@@ -1323,7 +1370,7 @@ function ApprovedSpecsCard({
                     )}
                   </div>
 
-                  {installedCount > 0 && <div className="rounded-xl bg-white border border-slate-200 p-3"><div className="flex items-center justify-between mb-2"><p className="text-[11px] font-bold tracking-wide text-slate-500 uppercase">Installation photos</p><span className="text-[10px] font-semibold text-emerald-700">{installedCount} added</span></div><div className="grid grid-cols-3 gap-2">{proofPhotos.filter((p) => p.workItemId === it.id).map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt={`${label} installation`} className="w-full h-full object-cover"/><button type="button" onClick={() => onDeletePhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5 shadow" aria-label="Delete installation photo"><Trash2 className="w-3 h-3"/></button></div>)}</div></div>}
+                  {installedCount > 0 && <div className="rounded-xl bg-white border border-slate-200 p-3"><div className="flex items-center justify-between mb-2"><p className="text-[11px] font-bold tracking-wide text-slate-500 uppercase">Installation photos</p><span className="text-[10px] font-semibold text-emerald-700">{installedCount} added</span></div><div className="grid grid-cols-3 gap-2">{proofPhotos.filter((p) => p.workItemId === it.id).map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt={`${label} installation`} className="w-full h-full object-contain bg-slate-100"/><button type="button" onClick={() => onDeletePhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5 shadow" aria-label="Delete installation photo"><Trash2 className="w-3 h-3"/></button></div>)}</div></div>}
 
                   <div className="grid grid-cols-2 gap-2">
                     <button type="button" onClick={() => onTakePhoto(it.id)} className="flex items-center justify-center gap-2 bg-blue-600 active:bg-blue-700 text-white font-semibold py-3 rounded-xl text-sm">
@@ -1948,7 +1995,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
             <div className="grid grid-cols-3 gap-2">
               {photos.map((p) => (
                 <div key={p.storagePath} className="relative aspect-square rounded-lg overflow-hidden border border-slate-200">
-                  <img src={p.url} alt={p.angle} className="w-full h-full object-cover" />
+                  <img src={p.url} alt={p.angle} className="w-full h-full object-contain bg-slate-100" />
                   <span className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-[10px] text-center py-0.5 capitalize">{p.angle}</span>
                   <button onClick={() => removePhoto(p)} className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-0.5">
                     <Trash2 className="w-3 h-3" />

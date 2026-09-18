@@ -120,7 +120,7 @@ export default function InstallationReviewPage() {
       let query = supabase
         .from('installation_jobs')
         .select(
-          '*, shops!inner(name, city, clients(name)), profiles:installer_id(id, full_name), confirmed_by_profile:material_check_confirmed_by(full_name), installation_proofs(id, photo_url, photo_type, angle, duplicate_flag)',
+          '*, shops!inner(name, city, clients(name)), profiles:installer_id(id, full_name), confirmed_by_profile:material_check_confirmed_by(full_name), installation_proofs(id, photo_url, storage_path, photo_type, angle, duplicate_flag)',
           { count: 'exact' }
         )
         .eq('organization_id', orgId)
@@ -184,6 +184,19 @@ export default function InstallationReviewPage() {
       const { error: shopError } = await supabase.from('shops').update({ status: 'installed' }).eq('id', job.shop_id).select('id');
       if (shopError) throw new Error(`${job.shops?.name}: ${shopError.message}`);
     } else {
+      // A rejected installation attempt is NOT historical evidence. Remove
+      // that attempt's proof rows and storage objects before reopening the
+      // shop, so the installer starts the redo with a clean photo set and
+      // Owner/Admin never sees old rejected proofs appended to the new ones.
+      const rejectedProofs = (job.installation_proofs || []) as { id: string; storage_path?: string | null }[];
+      const rejectedPaths = rejectedProofs.map((p) => p.storage_path).filter(Boolean) as string[];
+      if (rejectedPaths.length) {
+        const { error: storageError } = await supabase.storage.from('installation-proof').remove(rejectedPaths);
+        if (storageError) console.error('[InstallationReview] rejected proof storage cleanup:', storageError.message);
+      }
+      const { error: proofDeleteError } = await supabase.from('installation_proofs').delete().eq('installation_job_id', job.id);
+      if (proofDeleteError) throw new Error(`${job.shops?.name}: could not clear rejected photos: ${proofDeleteError.message}`);
+
       // Redo: send the shop back to the installer's own list, and reset
       // the assignment so "Start Install" is enabled again.
       const { error: shopError } = await supabase.from('shops').update({ status: 'installation_pending' }).eq('id', job.shop_id).select('id');

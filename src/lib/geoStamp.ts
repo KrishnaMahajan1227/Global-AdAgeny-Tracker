@@ -35,20 +35,34 @@ export interface GeoStampInfo {
 
 /** Normalizes evidence to landscape without ever rotating already-oriented pixels. */
 export async function ensureLandscape(dataUrl: string): Promise<string> {
+  // Installation evidence is standardized to a printable 4:3 LANDSCAPE
+  // file. Crucially this is a FIT operation, never a crop: the complete
+  // camera frame remains visible. The live camera asks for 4:3, so normal
+  // captures fill the canvas edge-to-edge; unusual gallery/camera ratios
+  // are letterboxed rather than losing part of the board/shop.
   const img = await loadImage(dataUrl);
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
-  if (w >= h) return dataUrl;
+  const sw = img.naturalWidth || img.width;
+  const sh = img.naturalHeight || img.height;
+  if (!sw || !sh) return dataUrl;
+
+  const longSide = Math.max(sw, sh);
+  const outW = Math.max(1200, longSide);
+  const outH = Math.round(outW * 3 / 4);
   const canvas = document.createElement('canvas');
-  const targetRatio = 4 / 3;
-  const sourceHeight = Math.min(h, w / targetRatio);
-  const sourceY = Math.max(0, (h - sourceHeight) / 2);
-  canvas.width = w;
-  canvas.height = Math.round(w / targetRatio);
+  canvas.width = outW;
+  canvas.height = outH;
   const ctx = canvas.getContext('2d');
   if (!ctx) return dataUrl;
-  ctx.drawImage(img, 0, sourceY, w, sourceHeight, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL('image/jpeg', 0.92);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, outW, outH);
+  const scale = Math.min(outW / sw, outH / sh);
+  const dw = Math.round(sw * scale);
+  const dh = Math.round(sh * scale);
+  const dx = Math.round((outW - dw) / 2);
+  const dy = Math.round((outH - dh) / 2);
+  ctx.drawImage(img, 0, 0, sw, sh, dx, dy, dw, dh);
+  return canvas.toDataURL('image/jpeg', 0.94);
 }
 
 export async function stampGeoTag(dataUrl: string, info: GeoStampInfo): Promise<string> {
@@ -90,7 +104,7 @@ export async function stampGeoTag(dataUrl: string, info: GeoStampInfo): Promise<
     // important line stands out at a glance in a thumbnail grid.
     if (i === 0 && info.siteName) {
       ctx.font = `bold ${fontSize}px -apple-system, Segoe UI, Roboto, Arial, sans-serif`;
-      ctx.fillText(`📍 ${line}`, x, y);
+      ctx.fillText(`SITE: ${line}`, x, y);
       ctx.font = `${fontSize}px -apple-system, Segoe UI, Roboto, Arial, sans-serif`;
     } else {
       ctx.fillText(line, x, y);

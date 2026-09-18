@@ -30,7 +30,7 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
     async function start() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1600 }, height: { ideal: 1200 }, aspectRatio: { ideal: 4 / 3 } },
           audio: false,
         });
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -58,25 +58,23 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
     if (!video) return;
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d')!;
-    // Evidence must be landscape, but NEVER rotate the pixels: on many phones
-    // a portrait camera stream already has its orientation applied by the browser.
-    // Rotating that frame again makes the saved proof appear sideways. For a
-    // portrait stream we instead take a centred 4:3 landscape crop.
+    // Save a real 4:3 landscape FILE without cropping any pixels. The camera
+    // is requested at 4:3 above, so supported phones fill this frame exactly.
+    // If a browser still returns another ratio/orientation, contain the whole
+    // frame inside 4:3 instead of centre-cropping or rotating it.
     const vw = video.videoWidth;
     const vh = video.videoHeight;
     if (!vw || !vh) return;
-    if (vw >= vh) {
-      canvas.width = vw;
-      canvas.height = vh;
-      ctx.drawImage(video, 0, 0, vw, vh);
-    } else {
-      const targetRatio = 4 / 3;
-      const sourceHeight = Math.min(vh, vw / targetRatio);
-      const sourceY = Math.max(0, (vh - sourceHeight) / 2);
-      canvas.width = vw;
-      canvas.height = Math.round(vw / targetRatio);
-      ctx.drawImage(video, 0, sourceY, vw, sourceHeight, 0, 0, canvas.width, canvas.height);
-    }
+    const outW = Math.max(1200, vw >= vh ? vw : vh);
+    const outH = Math.round(outW * 3 / 4);
+    canvas.width = outW;
+    canvas.height = outH;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, outW, outH);
+    const scale = Math.min(outW / vw, outH / vh);
+    const dw = Math.round(vw * scale);
+    const dh = Math.round(vh * scale);
+    ctx.drawImage(video, 0, 0, vw, vh, Math.round((outW - dw) / 2), Math.round((outH - dh) / 2), dw, dh);
     setShot(canvas.toDataURL('image/jpeg', 0.85));
   }
 
@@ -153,7 +151,7 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
         </div>
       </div>
 
-      <div className="flex-1 relative flex items-center justify-center bg-black overflow-hidden">
+      <div className="flex-1 relative flex items-center justify-center bg-black overflow-hidden px-2">
         {status === 'opening' && (
           <div className="text-white flex flex-col items-center gap-2">
             <Loader2 className="w-8 h-8 animate-spin" />
@@ -176,9 +174,9 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
         )}   
      
         {!shot && (
-          <video ref={videoRef} playsInline muted className={`w-full h-full object-cover ${status === 'live' ? 'block' : 'hidden'}`} />
+          <video ref={videoRef} playsInline muted className={`w-full aspect-[4/3] max-h-full object-contain bg-black ${status === 'live' ? 'block' : 'hidden'}`} />
         )}
-        {shot && <img src={shot} alt="Captured" className="w-full h-full object-contain" />}
+        {shot && <img src={shot} alt="Captured" className="w-full aspect-[4/3] max-h-full object-contain bg-black" />}
       </div>
 
       <div className="p-6 flex items-center justify-center gap-8 bg-black">

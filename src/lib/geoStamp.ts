@@ -65,11 +65,11 @@ export async function ensureLandscape(dataUrl: string): Promise<string> {
   const dy = (outH - dh) / 2;
 
   if (portraitSensor) {
-    // Rotate clockwise into landscape. Draw around the destination centre so
+    // Rotate counter-clockwise (-90°) into landscape. Draw around the destination centre so
     // the COMPLETE frame is retained; there is no centre-crop.
     ctx.save();
     ctx.translate(outW / 2, outH / 2);
-    ctx.rotate(Math.PI / 2);
+    ctx.rotate(-Math.PI / 2);
     ctx.drawImage(img, -dh / 2, -dw / 2, dh, dw);
     ctx.restore();
   } else {

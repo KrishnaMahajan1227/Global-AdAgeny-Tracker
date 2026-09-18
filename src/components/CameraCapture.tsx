@@ -82,11 +82,11 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
     const dh = orientedH * scale;
     if (portraitSensor) {
       // Phones may return portrait sensor pixels even while the installer is
-      // physically holding the phone landscape. Rotate the captured PIXELS
+      // physically holding the phone landscape. Rotate the captured PIXELS -90° counter-clockwise
       // into the required printable landscape orientation, without cropping.
       ctx.save();
       ctx.translate(outW / 2, outH / 2);
-      ctx.rotate(Math.PI / 2);
+      ctx.rotate(-Math.PI / 2);
       ctx.drawImage(video, -dh / 2, -dw / 2, dh, dw);
       ctx.restore();
     } else {

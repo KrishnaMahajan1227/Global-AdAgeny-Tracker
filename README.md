@@ -45,3 +45,6 @@ agar kabhi is dummy batch ko hatana ho.
 - Agency org me kam se kam ek active profile (user) hona chahiye — surveyor/installer/designer roles
   match kiye jaate hain agar exist karte hain, warna kisi bhi available profile pe fallback hota hai.
 - Agar "Mahadhan" client org / clients row pehle se nahi hai to script khud bana degi.
+
+## 2026-09-18 Survey photo ↔ board mapping
+Owner/Admin Shop Detail survey-photo uploads now require linking to the exact work item/measurement. Migration `20260918134000_0054_survey_photo_work_item_links.sql` adds `survey_photo_items` and backfills links from existing board markings. Apply Supabase migrations before using the new upload flow.

@@ -124,6 +124,7 @@ type ShopDesignDetail = {
   markings: BoardMarking[];
   versions: DesignVersion[];
   versionItems: DesignVersionItem[];
+  photoItems: { survey_photo_id: string; work_item_id: string }[];
 };
 
 // Full board/marking/version detail for one shop — the one query every
@@ -142,16 +143,20 @@ async function fetchShopDetail(shopId: string, designTaskId: string): Promise<Sh
 
   const photoIds = (photos || []).map((p) => p.id);
   const versionIds = (versions || []).map((v) => v.id);
-  const [markingsRes, versionItemsRes] = await Promise.all([
+  const [markingsRes, versionItemsRes, photoItemsRes] = await Promise.all([
     photoIds.length
       ? supabase.from('board_markings').select('*').in('survey_photo_id', photoIds)
       : Promise.resolve({ data: [], error: null }),
     versionIds.length
       ? supabase.from('design_version_items').select('*').in('design_version_id', versionIds)
       : Promise.resolve({ data: [], error: null }),
+    photoIds.length
+      ? supabase.from('survey_photo_items').select('survey_photo_id,work_item_id').in('survey_photo_id', photoIds)
+      : Promise.resolve({ data: [], error: null }),
   ]);
   if (markingsRes.error) throw new Error(`Could not load survey markings: ${markingsRes.error.message}`);
   if (versionItemsRes.error) throw new Error(`Could not load design coverage: ${versionItemsRes.error.message}`);
+  if (photoItemsRes.error) throw new Error(`Could not load survey photo coverage: ${photoItemsRes.error.message}`);
 
   return {
     items: (items || []) as WorkItem[],
@@ -159,6 +164,7 @@ async function fetchShopDetail(shopId: string, designTaskId: string): Promise<Sh
     markings: (markingsRes.data || []) as BoardMarking[],
     versions: (versions || []) as DesignVersion[],
     versionItems: (versionItemsRes.data || []) as DesignVersionItem[],
+    photoItems: (photoItemsRes.data || []) as { survey_photo_id: string; work_item_id: string }[],
   };
 }
 
@@ -214,7 +220,8 @@ async function exportShopDesignReport(row: DesignTaskRow, detailData: ShopDesign
     detailData.photos,
     detailData.markings,
     detailData.versions,
-    detailData.versionItems
+    detailData.versionItems,
+    detailData.photoItems
   );
   const shop = rowToShop(row);
   if (format === 'pdf') await generateDesignComparisonPDF(shop, rowsForExport, org);
@@ -289,11 +296,14 @@ export default function DesignerPage() {
   // it too): how far along are a shop's boards, independent of the
   // shop-level task status shown in the tabs above.
   const [boardProgressFilter, setBoardProgressFilter] = useState<'all' | 'not_started' | 'in_progress' | 'done'>('all');
-  // Folder browser — Campaign -> Work Order -> Zone, same as Production
-  // Studio (migration 0079/0080). Campaign and Work Order are PO
-  // context, so — same rule as `typeFilter` above — a designer session
-  // never sets or sees them; a designer's root folder level is Zone
-  // directly. See `folderLevel` below.
+  // Folder browser — Client -> Campaign -> Work Order -> Zone, same
+  // levels Production Studio uses (migration 0079/0080/0083). Previously
+  // Campaign/Work Order were skipped entirely for a designer session —
+  // this no longer holds: a designer gets the same full folder tree
+  // Owner/Admin and Production see. (Order-type/fulfillment context
+  // above, `typeFilter`, stays designer-hidden — that's financial/
+  // billing-flavoured in a way a folder label isn't.)
+  const [clientFilter, setClientFilter] = useState('');
   const [campaignFilter, setCampaignFilter] = useState('');
   const [poFilter, setPoFilter] = useState('');
   const [zoneFilter, setZoneFilter] = useState('');
@@ -345,7 +355,7 @@ export default function DesignerPage() {
     return () => clearTimeout(t);
   }, [search]);
 
-  useEffect(() => { setPage(0); setSelectedRowIds(new Set()); }, [activeTab, debouncedSearch, typeFilter, boardProgressFilter, sortDir]);
+  useEffect(() => { setPage(0); setSelectedRowIds(new Set()); }, [activeTab, debouncedSearch, typeFilter, boardProgressFilter, sortDir, clientFilter, campaignFilter, poFilter, zoneFilter]);
 
   const { data: productionPeople } = useQuery({
     queryKey: ['org-production-people', orgId],
@@ -376,7 +386,7 @@ export default function DesignerPage() {
     error: listQueryError,
     refetch: refetchList,
   } = useQuery({
-    queryKey: ['design-task-list', orgId, designerFilter, activeTab, debouncedSearch, page, typeFilter, boardProgressFilter, sortDir, campaignFilter, poFilter, zoneFilter],
+    queryKey: ['design-task-list', orgId, designerFilter, activeTab, debouncedSearch, page, typeFilter, boardProgressFilter, sortDir, clientFilter, campaignFilter, poFilter, zoneFilter],
     queryFn: async () => {
       let q = supabase.from('v_design_task_list').select('*', { count: 'exact' }).eq('organization_id', orgId);
       if (designerFilter) q = q.eq('designer_id', designerFilter);
@@ -391,14 +401,13 @@ export default function DesignerPage() {
       }
       // Board-progress filter — available to both roles.
       if (boardProgressFilter !== 'all') q = q.eq('board_progress', boardProgressFilter);
-      // Folder browser — Campaign/Work Order only ever get set outside a
-      // designer session (see folderLevel below); Zone is fine for both.
-      if (!isDesigner) {
-        if (campaignFilter === NO_FOLDER_BUCKET) q = q.is('project_id', null).is('campaign_id', null);
-        else if (campaignFilter) q = q.or(`project_id.eq.${campaignFilter},campaign_id.eq.${campaignFilter}`);
-        if (poFilter === NO_FOLDER_BUCKET) q = q.is('po_id', null);
-        else if (poFilter) q = q.eq('po_id', poFilter);
-      }
+      // Folder browser — Client/Campaign/Work Order/Zone, available to
+      // both roles now.
+      if (clientFilter) q = q.eq('client_id', clientFilter);
+      if (campaignFilter === NO_FOLDER_BUCKET) q = q.is('project_id', null).is('campaign_id', null);
+      else if (campaignFilter) q = q.or(`project_id.eq.${campaignFilter},campaign_id.eq.${campaignFilter}`);
+      if (poFilter === NO_FOLDER_BUCKET) q = q.is('po_id', null);
+      else if (poFilter) q = q.eq('po_id', poFilter);
       if (zoneFilter === NO_FOLDER_BUCKET) q = q.is('zone_id', null);
       else if (zoneFilter) q = q.eq('zone_id', zoneFilter);
       const term = debouncedSearch.replace(/[,%()]/g, ' ').trim();
@@ -425,7 +434,7 @@ export default function DesignerPage() {
     queryFn: async () => {
       let q = supabase
         .from('v_design_task_list')
-        .select('design_task_id, project_id, project_name, campaign_id, campaign_name, po_id, po_number, po_name, zone_id, zone_name, status')
+        .select('design_task_id, client_id, client_name, project_id, project_name, campaign_id, campaign_name, po_id, po_number, po_name, zone_id, zone_name, status')
         .eq('organization_id', orgId);
       if (designerFilter) q = q.eq('designer_id', designerFilter);
       if (tab.statuses) q = q.in('status', tab.statuses);
@@ -439,7 +448,7 @@ export default function DesignerPage() {
       const { data, error } = await q;
       if (error) throw new Error(`Could not load the folder browser: ${error.message}`);
       return data as {
-        design_task_id: string; project_id: string | null; project_name: string | null;
+        design_task_id: string; client_id: string; client_name: string | null; project_id: string | null; project_name: string | null;
         campaign_id: string | null; campaign_name: string | null;
         po_id: string | null; po_number: string | null; po_name: string | null;
         zone_id: string | null; zone_name: string | null; status: string;
@@ -463,18 +472,19 @@ export default function DesignerPage() {
   }
 
   const campaignFolders = useMemo(() => {
+    const scoped = (treeRows || []).filter((r) => !clientFilter || r.client_id === clientFilter);
     const map = new Map<string, { id: string; name: string; count: number }>();
-    for (const r of treeRows || []) {
+    for (const r of scoped) {
       const { key, name } = campaignKeyAndName(r);
       const entry = map.get(key) || { id: key, name, count: 0 };
       entry.count += 1;
       map.set(key, entry);
     }
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [treeRows]);
+  }, [treeRows, clientFilter]);
 
   const poFolders = useMemo(() => {
-    const scoped = (treeRows || []).filter((r) => rowMatchesCampaign(r, campaignFilter));
+    const scoped = (treeRows || []).filter((r) => (!clientFilter || r.client_id === clientFilter) && rowMatchesCampaign(r, campaignFilter));
     const map = new Map<string, { id: string; name: string; count: number }>();
     for (const r of scoped) {
       const key = r.po_id || NO_FOLDER_BUCKET;
@@ -484,15 +494,14 @@ export default function DesignerPage() {
       map.set(key, entry);
     }
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [treeRows, campaignFilter]);
+  }, [treeRows, clientFilter, campaignFilter]);
 
   const zoneFolders = useMemo(() => {
     const scoped = (treeRows || []).filter((r) => {
-      if (!isDesigner) {
-        if (!rowMatchesCampaign(r, campaignFilter)) return false;
-        if (poFilter === NO_FOLDER_BUCKET) return !r.po_id;
-        if (poFilter) return r.po_id === poFilter;
-      }
+      if (clientFilter && r.client_id !== clientFilter) return false;
+      if (!rowMatchesCampaign(r, campaignFilter)) return false;
+      if (poFilter === NO_FOLDER_BUCKET) return !r.po_id;
+      if (poFilter) return r.po_id === poFilter;
       return true;
     });
     const map = new Map<string, { id: string; name: string; count: number }>();
@@ -504,13 +513,25 @@ export default function DesignerPage() {
       map.set(key, entry);
     }
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [treeRows, campaignFilter, poFilter, isDesigner]);
+  }, [treeRows, clientFilter, campaignFilter, poFilter]);
 
-  // A designer session never gets Campaign/Work Order levels — those are
-  // PO context, off-limits to that role everywhere else on this screen
-  // too (see `typeFilter` and the PO badge, both already gated the same
-  // way) — so their folder root is Zone directly.
-  const folderLevel: 'campaign' | 'po' | 'zone' = isDesigner ? 'zone' : (!campaignFilter ? 'campaign' : !poFilter ? 'po' : 'zone');
+  // Client tiles — the new top level, same for both roles. No "No
+  // Client" bucket needed since every shop always has exactly one
+  // (shops.client_id is NOT NULL).
+  const clientFolders = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; count: number }>();
+    for (const r of treeRows || []) {
+      const entry = map.get(r.client_id) || { id: r.client_id, name: r.client_name || 'Unnamed Client', count: 0 };
+      entry.count += 1;
+      map.set(r.client_id, entry);
+    }
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [treeRows]);
+
+  // Designer now gets the exact same folder tree Owner/Admin and
+  // Production see — Client -> Campaign -> Work Order -> Zone.
+  const folderLevel: 'client' | 'campaign' | 'po' | 'zone' = !clientFilter ? 'client' : !campaignFilter ? 'campaign' : !poFilter ? 'po' : 'zone';
+  const selectedClientName = clientFilter ? (clientFolders.find((c) => c.id === clientFilter)?.name || 'Client') : null;
   const selectedCampaignName = campaignFilter
     ? (campaignFolders.find((c) => c.id === campaignFilter)?.name || (campaignFilter === NO_FOLDER_BUCKET ? 'No Campaign' : 'Campaign'))
     : null;
@@ -521,8 +542,9 @@ export default function DesignerPage() {
     ? (zoneFilter === NO_FOLDER_BUCKET ? 'No Zone' : (zoneFolders.find((z) => z.id === zoneFilter)?.name || 'Zone'))
     : null;
 
-  function resetFolderFrom(level: 'root' | 'campaign' | 'po' | 'zone') {
-    if (level === 'root') { setCampaignFilter(''); setPoFilter(''); setZoneFilter(''); }
+  function resetFolderFrom(level: 'root' | 'client' | 'campaign' | 'po' | 'zone') {
+    if (level === 'root') { setClientFilter(''); setCampaignFilter(''); setPoFilter(''); setZoneFilter(''); }
+    else if (level === 'client') { setCampaignFilter(''); setPoFilter(''); setZoneFilter(''); }
     else if (level === 'campaign') { setPoFilter(''); setZoneFilter(''); }
     else if (level === 'po') { setZoneFilter(''); }
     else if (level === 'zone') { setZoneFilter(''); }
@@ -1170,18 +1192,27 @@ export default function DesignerPage() {
         </div>
       </div>
 
-      {/* Folder browser — Campaign -> Work Order -> Zone, same pattern as
-          Production Studio. Campaign/Work Order are skipped entirely for
-          a designer session (PO context, off-limits to that role
-          everywhere on this screen) — their root level is Zone. */}
+      {/* Folder browser — Client -> Campaign -> Work Order -> Zone, same
+          pattern and levels as Production Studio, for both roles. */}
       <nav aria-label="Folder path" className="flex items-center gap-1.5 text-sm mb-4 flex-wrap text-slate-400">
         <button
           onClick={() => resetFolderFrom('root')}
-          className={`flex items-center gap-1.5 ${!campaignFilter && !zoneFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
+          className={`flex items-center gap-1.5 ${!clientFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
         >
-          <FolderTree className="w-3.5 h-3.5" /> {isDesigner ? 'All Zones' : 'All Design Tasks'}
+          <FolderTree className="w-3.5 h-3.5" /> All Design Tasks
         </button>
-        {!isDesigner && campaignFilter && (
+        {clientFilter && (
+          <>
+            <span aria-hidden>/</span>
+            <button
+              onClick={() => resetFolderFrom('client')}
+              className={`truncate max-w-[200px] ${!campaignFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
+            >
+              {selectedClientName}
+            </button>
+          </>
+        )}
+        {campaignFilter && (
           <>
             <span aria-hidden>/</span>
             <button
@@ -1192,7 +1223,7 @@ export default function DesignerPage() {
             </button>
           </>
         )}
-        {!isDesigner && poFilter && (
+        {poFilter && (
           <>
             <span aria-hidden>/</span>
             <button
@@ -1211,7 +1242,7 @@ export default function DesignerPage() {
             </button>
           </>
         )}
-        {browsingList && !zoneFilter && (campaignFilter || poFilter) && (
+        {browsingList && !zoneFilter && (clientFilter || campaignFilter || poFilter) && (
           <>
             <span aria-hidden>/</span>
             <button onClick={() => setBrowsingList(false)} className="font-semibold text-slate-900">All Items</button>
@@ -1223,10 +1254,11 @@ export default function DesignerPage() {
           way to a Zone (or "View all" is tapped to skip ahead). No list
           sits underneath these. */}
       {!showList && (() => {
-        const levelLabel = folderLevel === 'campaign' ? 'Campaigns' : folderLevel === 'po' ? 'Work Orders' : 'Zones';
-        const folders = folderLevel === 'campaign' ? campaignFolders : folderLevel === 'po' ? poFolders : zoneFolders;
+        const levelLabel = folderLevel === 'client' ? 'Clients' : folderLevel === 'campaign' ? 'Campaigns' : folderLevel === 'po' ? 'Work Orders' : 'Zones';
+        const folders = folderLevel === 'client' ? clientFolders : folderLevel === 'campaign' ? campaignFolders : folderLevel === 'po' ? poFolders : zoneFolders;
         const onPick = (id: string) => {
-          if (folderLevel === 'campaign') setCampaignFilter(id);
+          if (folderLevel === 'client') setClientFilter(id);
+          else if (folderLevel === 'campaign') setCampaignFilter(id);
           else if (folderLevel === 'po') setPoFilter(id);
           else { setZoneFilter(id); setBrowsingList(true); }
         };

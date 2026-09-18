@@ -20,7 +20,7 @@ export async function logAudit(
 
   if (!profile?.organization_id) return;
 
-  await supabase.from('audit_logs').insert({
+  const { error } = await supabase.from('audit_logs').insert({
     organization_id: profile.organization_id,
     user_id: user.id,
     table_name: tableName,
@@ -31,6 +31,12 @@ export async function logAudit(
     new_value: newValue,
     description,
   });
+  // Never block the actual mutation on the audit trail — but do surface a
+  // console warning instead of silently swallowing it, since a rejected
+  // insert here (e.g. an action word the DB's check constraint doesn't
+  // allow yet) previously showed up only as an unexplained 400 in the
+  // network tab with no indication of why.
+  if (error) console.warn(`[logAudit] could not record "${action}" on ${tableName}: ${error.message}`);
 }
 
 export async function createNotification(

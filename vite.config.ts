@@ -61,7 +61,7 @@ export default defineConfig({
         // can be tested locally without a production build.
         enabled: true,
         type: 'module',
-      },
+      }, 
     }),
   ],
   resolve: {

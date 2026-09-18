@@ -465,18 +465,26 @@ export function CampaignsPage() {
 
   const deleteMutation = useMutation({
     mutationFn: async () => {
-      if (!deleteProject) return;
-      const { error } = await supabase.from('projects').delete().eq('id', deleteProject.id);
+      if (!deleteProject) return null;
+      const { data, error } = await supabase.rpc('delete_campaign_cascade', { p_project_id: deleteProject.id });
       if (error) throw error;
+      return data as { shops: number; purchase_orders: number; invoices: number } | null;
     },
     // Runs whether the delete succeeded or failed — so the list always
     // reflects the true database state instead of quietly going stale if
     // something after the delete (e.g. a notification) throws.
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['projects', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['purchase-orders', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['invoices', orgId] });
     },
-    onSuccess: () => {
-      setNotice({ kind: 'success', message: `"${deleteProject?.name}" deleted.` });
+    onSuccess: (counts) => {
+      const parts = [];
+      if (counts?.shops) parts.push(`${counts.shops} shop${counts.shops === 1 ? '' : 's'}`);
+      if (counts?.purchase_orders) parts.push(`${counts.purchase_orders} Work Order${counts.purchase_orders === 1 ? '' : 's'}`);
+      if (counts?.invoices) parts.push(`${counts.invoices} invoice${counts.invoices === 1 ? '' : 's'}`);
+      setNotice({ kind: 'success', message: parts.length > 0 ? `"${deleteProject?.name}" deleted, along with ${parts.join(', ')} and all their survey/design/production/installation records.` : `"${deleteProject?.name}" deleted.` });
       setDeleteProject(null);
     },
     onError: (err: Error) => {
@@ -757,8 +765,8 @@ export function CampaignsPage() {
         onClose={() => { setDeleteProject(null); deleteMutation.reset(); }}
         onConfirm={() => deleteMutation.mutate()}
         title="Delete Campaign"
-        message={`Delete "${deleteProject?.name}"? Work Orders under it will be un-grouped, not deleted.`}
-        confirmLabel="Delete"
+        message={`This permanently deletes "${deleteProject?.name}" AND every shop under it — including their surveys, designs, production records, installation history and any invoices raised under this campaign. This cannot be undone.`}
+        confirmLabel="Delete Everything"
         danger
         manualClose
         loading={deleteMutation.isPending}
@@ -1102,6 +1110,7 @@ export function ShopsPage() {
       productionPeople: people.filter((p) => p.role === 'printing').map((p) => p.full_name),
       installers: people.filter((p) => p.role === 'installer').map((p) => p.full_name),
       clients: (clients || []).map((c) => c.name),
+      purchaseOrders: (purchaseOrders || []).map((p) => ({ id: p.id, po_number: p.po_number, client_id: p.client_id })),
     });
   }
 
@@ -1111,16 +1120,39 @@ export function ShopsPage() {
       const rows = bbParsedShops || [];
       if (rows.length === 0) throw new Error('No rows to process.');
 
-      const existingIds = rows.filter((s) => !s.isNew).map((s) => s.shopId);
-      const { data: existingAssignRows } = existingIds.length > 0
-        ? await supabase.from('shop_assignments').select('shop_id, role, status').in('shop_id', existingIds)
-        : { data: [] as { shop_id: string; role: string; status: string }[] };
+      // Resolve each "existing shop" row to a real shop — by Shop ID
+      // first, falling back to matching Shop Name if the ID cell was
+      // left blank or edited by mistake (this is what used to silently
+      // turn into "create a duplicate shop" instead).
+      const resolvedExisting = new Map<string, BulkBackfillShopRow>(); // row key -> shop
+      for (const s of rows) {
+        if (s.isNew) continue;
+        const byId = s.shopId ? (eligibleShops || []).find((sh) => sh.id === s.shopId) : undefined;
+        const byName = !byId && s.shopName ? (eligibleShops || []).find((sh) => sh.name.toLowerCase() === s.shopName.toLowerCase()) : undefined;
+        const match = byId || byName;
+        if (match) resolvedExisting.set(s.key, match);
+      }
+      const existingShopIds = Array.from(resolvedExisting.values()).map((sh) => sh.id);
+
+      const [{ data: existingAssignRows }, { data: existingSurveys }, { data: existingDesignTasks }, { data: existingProdOrders }] = existingShopIds.length > 0
+        ? await Promise.all([
+            supabase.from('shop_assignments').select('shop_id, role, status').in('shop_id', existingShopIds),
+            supabase.from('surveys').select('shop_id').in('shop_id', existingShopIds),
+            supabase.from('design_tasks').select('shop_id').in('shop_id', existingShopIds),
+            supabase.from('production_orders').select('shop_id').in('shop_id', existingShopIds),
+          ])
+        : [{ data: [] }, { data: [] }, { data: [] }, { data: [] }] as any;
       const assignByShop = new Map<string, { role: string; status: string }[]>();
       for (const a of existingAssignRows || []) {
         const arr = assignByShop.get(a.shop_id) || [];
         arr.push(a);
         assignByShop.set(a.shop_id, arr);
       }
+      const shopsWithRealData = new Set<string>([
+        ...(existingSurveys || []).map((r: { shop_id: string }) => r.shop_id),
+        ...(existingDesignTasks || []).map((r: { shop_id: string }) => r.shop_id),
+        ...(existingProdOrders || []).map((r: { shop_id: string }) => r.shop_id),
+      ]);
 
       const people = ftPeople || [];
       // '' = not specified (fine — pipeline falls back sensibly);
@@ -1131,15 +1163,24 @@ export function ShopsPage() {
         const match = people.find((p) => p.role === role && p.full_name.toLowerCase() === name.toLowerCase());
         return match ? match.id : '__NOTFOUND__';
       };
+      const resolvePo = (poNumber: string) => {
+        if (!poNumber) return undefined;
+        return (purchaseOrders || []).find((p) => p.po_number.toLowerCase() === poNumber.toLowerCase());
+      };
 
       const results: { shopId: string; shopName: string; ok: boolean; message: string }[] = [];
       for (const s of rows) {
-        const existingMeta = s.isNew ? null : (eligibleShops || []).find((sh) => sh.id === s.shopId);
+        const existingMeta = s.isNew ? null : resolvedExisting.get(s.key) || null;
         const displayName = s.shopName || existingMeta?.name || s.shopId || '(unnamed)';
+        if (s.isNewAmbiguous) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'Set "New Shop?" to Yes or No for this row — could not tell which it should be' }); continue; }
         if (!s.stage) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: s.stageRaw ? `Stage "${s.stageRaw}" not recognized` : 'Stage left blank' }); continue; }
         if (s.items.length === 0) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'No item rows with Width, Height and Qty filled in' }); continue; }
-        if (!s.isNew && !existingMeta) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'Shop not found in this org — was it deleted, or is the Shop ID wrong?' }); continue; }
+        if (!s.isNew && !existingMeta) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'Shop not found in this org — check Shop ID / Shop Name, or it may already be past Production Done' }); continue; }
         if (s.isNew && !s.shopName) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'New shop needs a Shop Name' }); continue; }
+        if (!s.isNew && existingMeta && shopsWithRealData.has(existingMeta.id)) {
+          results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'This shop already has survey/design/production data in the app — backfilling it here would create duplicates. Use its own Backfill panel on Shop Detail instead if you\'re sure.' });
+          continue;
+        }
 
         try {
           const surveyorId = resolveId(s.surveyor, 'surveyor');
@@ -1157,10 +1198,54 @@ export function ShopsPage() {
           let existingAssignments: { role: string; status: string }[];
 
           if (s.isNew) {
-            const client = (clients || []).find((c) => c.name.toLowerCase() === s.clientName.toLowerCase());
-            if (!client) throw new Error(s.clientName ? `Client "${s.clientName}" doesn't match any client in this org` : 'New shop needs a "Client" name');
+            // A Work Order, if given, is authoritative for which client
+            // this shop belongs to — one less thing that has to match
+            // by typed name. Client is only needed when no Work Order
+            // is given at all.
+            const po = resolvePo(s.workOrderNumber);
+            if (s.workOrderNumber && !po) throw new Error(`Work Order "${s.workOrderNumber}" doesn't match any Work Order in this org`);
+            const clientId = po ? po.client_id : (clients || []).find((c) => c.name.toLowerCase() === s.clientName.toLowerCase())?.id;
+            if (!clientId) throw new Error(s.clientName ? `Client "${s.clientName}" doesn't match any client in this org` : 'New shop needs a Work Order or a Client');
+
+            // Idempotent import: re-uploading the same workbook must update/use
+            // the same logical shop, never create another shop for every board.
+            // A shop is matched inside the same client + Work Order by normalized
+            // name, with city/address as tie-breakers when present.
+            const normalizedName = s.shopName.trim().toLowerCase().replace(/\s+/g, ' ');
+            let existingQuery = supabase.from('shops')
+              .select('id, name, status, purchase_order_id, city, address')
+              .eq('organization_id', orgId)
+              .eq('client_id', clientId);
+            if (po?.id) existingQuery = existingQuery.eq('purchase_order_id', po.id);
+            const { data: possibleExisting, error: existingLookupError } = await existingQuery;
+            if (existingLookupError) throw new Error(`Could not check existing shops: ${existingLookupError.message}`);
+            const existingNatural = (possibleExisting || []).find((sh) => {
+              const sameName = (sh.name || '').trim().toLowerCase().replace(/\s+/g, ' ') === normalizedName;
+              if (!sameName) return false;
+              const sameCity = !s.city || !sh.city || sh.city.trim().toLowerCase() === s.city.trim().toLowerCase();
+              const sameAddress = !s.address || !sh.address || sh.address.trim().toLowerCase() === s.address.trim().toLowerCase();
+              return sameCity && sameAddress;
+            });
+
+            if (existingNatural) {
+              targetShopId = existingNatural.id;
+              targetShopName = existingNatural.name;
+              targetShopStatus = existingNatural.status;
+              const { data: a } = await supabase.from('shop_assignments').select('role, status').eq('shop_id', existingNatural.id);
+              existingAssignments = a || [];
+              // If the shop already has pipeline rows, don't duplicate the
+              // workflow. The import remains safe to run repeatedly.
+              const [{ count: surveyCount }, { count: itemCount }] = await Promise.all([
+                supabase.from('surveys').select('id', { count: 'exact', head: true }).eq('shop_id', existingNatural.id),
+                supabase.from('work_items').select('id', { count: 'exact', head: true }).eq('shop_id', existingNatural.id),
+              ]);
+              if ((surveyCount || 0) > 0 || (itemCount || 0) > 0) {
+                results.push({ shopId: s.key, shopName: targetShopName, ok: true, message: 'Existing shop matched — skipped duplicate import' });
+                continue;
+              }
+            } else {
             const { data: newShop, error: shopError } = await supabase.from('shops').insert({
-              organization_id: orgId, name: s.shopName, client_id: client.id,
+              organization_id: orgId, name: s.shopName, client_id: clientId, purchase_order_id: po?.id || null,
               owner_name: s.ownerName, contact_phone: s.phone, address: s.address,
               city: s.city, district: s.district, state: s.state, status: 'pending',
             }).select('id, name, status').single();
@@ -1168,9 +1253,18 @@ export function ShopsPage() {
             await logAudit('shops', newShop.id, 'insert', null, null, null, `Created shop: ${newShop.name} (Bulk Backfill)`);
             targetShopId = newShop.id; targetShopName = newShop.name; targetShopStatus = newShop.status;
             existingAssignments = [];
+            }
           } else {
-            targetShopId = s.shopId; targetShopName = existingMeta!.name; targetShopStatus = existingMeta!.status;
-            existingAssignments = assignByShop.get(s.shopId) || [];
+            targetShopId = existingMeta!.id; targetShopName = existingMeta!.name; targetShopStatus = existingMeta!.status;
+            existingAssignments = assignByShop.get(existingMeta!.id) || [];
+            // A Work Order given on an existing-shop row re-links it —
+            // useful when the shop was added before its PO existed.
+            const po = resolvePo(s.workOrderNumber);
+            if (s.workOrderNumber && !po) throw new Error(`Work Order "${s.workOrderNumber}" doesn't match any Work Order in this org`);
+            if (po) {
+              const { error: poLinkError } = await supabase.from('shops').update({ purchase_order_id: po.id }).eq('id', targetShopId).select('id');
+              if (poLinkError) throw new Error(`Could not link Work Order: ${poLinkError.message}`);
+            }
           }
 
           await runBackfillPipeline({
@@ -2654,19 +2748,22 @@ export function ShopsPage() {
               <p className="text-sm font-medium text-slate-900">Step 3 — Review &amp; run</p>
               <div className="max-h-56 overflow-y-auto space-y-1">
                 {bbParsedShops.map((s) => {
-                  const meta = s.isNew ? null : (eligibleShops || []).find((sh) => sh.id === s.shopId);
-                  const client = s.isNew ? (clients || []).find((c) => c.name.toLowerCase() === s.clientName.toLowerCase()) : null;
-                  const valid = !!s.stage && s.items.length > 0 && (s.isNew ? !!s.shopName && !!client : !!meta);
-                  const reason = !s.stage ? `Bad stage: "${s.stageRaw}"`
+                  const meta = s.isNew ? null : ((s.shopId ? (eligibleShops || []).find((sh) => sh.id === s.shopId) : undefined) || (eligibleShops || []).find((sh) => sh.name.toLowerCase() === s.shopName.toLowerCase()));
+                  const po = s.workOrderNumber ? (purchaseOrders || []).find((p) => p.po_number.toLowerCase() === s.workOrderNumber.toLowerCase()) : undefined;
+                  const client = s.isNew ? (po ? { id: po.client_id } : (clients || []).find((c) => c.name.toLowerCase() === s.clientName.toLowerCase())) : null;
+                  const valid = !s.isNewAmbiguous && !!s.stage && s.items.length > 0 && (s.isNew ? !!s.shopName && !!client : !!meta);
+                  const reason = s.isNewAmbiguous ? 'Set "New Shop?" to Yes or No'
+                    : !s.stage ? `Bad stage: "${s.stageRaw}"`
                     : s.items.length === 0 ? 'No items'
                     : s.isNew && !s.shopName ? 'New shop needs a name'
-                    : s.isNew && !client ? `Client "${s.clientName}" not found`
+                    : s.isNew && s.workOrderNumber && !po ? `Work Order "${s.workOrderNumber}" not found`
+                    : s.isNew && !client ? (s.clientName ? `Client "${s.clientName}" not found` : 'Needs a Work Order or Client')
                     : !s.isNew && !meta ? 'Shop not found' : '';
                   return (
                     <div key={s.key} className="flex items-center justify-between text-xs py-1 border-b border-slate-100 last:border-0">
                       <span className="text-slate-700">
                         {meta?.name || s.shopName || s.shopId}
-                        {s.isNew && <span className="ml-1 text-amber-600 font-medium">(new)</span>}
+                        {s.isNew && <span className="ml-1 text-emerald-600 font-medium">(new)</span>}
                       </span>
                       <span className={valid ? 'text-slate-500' : 'text-red-600 font-medium'}>
                         {valid ? `${s.items.length} item${s.items.length === 1 ? '' : 's'} · ${s.stageRaw}` : reason}
@@ -2718,9 +2815,25 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
-  const [assignModal, setAssignModal] = useState<'surveyor' | 'installer' | null>(null);
+  const [assignModal, setAssignModal] = useState<'surveyor' | 'installer' | 'designer' | null>(null);
   const [assignUserId, setAssignUserId] = useState('');
   const canAssign = profile?.role === 'agency_owner' || profile?.role === 'admin' || profile?.role === 'demo';
+  const canCrudShop = profile?.role === 'agency_owner' || profile?.role === 'admin' || profile?.role === 'demo';
+  const [detailEditOpen, setDetailEditOpen] = useState(false);
+  const [detailForm, setDetailForm] = useState({ name: '', owner_name: '', contact_phone: '', address: '', city: '', district: '', state: '', signage_language: '' });
+  const [editWorkItem, setEditWorkItem] = useState<WorkItem | null>(null);
+  const [workItemForm, setWorkItemForm] = useState({ work_type_name: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' });
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const [surveyPhotoUploadOpen, setSurveyPhotoUploadOpen] = useState(false);
+  const [surveyPhotoUploadFiles, setSurveyPhotoUploadFiles] = useState<File[]>([]);
+  const [surveyPhotoItemIds, setSurveyPhotoItemIds] = useState<Set<string>>(new Set());
+  const [surveyPhotoCaption, setSurveyPhotoCaption] = useState('');
+  const [surveyPhotoType, setSurveyPhotoType] = useState('survey');
+  const [surveyPhotoSurveyId, setSurveyPhotoSurveyId] = useState('');
+  const [designUploadOpen, setDesignUploadOpen] = useState(false);
+  const [designUploadFiles, setDesignUploadFiles] = useState<File[]>([]);
+  const [designUploadItemIds, setDesignUploadItemIds] = useState<Set<string>>(new Set());
+  const [designUploadNotes, setDesignUploadNotes] = useState('');
 
   // ---- BACKFILL (Owner/Admin entering work already completed outside
   // the app — survey/design/production done on paper or another system,
@@ -2754,6 +2867,25 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     enabled: !!shopId,
   });
 
+  useEffect(() => {
+    if (!shop) return;
+    setDetailForm({
+      name: shop.name || '', owner_name: shop.owner_name || '', contact_phone: shop.contact_phone || '',
+      address: shop.address || '', city: shop.city || '', district: shop.district || '', state: shop.state || '',
+      signage_language: shop.signage_language || '',
+    });
+  }, [shop?.id, shop?.updated_at]);
+
+  const detailUpdateMutation = useMutation({
+    mutationFn: async () => {
+      if (!detailForm.name.trim()) throw new Error('Shop name is required.');
+      const { error } = await supabase.from('shops').update({ ...detailForm, name: detailForm.name.trim() }).eq('id', shopId);
+      if (error) throw error;
+      await logAudit('shops', shopId, 'update', null, null, null, `Updated shop details: ${detailForm.name}`);
+    },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['shop', shopId] }); queryClient.invalidateQueries({ queryKey: ['shops', orgId] }); setDetailEditOpen(false); },
+  });
+
   const { data: workItems } = useQuery({
     queryKey: ['shop-work-items', shopId],
     queryFn: async () => {
@@ -2784,6 +2916,33 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }),
   });
 
+  const saveWorkItemMutation = useMutation({
+    mutationFn: async () => {
+      if (!editWorkItem) return;
+      const width = Number(workItemForm.width), height = Number(workItemForm.height), quantity = Math.max(1, Number(workItemForm.quantity) || 1);
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new Error('Enter valid width and height.');
+      const payload = {
+        work_type_name: workItemForm.work_type_name.trim() || null, material: workItemForm.material.trim() || null,
+        survey_width: width, survey_height: height, survey_unit: workItemForm.unit, survey_quantity: quantity,
+        approved_width: width, approved_height: height, approved_unit: workItemForm.unit, approved_quantity: quantity,
+      };
+      if (editWorkItem.id === '__new__') {
+        const { error } = await supabase.from('work_items').insert({ organization_id: orgId, shop_id: shopId, ...payload, status: 'approved' });
+        if (error) throw error;
+        await logAudit('work_items', null, 'insert', null, null, null, `Added board/item for ${shop?.name || 'shop'}`);
+      } else {
+        const { error } = await supabase.from('work_items').update(payload).eq('id', editWorkItem.id);
+        if (error) throw error;
+        await logAudit('work_items', editWorkItem.id, 'update', null, null, null, `Updated board/item for ${shop?.name || 'shop'}`);
+      }
+    },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }); setEditWorkItem(null); },
+  });
+  const deleteWorkItemMutation = useMutation({
+    mutationFn: async (id: string) => { const { error } = await supabase.from('work_items').delete().eq('id', id); if (error) throw error; },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }),
+  });
+
   // BOM / components readiness (Phase 4) — read-only summary here; the
   // checklist itself is edited from Production Studio where the
   // produced-status gate actually lives.
@@ -2808,6 +2967,55 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       return data as SurveyPhoto[];
     },
     enabled: !!shopId,
+  });
+
+  const uploadDetailPhotos = async () => {
+    if (!surveyPhotoUploadFiles.length || !orgId || !profile?.id) return;
+    if ((workItems?.length || 0) > 0 && surveyPhotoItemIds.size === 0) throw new Error('Select at least one board / measurement for these survey photos.');
+    setPhotoUploading(true);
+    try {
+      let surveyId = surveyPhotoSurveyId || (surveys?.[0]?.id as string | undefined);
+      if (!surveyId) {
+        const { data: sr, error } = await supabase.from('surveys').insert({ organization_id: orgId, shop_id: shopId, surveyor_id: profile.id, status: 'draft', notes: 'Created from Shop Detail photo manager', submitted_at: null }).select('id').single();
+        if (error) throw error; surveyId = sr.id;
+      }
+      for (let i = 0; i < surveyPhotoUploadFiles.length; i++) {
+        const file = surveyPhotoUploadFiles[i];
+        const path = `${orgId}/${surveyId}/${Date.now()}-${i}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+        const { error: upErr } = await supabase.storage.from('survey-photos').upload(path, file); if (upErr) throw upErr;
+        const { data: u } = supabase.storage.from('survey-photos').getPublicUrl(path);
+        const { data: photo, error: dbErr } = await supabase.from('survey_photos').insert({ organization_id: orgId, survey_id: surveyId, shop_id: shopId, storage_path: path, photo_url: u.publicUrl, photo_type: surveyPhotoType, caption: surveyPhotoCaption.trim() || 'Survey photo uploaded by Owner/Admin' }).select('id').single();
+        if (dbErr) throw dbErr;
+        if (surveyPhotoItemIds.size > 0) {
+          const links = Array.from(surveyPhotoItemIds).map((workItemId) => ({ organization_id: orgId, survey_photo_id: photo.id, work_item_id: workItemId }));
+          const { error: linkErr } = await supabase.from('survey_photo_items').insert(links);
+          if (linkErr) throw new Error(`Photo uploaded, but board mapping could not be saved: ${linkErr.message}`);
+        }
+      }
+      await logAudit('survey_photos', null, 'upload', null, null, null, `Uploaded ${surveyPhotoUploadFiles.length} survey photo(s) for ${shop?.name || 'shop'} linked to ${surveyPhotoItemIds.size} board(s)`);
+      queryClient.invalidateQueries({ queryKey: ['shop-survey-photos', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shop-survey-photo-items', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shop-surveys', shopId] });
+      setSurveyPhotoUploadFiles([]); setSurveyPhotoItemIds(new Set()); setSurveyPhotoCaption(''); setSurveyPhotoSurveyId(''); setSurveyPhotoUploadOpen(false);
+    } finally { setPhotoUploading(false); }
+  };
+  const deleteDetailPhoto = async (photo: SurveyPhoto) => {
+    if (!window.confirm('Delete this photo permanently?')) return;
+    if (photo.storage_path) await supabase.storage.from('survey-photos').remove([photo.storage_path]);
+    const { error } = await supabase.from('survey_photos').delete().eq('id', photo.id); if (error) throw error;
+    queryClient.invalidateQueries({ queryKey: ['shop-survey-photos', shopId] });
+  };
+
+  const { data: surveyPhotoItems } = useQuery({
+    queryKey: ['shop-survey-photo-items', shopId, (surveyPhotos || []).map((p) => p.id).join(',')],
+    queryFn: async () => {
+      const photoIds = (surveyPhotos || []).map((p) => p.id);
+      if (!photoIds.length) return [] as { survey_photo_id: string; work_item_id: string }[];
+      const { data, error } = await supabase.from('survey_photo_items').select('survey_photo_id,work_item_id').in('survey_photo_id', photoIds);
+      if (error) throw error;
+      return (data || []) as { survey_photo_id: string; work_item_id: string }[];
+    },
+    enabled: !!surveyPhotos,
   });
 
   const { data: boardMarkings } = useQuery({
@@ -2839,7 +3047,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     queryFn: async () => {
       const { data } = await supabase
         .from('design_tasks')
-        .select('*, profiles(full_name), design_versions(*)')
+        .select('*, profiles(full_name), design_versions(*, design_version_items(work_item_id))')
         .eq('shop_id', shopId)
         .order('created_at', { ascending: false });
       return data;
@@ -2882,6 +3090,34 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     enabled: !!shopId,
   });
 
+  // Backfill is an EDIT/RECOVERY form as well as a create form. When an
+  // existing shop opens it, hydrate every field we can from the database
+  // instead of presenting a blank form that makes admins retype known data.
+  useEffect(() => {
+    if (!backfillOpen || !shop) return;
+    if (workItems && workItems.length > 0) {
+      setBackfillItems(workItems.map((w) => ({
+        key: w.id || crypto.randomUUID(),
+        workTypeId: w.work_type_id || '', workTypeName: w.work_type_name || '', material: w.material || '',
+        width: String(w.approved_width ?? w.survey_width ?? ''),
+        height: String(w.approved_height ?? w.survey_height ?? ''),
+        unit: w.approved_unit || w.survey_unit || 'ft',
+        quantity: String(w.approved_quantity ?? w.survey_quantity ?? 1),
+      })));
+    }
+    const st = String(shop.status || '');
+    setBackfillStage(st === 'dispatched' ? 'dispatched' :
+      ['production_ready','production_done','installation_pending','installing','installation_review','installed','billed'].includes(st) ? 'production_done' :
+      ['design_ready','in_review','design_approved','production_pending','in_production'].includes(st) ? 'production_pending' : 'design_pending');
+    const surveyor = (assignments || []).find((a) => a.role === 'surveyor' && a.status !== 'declined');
+    const installer = (assignments || []).find((a) => a.role === 'installer' && a.status !== 'declined');
+    setBackfillSurveyorId(surveyor?.user_id || surveys?.[0]?.surveyor_id || '');
+    setBackfillInstallerId(installer?.user_id || installations?.[0]?.installer_id || '');
+    setBackfillDesignerId(designTasks?.[0]?.designer_id || '');
+    setBackfillProductionId(productionOrders?.[0]?.assigned_to || '');
+    setBackfillNote(surveys?.[0]?.notes || designTasks?.[0]?.notes || productionOrders?.[0]?.notes || '');
+  }, [backfillOpen, shopId]);
+
   // People-pickers + work types for the Backfill form — one query per
   // role, only fetched once the panel is actually open.
   const { data: backfillPeople } = useQuery({
@@ -2920,8 +3156,23 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const backfillMutation = useMutation({
     mutationFn: async () => {
       if (!shop || !profile || !orgId) throw new Error('Shop not loaded yet — try again in a moment.');
-      if (shopHasExistingPipelineData && !backfillConfirmDuplicate) {
-        throw new Error('This shop already has survey/design/production data in the app — tick the confirmation checkbox to proceed anyway.');
+      if (shopHasExistingPipelineData) {
+        // Existing pipeline = EDIT mode. Never create a second survey/design/
+        // production chain. Update the already-known boards in place and add
+        // only genuinely new board rows.
+        const desiredStatus = backfillStage === 'dispatched' ? 'dispatched' : backfillStage === 'production_done' ? 'production_ready' : backfillStage === 'production_pending' ? 'production_pending' : 'design_pending';
+        for (const it of backfillItems) {
+          if (!it.width.trim() || !it.height.trim() || !it.quantity.trim()) continue;
+          const width = Number(it.width), height = Number(it.height), quantity = Math.max(1, Number(it.quantity) || 1);
+          const payload: any = { work_type_id: it.workTypeId || null, work_type_name: it.workTypeName.trim() || null, material: it.material.trim() || null, survey_width: width, survey_height: height, survey_unit: it.unit, survey_quantity: quantity, approved_width: width, approved_height: height, approved_unit: it.unit, approved_quantity: quantity };
+          if (backfillStage === 'production_done' || backfillStage === 'dispatched') { payload.produced_quantity = quantity; payload.produced_at = new Date().toISOString(); }
+          const exists = (workItems || []).some((w) => w.id === it.key);
+          const q = exists ? supabase.from('work_items').update(payload).eq('id', it.key) : supabase.from('work_items').insert({ organization_id: orgId, shop_id: shopId, status: backfillStage === 'design_pending' ? 'approved' : backfillStage === 'production_pending' ? 'design_approved' : 'production_done', ...payload });
+          const { error } = await q; if (error) throw error;
+        }
+        const { error: shopUpdateError } = await supabase.from('shops').update({ status: desiredStatus }).eq('id', shopId); if (shopUpdateError) throw shopUpdateError;
+        await logAudit('shops', shopId, 'update', 'backfill', null, backfillStage, `Updated existing backfill data for ${shop.name}`);
+        return;
       }
       await runBackfillPipeline({
         orgId, shopId, shopName: shop.name, shopStatusBefore: shop.status, actorId: profile.id,
@@ -2939,6 +3190,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       queryClient.invalidateQueries({ queryKey: ['shop-design-tasks', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-production', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-assignments', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shop-design-tasks', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
       queryClient.invalidateQueries({ queryKey: ['installer-assignments'] });
       queryClient.invalidateQueries({ queryKey: ['installer-work'] });
@@ -2963,7 +3215,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         .from('profiles')
         .select('id, full_name, role')
         .eq('organization_id', orgId)
-        .in('role', ['surveyor', 'installer'])
+        .in('role', ['surveyor', 'installer', 'designer'])
         .eq('is_active', true)
         .order('full_name');
       return data as { id: string; full_name: string; role: string }[];
@@ -2974,6 +3226,26 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const assignMutation = useMutation({
     mutationFn: async () => {
       if (!assignUserId || !assignModal || !shop) throw new Error('Pick a person to assign first.');
+
+      // Designers are owned by design_tasks rather than shop_assignments.
+      // Keep one canonical task per shop and update/reassign it here so the
+      // Shop Detail page can manage the complete workflow without a detour.
+      if (assignModal === 'designer') {
+        const existingTask = designTasks?.[0];
+        if (existingTask) {
+          const { error } = await supabase.from('design_tasks').update({ designer_id: assignUserId }).eq('id', existingTask.id).select('id');
+          if (error) throw new Error(`Could not assign designer: ${error.message}`);
+        } else {
+          const { error } = await supabase.from('design_tasks').insert({
+            organization_id: orgId, shop_id: shopId, designer_id: assignUserId, status: 'assigned'
+          });
+          if (error) throw new Error(`Could not create design task: ${error.message}`);
+        }
+        const worker = (fieldWorkers || []).find((w) => w.id === assignUserId);
+        await logAudit('design_tasks', existingTask?.id || null, existingTask ? 'reassign' : 'insert', 'designer_id', existingTask?.designer_id || null, assignUserId, `Assigned ${worker?.full_name || 'designer'} to ${shop.name}`);
+        await createNotification(assignUserId, 'New Design Task', `You've been assigned to design ${shop.name}`, 'info', '/design');
+        return;
+      }
 
       // Guard against assigning the same person to the same role on this
       // shop twice (the exact "Rahul Patil listed twice" symptom) — if an
@@ -3050,6 +3322,50 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       queryClient.invalidateQueries({ queryKey: ['team-workload-drilldown'] });
       setAssignModal(null);
       setAssignUserId('');
+    },
+  });
+
+  const uploadDesignMutation = useMutation({
+    mutationFn: async () => {
+      if (!profile?.id || !orgId) throw new Error('You must be signed in.');
+      if (designUploadFiles.length === 0) throw new Error('Choose at least one design file.');
+      if ((workItems?.length || 0) > 0 && designUploadItemIds.size === 0) throw new Error('Select the board/measurement this design belongs to.');
+
+      let task = designTasks?.[0];
+      if (!task) {
+        const { data, error } = await supabase.from('design_tasks').insert({ organization_id: orgId, shop_id: shopId, status: 'designing' }).select('*').single();
+        if (error) throw new Error(`Could not create design task: ${error.message}`);
+        task = data;
+      }
+      const startVersion = task.design_versions?.length || 0;
+      for (let i = 0; i < designUploadFiles.length; i++) {
+        const file = designUploadFiles[i];
+        const versionNumber = startVersion + i + 1;
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const path = `${orgId}/${task.id}/v${versionNumber}-${Date.now()}-${safeName}`;
+        const { error: storageError } = await supabase.storage.from('design-files').upload(path, file);
+        if (storageError) throw new Error(`Could not upload ${file.name}: ${storageError.message}`);
+        const { data: urlData } = supabase.storage.from('design-files').getPublicUrl(path);
+        const { data: version, error: versionError } = await supabase.from('design_versions').insert({
+          organization_id: orgId, design_task_id: task.id, version_number: versionNumber,
+          storage_path: path, file_url: urlData.publicUrl, file_name: file.name,
+          uploaded_by: profile.id, notes: designUploadNotes || null, status: 'uploaded', source: 'admin'
+        }).select('id').single();
+        if (versionError) throw new Error(`Could not save ${file.name}: ${versionError.message}`);
+        if (designUploadItemIds.size > 0) {
+          const links = Array.from(designUploadItemIds).map((workItemId) => ({ organization_id: orgId, design_version_id: version.id, work_item_id: workItemId }));
+          const { error: linkError } = await supabase.from('design_version_items').insert(links);
+          if (linkError) throw new Error(`Could not link design to board: ${linkError.message}`);
+        }
+      }
+      if (designUploadItemIds.size > 0) await supabase.from('work_items').update({ status: 'designed' }).in('id', Array.from(designUploadItemIds)).in('status', ['approved', 'designing']);
+      await supabase.from('design_tasks').update({ status: 'design_ready' }).eq('id', task.id);
+      await logAudit('design_versions', null, 'upload', null, null, null, `Uploaded ${designUploadFiles.length} design file(s) for ${shop?.name || 'shop'} linked to ${designUploadItemIds.size} board(s)`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shop-design-tasks', shopId] });
+      queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
+      setDesignUploadOpen(false); setDesignUploadFiles([]); setDesignUploadItemIds(new Set()); setDesignUploadNotes('');
     },
   });
 
@@ -3207,12 +3523,15 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           <h1 className="text-2xl font-bold text-slate-900">{shop.name}</h1>
           <p className="text-sm text-slate-500 mt-1">{shop.clients?.name} - {shop.projects?.name || 'No project'}</p>
         </div>
-        <StatusBadge status={shop.status} />
+        <div className="flex items-center gap-2">
+          {canCrudShop && <button onClick={() => setDetailEditOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium border border-slate-200 rounded-lg bg-white hover:bg-slate-50"><Pencil className="w-4 h-4" /> Edit Shop</button>}
+          <StatusBadge status={shop.status} />
+        </div>
       </div>
 
       {/* Timeline */}
-      <Card className="p-6 mb-6">
-        <h2 className="text-lg font-semibold text-slate-900 mb-4">Timeline</h2>
+      <Card className="p-4 mb-4">
+        <h2 className="text-sm font-semibold text-slate-900 mb-3">Workflow Timeline</h2>
         <div className="flex items-start overflow-x-auto pb-2">
           {timeline.map((step, i) => (
             <div key={i} className="flex items-start flex-shrink-0">
@@ -3263,9 +3582,9 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         </div>
       </Card>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Shop Info */}
-        <Card className="p-6">
+        <Card className="p-4">
           <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
             <Store className="w-5 h-5 text-blue-600" /> Shop Information
           </h2>
@@ -3300,7 +3619,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         </Card>
 
         {/* Assignments */}
-        <Card className="p-6">
+        <Card className="p-4">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
               <Users className="w-5 h-5 text-blue-600" /> Assignments
@@ -3319,6 +3638,12 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                 >
                   <UserPlus className="w-3.5 h-3.5" /> Installer
                 </button>
+                <button
+                  onClick={() => { setAssignModal('designer'); setAssignUserId(designTasks?.[0]?.designer_id || ''); }}
+                  className="flex items-center gap-1 text-xs font-medium text-violet-600 border border-violet-200 bg-violet-50 px-2.5 py-1 rounded-lg"
+                >
+                  <Palette className="w-3.5 h-3.5" /> Designer
+                </button>
               </div>
             )}
           </div>
@@ -3334,7 +3659,13 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                 </div>
               ))}
             </div>
-          ) : <p className="text-sm text-slate-400">No assignments yet</p>}
+          ) : <p className="text-sm text-slate-400">No surveyor / installer assignments yet</p>}
+          {designTasks?.[0] && (
+            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-sm">
+              <div><p className="text-slate-900 font-medium">{designTasks[0].profiles?.full_name || 'Unassigned'}</p><p className="text-xs text-slate-500">Designer</p></div>
+              <StatusBadge status={designTasks[0].status} />
+            </div>
+          )}
         </Card>
 
         {/* Backfill — Owner/Admin entering work that's already done
@@ -3367,17 +3698,21 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         )}
 
         {/* Work Items */}
-        <Card className="p-6">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
+        <Card className="p-4 max-h-[520px] overflow-y-auto">
+          <div className="flex items-center justify-between mb-3 sticky top-0 bg-white z-10 pb-2"><h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
             <Ruler className="w-5 h-5 text-blue-600" /> Work Items ({workItems?.length || 0})
-          </h2>
+          </h2>{canCrudShop && <button onClick={() => { setEditWorkItem({ id: '__new__' } as WorkItem); setWorkItemForm({ work_type_name: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }); }} className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 border border-blue-200 bg-blue-50 px-2.5 py-1.5 rounded-lg"><Plus className="w-3.5 h-3.5" /> Add item</button>}</div>
           {workItems && workItems.length > 0 ? (
             <div className="space-y-3">
               {workItems.map((item) => (
                 <div key={item.id} className="border border-slate-200 rounded-lg p-3">
                   <div className="flex items-center justify-between mb-2">
                     <span className="font-medium text-slate-900 text-sm">{item.work_type_name || 'Work Item'}</span>
-                    <StatusBadge status={item.status} />
+                    <div className="flex items-center gap-2">
+                      {canCrudShop && <button title="Edit item" onClick={() => { setEditWorkItem(item); setWorkItemForm({ work_type_name: item.work_type_name || '', material: item.material || '', width: String(item.approved_width ?? item.survey_width ?? ''), height: String(item.approved_height ?? item.survey_height ?? ''), unit: item.approved_unit || item.survey_unit || 'ft', quantity: String(item.approved_quantity ?? item.survey_quantity ?? 1) }); }} className="text-slate-400 hover:text-blue-600"><Pencil className="w-4 h-4" /></button>}
+                      {canCrudShop && <button title="Delete item" onClick={() => { if (window.confirm('Delete this work item and its dependent links?')) deleteWorkItemMutation.mutate(item.id); }} className="text-slate-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>}
+                      <StatusBadge status={item.status} />
+                    </div>
                   </div>
                   <div className="space-y-1 text-xs">
                     <WorkItemStageRow label="Survey" width={item.survey_width} height={item.survey_height} unit={item.survey_unit} quantity={item.survey_quantity} area={item.survey_area} />
@@ -3438,7 +3773,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         </Card>
 
         {/* Surveys */}
-        <Card className="p-6">
+        <Card className="p-4 max-h-[480px] overflow-y-auto">
           <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" /> Surveys
           </h2>
@@ -3487,22 +3822,33 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
 
         {/* Marked Board Photos — shows exactly what the surveyor drew,
             using the same composite render the PDF/PPT exports use. */}
-        <Card className="p-6">
+        <Card className="p-4 max-h-[480px] overflow-y-auto">
           <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
             <Camera className="w-5 h-5 text-blue-600" /> Marked Board Photos
           </h2>
+          {canCrudShop && (
+            <div className="mb-4">
+              <button onClick={() => { setSurveyPhotoUploadFiles([]); setSurveyPhotoItemIds(new Set()); setSurveyPhotoCaption(''); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-sm font-medium">
+                <UploadCloud className="w-4 h-4" /> Upload & Link Survey Photos
+              </button>
+            </div>
+          )}
           {surveyPhotos && surveyPhotos.length > 0 ? (
-            <MarkedPhotoGrid photos={surveyPhotos} markings={boardMarkings || []} workItems={workItems || []} />
+            <>
+              <MarkedPhotoGrid photos={surveyPhotos} markings={boardMarkings || []} workItems={workItems || []} />
+              {canCrudShop && <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">{surveyPhotos.map((p) => { const linkedIds = new Set([...(surveyPhotoItems || []).filter((x) => x.survey_photo_id === p.id).map((x) => x.work_item_id), ...(boardMarkings || []).filter((m) => m.survey_photo_id === p.id && m.work_item_id).map((m) => m.work_item_id as string)]); const linked = (workItems || []).filter((wi) => linkedIds.has(wi.id)); return <div key={p.id} className="relative rounded-lg overflow-hidden border border-slate-200 bg-white"><img src={p.photo_url} className="w-full h-32 object-cover" /><button onClick={() => deleteDetailPhoto(p)} className="absolute top-1 right-1 p-1.5 rounded-md bg-white/95 text-red-600 shadow" title="Delete photo"><Trash2 className="w-3.5 h-3.5" /></button><div className="p-2"><p className="text-[11px] font-semibold text-slate-700 truncate">{p.caption || 'Survey photo'}</p><div className="mt-1 flex flex-wrap gap-1">{linked.length ? linked.map((wi, idx) => <span key={wi.id} className="text-[10px] rounded bg-blue-50 text-blue-700 px-1.5 py-0.5">{wi.work_type_name || `Board ${idx + 1}`} · {wi.approved_width ?? wi.survey_width ?? '—'}×{wi.approved_height ?? wi.survey_height ?? '—'} {wi.approved_unit || wi.survey_unit || ''}</span>) : <span className="text-[10px] text-amber-600">Not linked to a board yet</span>}</div></div></div>; })}</div>}
+            </>
           ) : (
             <p className="text-sm text-slate-400">No survey photos yet</p>
           )}
         </Card>
 
         {/* Design */}
-        <Card className="p-6">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
-            <Palette className="w-5 h-5 text-blue-600" /> Design Tasks
-          </h2>
+        <Card className="p-4 max-h-[480px] overflow-y-auto">
+          <div className="flex items-center justify-between mb-3 sticky top-0 bg-white z-10 pb-2">
+            <h2 className="text-base font-semibold text-slate-900 flex items-center gap-2"><Palette className="w-5 h-5 text-blue-600" /> Designs</h2>
+            {canCrudShop && <button onClick={() => { setDesignUploadItemIds(new Set()); setDesignUploadFiles([]); setDesignUploadOpen(true); }} className="inline-flex items-center gap-1.5 text-xs font-medium text-violet-700 border border-violet-200 bg-violet-50 px-2.5 py-1.5 rounded-lg"><UploadCloud className="w-3.5 h-3.5" /> Upload Design</button>}
+          </div>
           {designTasks && designTasks.length > 0 ? (
             <div className="space-y-3">
               {designTasks.map((d) => (
@@ -3517,6 +3863,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                       <span>v{v.version_number}</span>
                       <a href={v.file_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">{v.file_name || 'View file'}</a>
                       <StatusBadge status={v.status} />
+                      <span className="text-slate-400">{(() => { const ids = new Set((v.design_version_items || []).map((x: any) => x.work_item_id)); const labels = (workItems || []).filter((wi) => ids.has(wi.id)).map((wi) => `${wi.work_type_name || 'Board'} · ${wi.approved_width ?? wi.survey_width ?? '—'}×${wi.approved_height ?? wi.survey_height ?? '—'} ${wi.approved_unit || wi.survey_unit || ''}`); return labels.length ? `→ ${labels.join(', ')}` : '→ not linked'; })()}</span>
                     </div>
                   ))}
                 </div>
@@ -3526,7 +3873,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         </Card>
 
         {/* Installation */}
-        <Card className="p-6">
+        <Card className="p-4 max-h-[480px] overflow-y-auto">
           <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
             <Wrench className="w-5 h-5 text-blue-600" /> Installation
           </h2>
@@ -3602,11 +3949,11 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         </Card>
       </div>
 
-      <Modal open={!!assignModal} onClose={() => setAssignModal(null)} title={`Assign ${assignModal === 'installer' ? 'Installer' : 'Surveyor'}`}>
+      <Modal open={!!assignModal} onClose={() => setAssignModal(null)} title={`Assign ${assignModal === 'installer' ? 'Installer' : assignModal === 'designer' ? 'Designer' : 'Surveyor'}`}>
         <div className="space-y-4">
           <p className="text-sm text-slate-600">Shop: <span className="font-medium text-slate-900">{shop.name}</span></p>
           <Select
-            label={assignModal === 'installer' ? 'Installer' : 'Surveyor'}
+            label={assignModal === 'installer' ? 'Installer' : assignModal === 'designer' ? 'Designer' : 'Surveyor'}
             value={assignUserId}
             onChange={setAssignUserId}
             options={[
@@ -3633,6 +3980,69 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           >
             {assignMutation.isPending ? 'Assigning...' : 'Assign'}
           </button>
+        </div>
+      </Modal>
+
+      <Modal open={surveyPhotoUploadOpen} onClose={() => setSurveyPhotoUploadOpen(false)} title="Upload Survey Photos · Link to Board" size="lg">
+        <div className="space-y-4">
+          <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+            Link each uploaded survey photo to the exact work item / measurement it documents. This keeps Survey → Board → Measurement → Design mapping unambiguous for review and exports.
+          </div>
+          <label className="flex cursor-pointer items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-lg py-5 text-sm text-slate-600 hover:border-blue-400">
+            <UploadCloud className="w-5 h-5" /> {surveyPhotoUploadFiles.length ? `${surveyPhotoUploadFiles.length} photo(s) selected` : 'Choose survey photos'}
+            <input type="file" multiple className="hidden" accept="image/*" onChange={(e) => setSurveyPhotoUploadFiles(Array.from(e.target.files || []))} />
+          </label>
+          {(surveys || []).length > 0 && <div><label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Survey record</label><select value={surveyPhotoSurveyId} onChange={(e) => setSurveyPhotoSurveyId(e.target.value)} className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"><option value="">Latest survey</option>{(surveys || []).map((sr: any) => <option key={sr.id} value={sr.id}>{sr.profiles?.full_name || 'Survey'} · {sr.submitted_at ? new Date(sr.submitted_at).toLocaleDateString('en-IN') : 'Draft'}</option>)}</select></div>}
+          <div className="grid grid-cols-2 gap-3"><div><label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Photo type</label><select value={surveyPhotoType} onChange={(e) => setSurveyPhotoType(e.target.value)} className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"><option value="survey">Survey / Board</option><option value="shop_front">Shop Front</option><option value="interior">Interior</option><option value="other">Other</option><option value="marked">Marked</option></select></div><Input label="Caption / reference" value={surveyPhotoCaption} onChange={setSurveyPhotoCaption} /></div>
+          <div><p className="text-sm font-semibold text-slate-900 mb-2">Which board / measurement is visible in these photos?</p><div className="max-h-64 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">{(workItems || []).map((item, index) => { const checked = surveyPhotoItemIds.has(item.id); return <label key={item.id} className="flex items-start gap-3 p-3 cursor-pointer hover:bg-slate-50"><input type="checkbox" className="mt-1" checked={checked} onChange={() => setSurveyPhotoItemIds((prev) => { const n = new Set(prev); checked ? n.delete(item.id) : n.add(item.id); return n; })} /><div><p className="text-sm font-medium text-slate-900">Board {index + 1} · {item.work_type_name || 'Work Item'}</p><p className="text-xs text-slate-500">{item.material || 'No material'} · {item.approved_width ?? item.survey_width ?? '—'} × {item.approved_height ?? item.survey_height ?? '—'} {item.approved_unit || item.survey_unit || ''} · Qty {item.approved_quantity ?? item.survey_quantity ?? 1}</p></div></label>; })}</div></div>
+          <button onClick={() => uploadDetailPhotos()} disabled={photoUploading || surveyPhotoUploadFiles.length === 0 || ((workItems?.length || 0) > 0 && surveyPhotoItemIds.size === 0)} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{photoUploading ? 'Uploading & linking...' : `Upload & Link to ${surveyPhotoItemIds.size} Board${surveyPhotoItemIds.size === 1 ? '' : 's'}`}</button>
+        </div>
+      </Modal>
+
+      <Modal open={designUploadOpen} onClose={() => setDesignUploadOpen(false)} title="Upload Design · Link to Board" size="lg">
+        <div className="space-y-4">
+          <div className="rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm text-violet-900">
+            Every design must be linked to the exact marked board / measurement it belongs to. These links are stored in <b>design_version_items</b> and are the same relationship used by PDF/PPT reporting.
+          </div>
+          <label className="flex cursor-pointer items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-lg py-5 text-sm text-slate-600 hover:border-violet-400">
+            <UploadCloud className="w-5 h-5" /> {designUploadFiles.length ? `${designUploadFiles.length} file(s) selected` : 'Choose design files (PDF / image / artwork)'}
+            <input type="file" multiple className="hidden" accept="image/*,.pdf,.ai,.eps,.svg,.cdr" onChange={(e) => setDesignUploadFiles(Array.from(e.target.files || []))} />
+          </label>
+          <div>
+            <p className="text-sm font-semibold text-slate-900 mb-2">Which board / measurement does this design cover?</p>
+            <div className="max-h-64 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
+              {(workItems || []).map((item, index) => {
+                const checked = designUploadItemIds.has(item.id);
+                return <label key={item.id} className="flex items-start gap-3 p-3 cursor-pointer hover:bg-slate-50">
+                  <input type="checkbox" className="mt-1" checked={checked} onChange={() => setDesignUploadItemIds((prev) => { const n = new Set(prev); checked ? n.delete(item.id) : n.add(item.id); return n; })} />
+                  <div className="min-w-0"><p className="text-sm font-medium text-slate-900">Board {index + 1} · {item.work_type_name || 'Work Item'}</p><p className="text-xs text-slate-500">{item.material || 'No material'} · {item.approved_width ?? item.survey_width ?? '—'} × {item.approved_height ?? item.survey_height ?? '—'} {item.approved_unit || item.survey_unit || ''} · Qty {item.approved_quantity ?? item.survey_quantity ?? 1}</p></div>
+                </label>;
+              })}
+            </div>
+          </div>
+          <Textarea label="Design notes (optional)" value={designUploadNotes} onChange={setDesignUploadNotes} rows={2} />
+          {uploadDesignMutation.isError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(uploadDesignMutation.error as Error).message}</p>}
+          <button onClick={() => uploadDesignMutation.mutate()} disabled={uploadDesignMutation.isPending || designUploadFiles.length === 0 || ((workItems?.length || 0) > 0 && designUploadItemIds.size === 0)} className="w-full bg-violet-600 hover:bg-violet-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{uploadDesignMutation.isPending ? 'Uploading & linking...' : `Upload & Link to ${designUploadItemIds.size} Board${designUploadItemIds.size === 1 ? '' : 's'}`}</button>
+        </div>
+      </Modal>
+
+      <Modal open={detailEditOpen} onClose={() => setDetailEditOpen(false)} title="Edit Shop Details" size="lg">
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3"><Input label="Shop / Site Name" value={detailForm.name} onChange={(v) => setDetailForm({ ...detailForm, name: v })} required /><Input label="Owner Name" value={detailForm.owner_name} onChange={(v) => setDetailForm({ ...detailForm, owner_name: v })} /></div>
+          <div className="grid grid-cols-2 gap-3"><Input label="Phone" value={detailForm.contact_phone} onChange={(v) => setDetailForm({ ...detailForm, contact_phone: v })} /><Input label="Signage Language" value={detailForm.signage_language} onChange={(v) => setDetailForm({ ...detailForm, signage_language: v })} /></div>
+          <Textarea label="Address" value={detailForm.address} onChange={(v) => setDetailForm({ ...detailForm, address: v })} rows={2} />
+          <div className="grid grid-cols-3 gap-3"><Input label="City" value={detailForm.city} onChange={(v) => setDetailForm({ ...detailForm, city: v })} /><Input label="District" value={detailForm.district} onChange={(v) => setDetailForm({ ...detailForm, district: v })} /><Input label="State" value={detailForm.state} onChange={(v) => setDetailForm({ ...detailForm, state: v })} /></div>
+          {detailUpdateMutation.isError && <p className="text-sm text-red-600">{(detailUpdateMutation.error as Error).message}</p>}
+          <button onClick={() => detailUpdateMutation.mutate()} disabled={detailUpdateMutation.isPending || !detailForm.name.trim()} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{detailUpdateMutation.isPending ? 'Saving...' : 'Save Shop Changes'}</button>
+        </div>
+      </Modal>
+
+      <Modal open={!!editWorkItem} onClose={() => setEditWorkItem(null)} title="Edit Work Item">
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3"><Input label="Work Type" value={workItemForm.work_type_name} onChange={(v) => setWorkItemForm({ ...workItemForm, work_type_name: v })} /><Input label="Material" value={workItemForm.material} onChange={(v) => setWorkItemForm({ ...workItemForm, material: v })} /></div>
+          <div className="grid grid-cols-4 gap-2"><Input label="Width" type="number" value={workItemForm.width} onChange={(v) => setWorkItemForm({ ...workItemForm, width: v })} /><Input label="Height" type="number" value={workItemForm.height} onChange={(v) => setWorkItemForm({ ...workItemForm, height: v })} /><Select label="Unit" value={workItemForm.unit} onChange={(v) => setWorkItemForm({ ...workItemForm, unit: v })} options={LENGTH_UNIT_OPTIONS} /><Input label="Qty" type="number" value={workItemForm.quantity} onChange={(v) => setWorkItemForm({ ...workItemForm, quantity: v })} /></div>
+          {saveWorkItemMutation.isError && <p className="text-sm text-red-600">{(saveWorkItemMutation.error as Error).message}</p>}
+          <button onClick={() => saveWorkItemMutation.mutate()} disabled={saveWorkItemMutation.isPending} className="w-full bg-blue-600 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{saveWorkItemMutation.isPending ? 'Saving...' : 'Save Work Item'}</button>
         </div>
       </Modal>
 

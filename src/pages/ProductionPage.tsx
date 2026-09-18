@@ -101,6 +101,10 @@ type ProductionOrderRow = {
   project_name: string | null;
   campaign_id: string | null;
   campaign_name: string | null;
+  // migration 0083 — stable key for the folder browser's Client level
+  // (client_name alone can't be browsed by reliably: two clients could
+  // share a display name).
+  client_id: string;
 };
 
 // Full per-shop board + BOM detail, loaded on demand for exactly one
@@ -218,6 +222,7 @@ export default function ProductionPage() {
   const [zoneFilter, setZoneFilter] = useState('');
   const [poFilter, setPoFilter] = useState('');
   const [campaignFilter, setCampaignFilter] = useState('');
+  const [clientFilter, setClientFilter] = useState('');
   const [workTypeFilter, setWorkTypeFilter] = useState('');
   const [fulfillmentFilter, setFulfillmentFilter] = useState('');
   const [assignedFilter, setAssignedFilter] = useState(''); // owner/admin only
@@ -272,7 +277,7 @@ export default function ProductionPage() {
   useEffect(() => {
     setPage(0);
     setSelectedOrderIds(new Set());
-  }, [activeTab, debouncedSearch, zoneFilter, poFilter, campaignFilter, workTypeFilter, fulfillmentFilter, assignedFilter, sortBy]);
+  }, [activeTab, debouncedSearch, zoneFilter, poFilter, campaignFilter, clientFilter, workTypeFilter, fulfillmentFilter, assignedFilter, sortBy]);
 
   // ---- Lightweight, dedicated option lists for filter dropdowns — never
   // derived from the (paginated, filtered) orders list itself, so the
@@ -318,13 +323,14 @@ export default function ProductionPage() {
     error: listQueryError,
     refetch: refetchList,
   } = useQuery({
-    queryKey: ['production-order-list', orgId, assignedFilterValue, activeTab, debouncedSearch, page, zoneFilter, poFilter, campaignFilter, workTypeFilter, fulfillmentFilter, assignedFilter, sortBy],
+    queryKey: ['production-order-list', orgId, assignedFilterValue, activeTab, debouncedSearch, page, zoneFilter, poFilter, campaignFilter, clientFilter, workTypeFilter, fulfillmentFilter, assignedFilter, sortBy],
     queryFn: async () => {
       let q = supabase.from('v_production_order_list').select('*', { count: 'exact' }).eq('organization_id', orgId);
       if (assignedFilterValue) q = q.eq('assigned_to', assignedFilterValue);
       else if (assignedFilter) q = q.eq('assigned_to', assignedFilter);
       if (activeTab === 'needs_materials') q = q.gt('materials_pending_boards', 0);
       else if (tab.statuses) q = q.in('status', tab.statuses);
+      if (clientFilter) q = q.eq('client_id', clientFilter);
       // A PO's "Campaign" is project_id (agency's own) OR campaign_id
       // (client's own) — never both — same unified concept the folder
       // browser groups by (see campaignKeyAndName below).
@@ -375,7 +381,7 @@ export default function ProductionPage() {
     queryFn: async () => {
       let q = supabase
         .from('v_production_order_list')
-        .select('production_order_id, project_id, project_name, campaign_id, campaign_name, po_id, po_number, po_name, zone_id, zone_name, status, materials_pending_boards')
+        .select('production_order_id, client_id, client_name, project_id, project_name, campaign_id, campaign_name, po_id, po_number, po_name, zone_id, zone_name, status, materials_pending_boards')
         .eq('organization_id', orgId);
       if (assignedFilterValue) q = q.eq('assigned_to', assignedFilterValue);
       else if (assignedFilter) q = q.eq('assigned_to', assignedFilter);
@@ -388,7 +394,7 @@ export default function ProductionPage() {
       const { data, error } = await q;
       if (error) throw new Error(`Could not load the folder browser: ${error.message}`);
       return data as {
-        production_order_id: string; project_id: string | null; project_name: string | null;
+        production_order_id: string; client_id: string; client_name: string | null; project_id: string | null; project_name: string | null;
         campaign_id: string | null; campaign_name: string | null;
         po_id: string | null; po_number: string | null; po_name: string | null;
         zone_id: string | null; zone_name: string | null; status: string; materials_pending_boards: number;
@@ -396,6 +402,20 @@ export default function ProductionPage() {
     },
     enabled: !!orgId,
   });
+
+  // Client tiles — the new top level. Every distinct client present in
+  // treeRows; no "No Client" bucket needed since every shop always has
+  // exactly one (shops.client_id is NOT NULL).
+  const clientFolders = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; count: number; materialsPending: number }>();
+    for (const r of treeRows || []) {
+      const entry = map.get(r.client_id) || { id: r.client_id, name: r.client_name || 'Unnamed Client', count: 0, materialsPending: 0 };
+      entry.count += 1;
+      if (r.materials_pending_boards > 0) entry.materialsPending += 1;
+      map.set(r.client_id, entry);
+    }
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [treeRows]);
 
   // A PO's "Campaign" is whichever grouping it actually has — the
   // agency's own project (project_id, the common case) or the client's
@@ -413,13 +433,15 @@ export default function ProductionPage() {
     return r.project_id === filterValue || r.campaign_id === filterValue;
   }
 
-  // Campaign tiles — every distinct campaign present in treeRows, plus a
-  // "No Campaign" bucket for POs that were never grouped under one (the
+  // Campaign tiles — scoped to whichever client is chosen ('' means
+  // "haven't chosen one yet", so every campaign org-wide) — plus a "No
+  // Campaign" bucket for POs that were never grouped under one (the
   // normal case for agency-created POs; campaigns are a client-side,
   // optional concept — migration 0051).
   const campaignFolders = useMemo(() => {
+    const scoped = (treeRows || []).filter((r) => !clientFilter || r.client_id === clientFilter);
     const map = new Map<string, { id: string; name: string; count: number; materialsPending: number }>();
-    for (const r of treeRows || []) {
+    for (const r of scoped) {
       const { key, name } = campaignKeyAndName(r);
       const entry = map.get(key) || { id: key, name, count: 0, materialsPending: 0 };
       entry.count += 1;
@@ -427,14 +449,14 @@ export default function ProductionPage() {
       map.set(key, entry);
     }
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [treeRows]);
+  }, [treeRows, clientFilter]);
 
-  // Work Order tiles — scoped to whichever campaign is currently chosen
-  // ('' at the campaign level means "haven't chosen one yet", in which
-  // case this is every PO org-wide; NO_FOLDER_BUCKET means specifically
-  // the "No Campaign" bucket).
+  // Work Order tiles — scoped to whichever client AND campaign are
+  // currently chosen ('' at the campaign level means "haven't chosen one
+  // yet", in which case this is every PO under the chosen client;
+  // NO_FOLDER_BUCKET means specifically the "No Campaign" bucket).
   const poFolders = useMemo(() => {
-    const scoped = (treeRows || []).filter((r) => rowMatchesCampaign(r, campaignFilter));
+    const scoped = (treeRows || []).filter((r) => (!clientFilter || r.client_id === clientFilter) && rowMatchesCampaign(r, campaignFilter));
     const map = new Map<string, { id: string; name: string; count: number; materialsPending: number }>();
     for (const r of scoped) {
       const key = r.po_id || NO_FOLDER_BUCKET;
@@ -445,11 +467,12 @@ export default function ProductionPage() {
       map.set(key, entry);
     }
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [treeRows, campaignFilter]);
+  }, [treeRows, clientFilter, campaignFilter]);
 
-  // Zone tiles — scoped to whichever campaign AND work order are chosen.
+  // Zone tiles — scoped to whichever client, campaign AND work order are chosen.
   const zoneFolders = useMemo(() => {
     const scoped = (treeRows || []).filter((r) => {
+      if (clientFilter && r.client_id !== clientFilter) return false;
       if (!rowMatchesCampaign(r, campaignFilter)) return false;
       if (poFilter === NO_FOLDER_BUCKET) return !r.po_id;
       if (poFilter) return r.po_id === poFilter;
@@ -465,8 +488,9 @@ export default function ProductionPage() {
       map.set(key, entry);
     }
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [treeRows, campaignFilter, poFilter]);
+  }, [treeRows, clientFilter, campaignFilter, poFilter]);
 
+  const selectedClientName = clientFilter ? (clientFolders.find((c) => c.id === clientFilter)?.name || 'Client') : null;
   const selectedCampaignName = campaignFilter
     ? (campaignFolders.find((c) => c.id === campaignFilter)?.name || (campaignFilter === NO_FOLDER_BUCKET ? 'No Campaign' : 'Campaign'))
     : null;
@@ -477,8 +501,9 @@ export default function ProductionPage() {
     ? (zoneFilter === NO_FOLDER_BUCKET ? 'No Zone' : (zoneFolders.find((z) => z.id === zoneFilter)?.name || (treeRows || []).find((r) => r.zone_id === zoneFilter)?.zone_name || 'Zone'))
     : null;
 
-  function resetFolderFrom(level: 'root' | 'campaign' | 'po' | 'zone') {
-    if (level === 'root') { setCampaignFilter(''); setPoFilter(''); setZoneFilter(''); }
+  function resetFolderFrom(level: 'root' | 'client' | 'campaign' | 'po' | 'zone') {
+    if (level === 'root') { setClientFilter(''); setCampaignFilter(''); setPoFilter(''); setZoneFilter(''); }
+    else if (level === 'client') { setCampaignFilter(''); setPoFilter(''); setZoneFilter(''); }
     else if (level === 'campaign') { setPoFilter(''); setZoneFilter(''); }
     else if (level === 'po') { setZoneFilter(''); }
     else if (level === 'zone') { setZoneFilter(''); }
@@ -859,8 +884,9 @@ export default function ProductionPage() {
     },
   });
 
-  const activeFilterCount = [campaignFilter, poFilter, zoneFilter, workTypeFilter, fulfillmentFilter, assignedFilter].filter(Boolean).length;
+  const activeFilterCount = [clientFilter, campaignFilter, poFilter, zoneFilter, workTypeFilter, fulfillmentFilter, assignedFilter].filter(Boolean).length;
   function clearAllFilters() {
+    setClientFilter('');
     setCampaignFilter('');
     setPoFilter('');
     setZoneFilter('');
@@ -1017,10 +1043,21 @@ export default function ProductionPage() {
         <nav aria-label="Folder path" className="flex items-center gap-1.5 text-sm mb-5 flex-wrap text-slate-400">
           <button
             onClick={() => resetFolderFrom('root')}
-            className={`flex items-center gap-1.5 ${!campaignFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
+            className={`flex items-center gap-1.5 ${!clientFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
           >
             <FolderTree className="w-3.5 h-3.5" /> All Production
           </button>
+          {clientFilter && (
+            <>
+              <span aria-hidden>/</span>
+              <button
+                onClick={() => resetFolderFrom('client')}
+                className={`truncate max-w-[200px] ${!campaignFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
+              >
+                {selectedClientName}
+              </button>
+            </>
+          )}
           {campaignFilter && (
             <>
               <span aria-hidden>/</span>
@@ -1051,7 +1088,7 @@ export default function ProductionPage() {
               </button>
             </>
           )}
-          {browsingList && !zoneFilter && (campaignFilter || poFilter) && (
+          {browsingList && !zoneFilter && (clientFilter || campaignFilter || poFilter) && (
             <>
               <span aria-hidden>/</span>
               <button onClick={() => setBrowsingList(false)} className="font-semibold text-slate-900">
@@ -1078,11 +1115,12 @@ export default function ProductionPage() {
             it, so the production team is never looking at a long list
             they didn't ask to see yet. */}
         {!showList && (() => {
-          const level = !campaignFilter ? 'campaign' : !poFilter ? 'po' : 'zone';
-          const levelLabel = level === 'campaign' ? 'Campaigns' : level === 'po' ? 'Work Orders' : 'Zones';
-          const folders = level === 'campaign' ? campaignFolders : level === 'po' ? poFolders : zoneFolders;
+          const level = !clientFilter ? 'client' : !campaignFilter ? 'campaign' : !poFilter ? 'po' : 'zone';
+          const levelLabel = level === 'client' ? 'Clients' : level === 'campaign' ? 'Campaigns' : level === 'po' ? 'Work Orders' : 'Zones';
+          const folders = level === 'client' ? clientFolders : level === 'campaign' ? campaignFolders : level === 'po' ? poFolders : zoneFolders;
           const onPick = (id: string) => {
-            if (level === 'campaign') setCampaignFilter(id);
+            if (level === 'client') setClientFilter(id);
+            else if (level === 'campaign') setCampaignFilter(id);
             else if (level === 'po') setPoFilter(id);
             else { setZoneFilter(id); setBrowsingList(true); }
           };

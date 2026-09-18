@@ -81,6 +81,13 @@ function homeRouteForRole(role: Role) {
   if (role === 'super_admin') return '/superadmin';
   if (FIELD_ROLES.includes(role)) return '/mobile';
   if (CLIENT_ORG_ROLES.includes(role)) return '/client';
+  // Designer and Production have their own work queues — landing them
+  // on the owner/admin Dashboard (full org-wide stats, billing, every
+  // client) isn't just the wrong screen, it's information they have no
+  // real use for and no route to get back out of in their own sidebar
+  // (Dashboard isn't even a nav link for these two roles).
+  if (role === 'designer') return '/design';
+  if (role === 'printing') return '/production';
   return '/dashboard';
 }
 
@@ -165,7 +172,9 @@ function AppRoutes() {
           <AdminLayout />
         </ProtectedRoute>
       }>
-        <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/dashboard" element={
+          <ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'accounts', 'demo']}><DashboardPage /></ProtectedRoute>
+        } />
         <Route path="/account" element={<AccountSettingsPage />} />
         <Route path="/clients" element={<ClientsPage />} />
         <Route path="/campaigns" element={<CampaignsPage />} />

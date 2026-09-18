@@ -14,7 +14,7 @@ import { computeUtilization, formatQty, formatRupees, isAreaUom, getActualForSta
 import { DonutChart } from '@/components/DonutChart';
 import {
   Plus, Pencil, Trash2, ShoppingCart, FileText, Upload, X, Loader2, IndianRupee, ListChecks, AlertTriangle, TrendingUp, ChevronDown,
-  Inbox, Check, XCircle, Building2, Store, Ban, ChevronRight, Calendar, Layers, Users, UserPlus, UserMinus,
+  Inbox, Check, XCircle, Building2, Store, ChevronRight, Calendar, Layers, Users, UserPlus, UserMinus,
 } from 'lucide-react';
 
 const UOM_OPTIONS = [
@@ -420,28 +420,9 @@ export default function PurchaseOrdersPage() {
 
   const deleteMutation = useMutation({
     mutationFn: async (po: PurchaseOrder) => {
-      const hasShops = (shopCountByPo.get(po.id) || 0) > 0;
-      const stage: UtilizationStage = defaultUtilizationStage(po.fulfillment_type);
-      const invoicedAmount = (utilization || [])
-        .filter((r) => r.purchase_order_id === po.id)
-        .reduce((sum, r) => sum + computeUtilization(r, stage).invoicedAmount, 0);
-      // A Work Order that's never been attached to a shop and never had
-      // anything invoiced against it is safe to permanently remove — it's
-      // pure setup, not history. Anything with real activity against it
-      // (shops assigned, or an invoice raised) is cancelled instead, so
-      // that history and audit trail stay intact.
-      const canHardDelete = canDelete && !hasShops && invoicedAmount === 0;
-
-      if (canHardDelete) {
-        const { error } = await supabase.from('purchase_orders').delete().eq('id', po.id);
-        if (error) throw error;
-        await logAudit('purchase_orders', po.id, 'delete', null, null, null, `Deleted unused Work Order ${po.po_number}`);
-      } else {
-        const { error } = await supabase.from('purchase_orders').update({ status: 'cancelled' }).eq('id', po.id);
-        if (error) throw error;
-        await logAudit('purchase_orders', po.id, 'delete', null, null, null, `Cancelled Work Order ${po.po_number}`);
-      }
-      return canHardDelete;
+      const { data, error } = await supabase.rpc('delete_purchase_order_cascade', { p_po_id: po.id });
+      if (error) throw error;
+      return data as { shops: number; invoices: number } | null;
     },
     // Always resync from the DB, whether this succeeded or failed, so the
     // list can never keep showing a Work Order that was actually deleted
@@ -449,9 +430,14 @@ export default function PurchaseOrdersPage() {
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['purchase_orders', orgId] });
       queryClient.invalidateQueries({ queryKey: ['po-shop-links', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['invoices', orgId] });
     },
-    onSuccess: (hardDeleted, po) => {
-      setNotice({ kind: 'success', message: hardDeleted ? `Work Order ${po.po_number} deleted.` : `Work Order ${po.po_number} cancelled — it had shops or invoices attached, so it's kept for record-keeping.` });
+    onSuccess: (counts, po) => {
+      const parts = [];
+      if (counts?.shops) parts.push(`${counts.shops} shop${counts.shops === 1 ? '' : 's'} (and all their survey/design/production/installation records)`);
+      if (counts?.invoices) parts.push(`${counts.invoices} invoice${counts.invoices === 1 ? '' : 's'}`);
+      setNotice({ kind: 'success', message: parts.length > 0 ? `Work Order ${po.po_number} deleted, along with ${parts.join(' and ')}.` : `Work Order ${po.po_number} deleted.` });
       setDeletePo(null);
     },
     onError: (err: Error) => {
@@ -482,32 +468,31 @@ export default function PurchaseOrdersPage() {
 
   const filteredProjects = (projects || []).filter((p) => !form.client_id || p.client_id === form.client_id);
 
-  // Whether the Work Order currently queued for delete/cancel is safe to
-  // permanently delete (mirrors the same check used per-row and inside
-  // deleteMutation itself, so the confirm dialog's title/message always
-  // match what will actually happen).
-  const deletePoCanHardDelete = useMemo(() => {
-    if (!deletePo) return false;
+  // Whether the Work Order queued for delete has real shops/invoices
+  // attached — deleting it always genuinely deletes it either way now;
+  // this only changes how strongly the confirmation dialog warns.
+  const deletePoIsEmpty = useMemo(() => {
+    if (!deletePo) return true;
     const shopCount = shopCountByPo.get(deletePo.id) || 0;
     if (shopCount > 0) return false;
     const stage: UtilizationStage = defaultUtilizationStage(deletePo.fulfillment_type);
     const invoicedAmount = (utilization || [])
       .filter((r) => r.purchase_order_id === deletePo.id)
       .reduce((sum, r) => sum + computeUtilization(r, stage).invoicedAmount, 0);
-    return canDelete && invoicedAmount === 0;
-  }, [deletePo, shopCountByPo, utilization, canDelete]);
+    return invoicedAmount === 0;
+  }, [deletePo, shopCountByPo, utilization]);
 
   const detailPo = (pos || []).find((p) => p.id === detailPoId) || null;
-  const detailPoCanHardDelete = useMemo(() => {
-    if (!detailPo) return false;
+  const detailPoIsEmpty = useMemo(() => {
+    if (!detailPo) return true;
     const shopCount = shopCountByPo.get(detailPo.id) || 0;
     if (shopCount > 0) return false;
     const stage: UtilizationStage = defaultUtilizationStage(detailPo.fulfillment_type);
     const invoicedAmount = (utilization || [])
       .filter((r) => r.purchase_order_id === detailPo.id)
       .reduce((sum, r) => sum + computeUtilization(r, stage).invoicedAmount, 0);
-    return canDelete && invoicedAmount === 0;
-  }, [detailPo, shopCountByPo, utilization, canDelete]);
+    return invoicedAmount === 0;
+  }, [detailPo, shopCountByPo, utilization]);
 
   return (
     <div>
@@ -853,13 +838,13 @@ export default function PurchaseOrdersPage() {
         open={!!deletePo}
         onClose={() => { setDeletePo(null); deleteMutation.reset(); }}
         onConfirm={() => deletePo && deleteMutation.mutate(deletePo)}
-        title={deletePoCanHardDelete ? 'Delete Work Order' : 'Cancel Work Order'}
+        title="Delete Work Order"
         message={
-          deletePoCanHardDelete
-            ? `Permanently delete Work Order "${deletePo?.name ? `${deletePo.name} — ` : ''}${deletePo?.po_number}" and its line items? It has no shops or invoiced amounts attached yet, so this can't be undone.`
-            : `Work Order "${deletePo?.name ? `${deletePo.name} — ` : ''}${deletePo?.po_number}" has shops or invoiced amounts attached to it, so it's kept as a record. Mark it as cancelled instead? Its line items and history stay intact.`
+          deletePoIsEmpty
+            ? `Permanently delete Work Order "${deletePo?.name ? `${deletePo.name} — ` : ''}${deletePo?.po_number}" and its line items? This cannot be undone.`
+            : `Work Order "${deletePo?.name ? `${deletePo.name} — ` : ''}${deletePo?.po_number}" has shops and/or invoices attached. Deleting it will permanently delete ALL of them too — every survey, design, production and installation record under those shops. This cannot be undone.`
         }
-        confirmLabel={deletePoCanHardDelete ? 'Delete Work Order' : 'Cancel Work Order'}
+        confirmLabel="Delete Work Order"
         danger
         manualClose
         loading={deleteMutation.isPending}
@@ -881,7 +866,7 @@ export default function PurchaseOrdersPage() {
           utilization={(utilization || []).filter((r) => r.purchase_order_id === detailPo.id)}
           shopCount={shopCountByPo.get(detailPo.id) || 0}
           canDelete={canDelete}
-          canHardDelete={detailPoCanHardDelete}
+          canHardDelete={detailPoIsEmpty}
           onClose={() => setDetailPoId(null)}
           onEdit={() => { setDetailPoId(null); openEdit(detailPo); }}
           onManageLineItems={() => { setDetailPoId(null); setLineItemsPo(detailPo); }}
@@ -1107,16 +1092,14 @@ function WorkOrderDetailDrawer({
           <Link to={`/shops?po=${po.id}`} className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition">
             <Store className="w-4 h-4" /> View Shops{shopCount > 0 ? ` (${shopCount})` : ''}
           </Link>
-          {canDelete && po.status !== 'cancelled' && (
+          {canDelete && (
             <button
               onClick={onDelete}
-              title={canHardDelete ? 'No shops or invoices attached yet — safe to permanently delete' : 'Has shops or invoiced amounts — will be cancelled and kept for record-keeping'}
-              className={`flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm font-medium transition ${
-                canHardDelete ? 'bg-red-50 hover:bg-red-100 text-red-600' : 'bg-amber-50 hover:bg-amber-100 text-amber-700'
-              }`}
+              title={canHardDelete ? 'No shops or invoices attached — safe to permanently delete' : 'Has shops and/or invoices attached — deleting this Work Order permanently deletes all of them too'}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm font-medium transition bg-red-50 hover:bg-red-100 text-red-600"
             >
-              {canHardDelete ? <Trash2 className="w-4 h-4" /> : <Ban className="w-4 h-4" />}
-              {canHardDelete ? 'Delete Work Order' : 'Cancel Work Order'}
+              <Trash2 className="w-4 h-4" />
+              Delete Work Order
             </button>
           )}
         </div>

@@ -197,6 +197,15 @@ export default function ReportsPage() {
     enabled: !!orgId,
   });
 
+  const { data: surveyPhotoItems } = useQuery({
+    queryKey: ['survey-photo-items-reports', orgId],
+    queryFn: async () => {
+      const { data } = await supabase.from('survey_photo_items').select('survey_photo_id,work_item_id').eq('organization_id', orgId);
+      return data || [];
+    },
+    enabled: !!orgId,
+  });
+
   // Marked board polygons — needed so exports can burn the marked area into
   // the exported image instead of just linking to a plain, unmarked photo.
   const { data: boardMarkings } = useQuery({
@@ -439,7 +448,8 @@ export default function ReportsPage() {
             const photos = (surveyPhotos || []).filter((p) => p.shop_id === shop.id);
             const photoIds = new Set(photos.map((p) => p.id));
             const markings = (boardMarkings || []).filter((m) => photoIds.has(m.survey_photo_id));
-            const rows = await buildDesignComparisonRows(items as any, photos as any, markings as any, designVersions || [], designVersionItems || []);
+            const photoLinks = (surveyPhotoItems || []).filter((x: any) => photoIds.has(x.survey_photo_id));
+            const rows = await buildDesignComparisonRows(items as any, photos as any, markings as any, designVersions || [], designVersionItems || [], photoLinks as any);
             entries.push({ shop, rows });
             setGenProgress({ done: entries.length, total: candidateShops.length });
           }

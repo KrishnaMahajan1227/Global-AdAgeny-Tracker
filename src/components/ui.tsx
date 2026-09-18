@@ -292,7 +292,11 @@ export function ConfirmDialog({
   );
 }
 
-export function StatusBadge({ status, label }: { status: string; label?: string }) {
+export function StatusBadge({ status, label }: { status?: string | null; label?: string | null }) {
+  // Defensive normalization: some legacy/client-owned rows can briefly have a
+  // null status while React Query restores/refetches cached data during route
+  // navigation. Never let a presentation badge crash the whole page.
+  const safeStatus = typeof status === 'string' && status.trim() ? status : 'unknown';
   const colorClass =
     {
       pending: 'bg-slate-100 text-slate-700',
@@ -342,9 +346,9 @@ export function StatusBadge({ status, label }: { status: string; label?: string 
       planned: 'bg-slate-100 text-slate-700',
       visited: 'bg-emerald-100 text-emerald-700',
       skipped: 'bg-slate-100 text-slate-700',
-    }[status] || 'bg-slate-100 text-slate-700';
+    }[safeStatus] || 'bg-slate-100 text-slate-700';
 
-  const text = label || status.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  const text = label || safeStatus.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
   return (
     <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${colorClass}`}>

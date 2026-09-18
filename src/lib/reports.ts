@@ -1796,7 +1796,8 @@ export async function buildDesignComparisonRows(
   surveyPhotos: SurveyPhoto[],
   markings: BoardMarking[],
   designVersions: DesignVersion[],
-  designVersionItems: DesignVersionItem[]
+  designVersionItems: DesignVersionItem[],
+  surveyPhotoItems: { survey_photo_id: string; work_item_id: string }[] = []
 ): Promise<DesignComparisonRow[]> {
   const numbering = numberMarkingsByPhoto(markings);
   const versionsByItem = new Map<string, DesignVersion[]>();
@@ -1830,7 +1831,12 @@ export async function buildDesignComparisonRows(
   for (const item of workItems) {
     const marking = markings.find((m) => m.work_item_id === item.id && m.points?.length >= 3);
     const num = numbering.get(item.id);
-    const photo = marking ? surveyPhotos.find((p) => p.id === marking.survey_photo_id) || null : null;
+    const explicitPhotoLink = !marking ? surveyPhotoItems.find((x) => x.work_item_id === item.id) : null;
+    const photo = marking
+      ? surveyPhotos.find((p) => p.id === marking.survey_photo_id) || null
+      : explicitPhotoLink
+        ? surveyPhotos.find((p) => p.id === explicitPhotoLink.survey_photo_id) || null
+        : null;
 
     let markedPhotoDataUrl: string | null = null;
     if (marking && photo?.photo_url) {
@@ -1859,6 +1865,10 @@ export async function buildDesignComparisonRows(
         }
       }
       markedPhotoDataUrl = renderedByPhoto.get(cacheKey) || null;
+    }
+
+    if (!marking && photo?.photo_url) {
+      try { markedPhotoDataUrl = await toJpegDataUrl(photo.photo_url); } catch { markedPhotoDataUrl = null; }
     }
 
     rows.push({

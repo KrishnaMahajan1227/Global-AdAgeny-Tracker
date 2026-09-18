@@ -4,34 +4,39 @@
 // boards/measurements, so this is a line-items format: one row per
 // board, many rows can share a Shop ID, and each shop's own
 // Stage/Surveyor/Designer/etc. only needs to be filled on one of its
-// rows. A row with a Shop ID updates that existing shop; a row with the
-// Shop ID left BLANK creates a brand-new shop first (grouped by Shop
-// Name + Phone instead, since a new shop has no ID yet), then backfills
-// it exactly the same way — so a batch that's part already-added, part
-// completely new can go through in one file.
+// rows.
+//
+// Whether a row is an EXISTING shop or a NEW one is decided by the
+// explicit "New Shop?" Yes/No dropdown — not by whether Shop ID happens
+// to be filled in. That column is what it looks like on-screen: an
+// admin can now see, per row, exactly which mode they're in, and a
+// stray edit to Shop ID (it used to get accidentally blanked, which
+// silently turned an existing-shop row into a "create a duplicate shop"
+// row) no longer changes the outcome.
 //
 // The downloaded template is built with ExcelJS (not the `xlsx` package
 // used elsewhere in the app) specifically because it can write real
-// Excel dropdown data validation — Stage, Surveyor, Designer, Production
-// Person, Installer and Client are all click-to-select dropdowns in the
-// actual spreadsheet, not free text, so there's nothing to mistype.
-// Reading the filled file back in still goes through `xlsx`/SheetJS,
-// which reads a dropdown cell's chosen value like any other cell.
+// Excel dropdown data validation — New Shop?, Stage, Work Order,
+// Client, Surveyor, Designer, Production Person and Installer are all
+// click-to-select dropdowns, not free text. Reading the filled file
+// back in still goes through `xlsx`/SheetJS, which reads a dropdown
+// cell's chosen value like any other cell.
 import * as XLSX from 'xlsx';
 import ExcelJS from 'exceljs';
 import type { BackfillStage } from './backfillPipeline';
 
 export const BULK_BACKFILL_HEADERS = [
-  'Shop ID', 'Shop Name', 'Phone', 'Client', 'City', 'District', 'State', 'Address', 'Owner Name', 'Current Status',
+  'New Shop?', 'Shop ID', 'Shop Name', 'Phone', 'Work Order', 'Client',
+  'City', 'District', 'State', 'Address', 'Owner Name', 'Current Status',
   'Stage', 'Work Type', 'Material', 'Width', 'Height', 'Unit', 'Qty',
   'Surveyor', 'Designer', 'Production Person', 'Installer', 'Note',
 ] as const;
 
 const STAGE_LABELS: Record<BackfillStage, string> = {
-  design_pending: 'Survey Done',
-  production_pending: 'Survey + Design Done',
-  production_done: 'Survey + Design + Production Done',
-  dispatched: 'Survey + Design + Production Done (Dispatched)',
+  design_pending: 'Survey done',
+  production_pending: 'Survey + Design done',
+  production_done: 'Survey + Design + Production done',
+  dispatched: 'Survey + Design + Production done (Dispatched)',
 };
 // Accepts either the friendly label above or the raw stage code, so a
 // shorthand typed value still works.
@@ -53,6 +58,11 @@ export interface BulkBackfillShopRow {
   city: string | null;
   status: string;
 }
+export interface BulkBackfillPoRow {
+  id: string;
+  po_number: string;
+  client_id: string;
+}
 
 /** For dropdown-list ranges on the hidden "Lists" sheet — 1 → 'A', 26 → 'Z', 27 → 'AA', etc. */
 function colLetter(n: number): string {
@@ -72,58 +82,63 @@ export interface BulkBackfillTemplateOptions {
   productionPeople: string[];
   installers: string[];
   clients: string[];
+  purchaseOrders: BulkBackfillPoRow[];
 }
 
-/** Builds and immediately downloads the .xlsx template: an Instructions
- *  sheet, one pre-filled reference row per shop that still needs
- *  backfilling, a block of blank rows underneath for shops that don't
- *  exist in the app yet, and real dropdown selectors (Stage / Surveyor /
- *  Designer / Production Person / Installer / Client) so Owner/Admin
- *  pick from the actual list instead of typing names by hand. */
+const EXISTING_FILL: Partial<ExcelJS.Fill> = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF4FB' } } as ExcelJS.Fill;
+const NEW_FILL: Partial<ExcelJS.Fill> = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0FAF0' } } as ExcelJS.Fill;
+
+/** Builds and immediately downloads the .xlsx template. Short by design —
+ *  a wall of instructions goes unread; the sheet itself (dropdowns +
+ *  two colour-coded, clearly-labelled blocks of rows) is the real
+ *  explanation. */
 export async function downloadBulkBackfillTemplate(opts: BulkBackfillTemplateOptions): Promise<void> {
-  const { shops, surveyors, designers, productionPeople, installers, clients } = opts;
+  const { shops, surveyors, designers, productionPeople, installers, clients, purchaseOrders } = opts;
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Bulk Backfill';
   wb.created = new Date();
 
-  const wsInstructions = wb.addWorksheet('Instructions');
-  wsInstructions.columns = [{ width: 100 }];
-  const instructionLines = [
-    'Bulk Backfill — Instructions',
-    '',
-    'SHOPS ALREADY IN THE APP (listed on the Backfill Data sheet with a Shop ID filled in):',
-    '1. Do not edit the "Shop ID" column — it\'s how each row is matched back to the right shop.',
-    '2. "Client", "City", "District", "State", "Address", "Owner Name" are shown for reference only and are ignored for these rows.',
-    '',
-    'SHOPS THAT DON\'T EXIST IN THE APP YET:',
-    '3. Use one of the blank rows at the bottom of the Backfill Data sheet. Leave "Shop ID" and "Current Status" empty.',
-    '4. Fill in Shop Name, Phone, Client, City, District, State, Address, Owner Name — the shop gets created first, then backfilled.',
-    '5. Pick "Client" from its dropdown — required for a new shop.',
-    '6. Every row for the same new shop needs the same Shop Name + Phone so they\'re grouped together correctly.',
-    '',
-    'BOTH CASES:',
-    '7. "Stage", "Surveyor", "Designer", "Production Person", "Installer" and "Client" are all dropdowns — click the cell and pick from the list rather than typing.',
-    '8. One row = one board/item. A shop with 3 boards needs 3 rows.',
-    '9. Only fill Stage / Surveyor / Designer / Production Person / Installer / Note on ONE of that shop\'s rows — the rest can be left blank, extra copies are fine too.',
-    '10. Designer only matters if Stage includes Design. Production Person / Installer only matter if Stage includes Production.',
-    '11. Save this file and upload it back from the same "Bulk Backfill" screen.',
-  ];
-  instructionLines.forEach((line) => wsInstructions.addRow([line]));
-  wsInstructions.getRow(1).font = { bold: true, size: 13 };
+  const wsInstructions = wb.addWorksheet('Read Me First');
+  wsInstructions.columns = [{ width: 92 }];
+  const bold = (text: string) => { const row = wsInstructions.addRow([text]); row.font = { bold: true }; return row; };
+  const plain = (text: string) => wsInstructions.addRow([text]);
+  bold('Bulk Backfill — 1 minute guide').font = { bold: true, size: 14 };
+  plain('Use this for work already done outside the app. Open the "Backfill Data" tab.');
+  wsInstructions.addRow([]);
+  bold('Blue rows — shops already in the app');
+  plain('Just fill in Stage onward (columns M→X). Everything left of "Current Status" is reference only — leave it as is.');
+  wsInstructions.addRow([]);
+  bold('Green rows — shops NOT in the app yet');
+  plain('Fill in every column: Shop Name, Phone, Work Order or Client, City/State/Address, then Stage onward.');
+  plain('Give every board of that shop the SAME Shop Name + Phone so they land on one shop.');
+  wsInstructions.addRow([]);
+  bold('Every shop, one rule');
+  plain('One row = one board. 3 boards for a shop = 3 rows. Only fill Stage/Surveyor/Designer/Production/Installer/Note on ONE of that shop\'s rows.');
+  wsInstructions.addRow([]);
+  bold('Columns with a dropdown (click the cell, pick from the list — do not type):');
+  plain('New Shop?, Work Order, Client, Stage, Surveyor, Designer, Production Person, Installer.');
+  plain('Picking a Work Order is enough on its own — you don\'t need to also fill Client for that row.');
+  wsInstructions.addRow([]);
+  bold('Designer only needed if Stage includes Design. Production Person / Installer only needed if Stage includes Production.');
+  wsInstructions.addRow([]);
+  plain('Save the file and upload it back from the same screen.');
 
   // Hidden reference sheet the dropdowns pull their options from — kept
   // as a separate sheet (rather than an inline comma list) because a
-  // long team-member or client list can exceed Excel's ~255-character
+  // long team-member/client/PO list can exceed Excel's ~255-character
   // limit for an inline dropdown formula.
   const wsLists = wb.addWorksheet('Lists');
   wsLists.state = 'veryHidden';
+  const poLabels = purchaseOrders.map((p) => p.po_number);
   const listColumns: { header: string; values: string[] }[] = [
+    { header: 'YesNo', values: ['Yes', 'No'] },
     { header: 'Stage', values: Object.values(STAGE_LABELS) },
     { header: 'Surveyor', values: surveyors },
     { header: 'Designer', values: designers },
     { header: 'Production', values: productionPeople },
     { header: 'Installer', values: installers },
     { header: 'Client', values: clients },
+    { header: 'WorkOrder', values: poLabels },
   ];
   listColumns.forEach((col, i) => {
     const c = i + 1;
@@ -134,16 +149,21 @@ export async function downloadBulkBackfillTemplate(opts: BulkBackfillTemplateOpt
   const wsData = wb.addWorksheet('Backfill Data');
   wsData.addRow([...BULK_BACKFILL_HEADERS]);
   wsData.getRow(1).font = { bold: true };
-  wsData.columns = BULK_BACKFILL_HEADERS.map((h) => ({ width: Math.max(12, h.length + 2) }));
+  wsData.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } };
+  wsData.columns = BULK_BACKFILL_HEADERS.map((h) => ({ width: Math.max(11, h.length + 2) }));
+  wsData.views = [{ state: 'frozen', ySplit: 1 }];
 
+  const emptyItemCols = ['', '', '', '', 'ft', '', '', '', '', '', ''];
   for (const shop of shops) {
-    wsData.addRow([shop.id, shop.name, shop.phone || '', '', shop.city || '', '', '', '', '', shop.status, '', '', '', '', '', 'ft', '', '', '', '', '', '']);
+    const row = wsData.addRow(['No', shop.id, shop.name, shop.phone || '', '', '', shop.city || '', '', '', '', '', shop.status, ...emptyItemCols]);
+    row.fill = EXISTING_FILL as ExcelJS.Fill;
   }
-  const blankRowsStart = shops.length + 2; // first blank-new-shop row number
+  const newRowsStart = shops.length + 2;
   for (let i = 0; i < 30; i++) {
-    wsData.addRow(['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 'ft', '', '', '', '', '', '']);
+    const row = wsData.addRow(['Yes', '', '', '', '', '', '', '', '', '', '', '', ...emptyItemCols]);
+    row.fill = NEW_FILL as ExcelJS.Fill;
   }
-  const lastRow = blankRowsStart + 30 - 1;
+  const lastRow = newRowsStart + 30 - 1;
 
   const colOf = (label: string) => BULK_BACKFILL_HEADERS.indexOf(label as (typeof BULK_BACKFILL_HEADERS)[number]) + 1;
   const applyDropdown = (label: string, listCol: number, listLen: number) => {
@@ -154,12 +174,14 @@ export async function downloadBulkBackfillTemplate(opts: BulkBackfillTemplateOpt
       wsData.getCell(r, col).dataValidation = { type: 'list', allowBlank: true, formulae: [range] };
     }
   };
-  applyDropdown('Stage', 1, listColumns[0].values.length);
-  applyDropdown('Surveyor', 2, surveyors.length);
-  applyDropdown('Designer', 3, designers.length);
-  applyDropdown('Production Person', 4, productionPeople.length);
-  applyDropdown('Installer', 5, installers.length);
-  applyDropdown('Client', 6, clients.length);
+  applyDropdown('New Shop?', 1, 2);
+  applyDropdown('Stage', 2, listColumns[1].values.length);
+  applyDropdown('Surveyor', 3, surveyors.length);
+  applyDropdown('Designer', 4, designers.length);
+  applyDropdown('Production Person', 5, productionPeople.length);
+  applyDropdown('Installer', 6, installers.length);
+  applyDropdown('Client', 7, clients.length);
+  applyDropdown('Work Order', 8, poLabels.length);
 
   const buffer = await wb.xlsx.writeBuffer();
   const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -179,13 +201,19 @@ export interface BulkBackfillParsedShop {
    *  existing shop, or a synthetic "new:name|phone" key for a shop
    *  that's being created. */
   key: string;
-  /** Empty for a new shop — isNew distinguishes "not yet resolved" from
-   *  "genuinely blank". */
+  /** '' when not known yet — for an existing-shop row where Shop ID got
+   *  cleared by mistake, the caller can still recover it by matching
+   *  shopName against the org's shop list. */
   shopId: string;
   isNew: boolean;
+  /** True only when the sheet didn't say either way (both Shop ID and
+   *  New Shop? were blank) — kept separate from a confident `isNew` so
+   *  the caller can require the admin to say which, rather than guess. */
+  isNewAmbiguous: boolean;
   shopName: string;
   phone: string;
   clientName: string;
+  workOrderNumber: string;
   city: string;
   district: string;
   state: string;
@@ -211,7 +239,8 @@ export function parseBulkBackfillWorkbook(wb: XLSX.WorkBook): { shops: BulkBackf
   const headerRow = (aoa[0] || []).map((h) => String(h ?? '').trim());
   const colIndex = (label: string) => headerRow.findIndex((h) => h.toLowerCase() === label.toLowerCase());
   const idx = {
-    shopId: colIndex('Shop ID'), shopName: colIndex('Shop Name'), phone: colIndex('Phone'), client: colIndex('Client'),
+    newShop: colIndex('New Shop?'), shopId: colIndex('Shop ID'), shopName: colIndex('Shop Name'), phone: colIndex('Phone'),
+    workOrder: colIndex('Work Order'), client: colIndex('Client'),
     city: colIndex('City'), district: colIndex('District'), state: colIndex('State'), address: colIndex('Address'),
     ownerName: colIndex('Owner Name'), stage: colIndex('Stage'),
     workType: colIndex('Work Type'), material: colIndex('Material'), width: colIndex('Width'),
@@ -230,18 +259,31 @@ export function parseBulkBackfillWorkbook(wb: XLSX.WorkBook): { shops: BulkBackf
     const shopId = cell(row, idx.shopId);
     const shopName = cell(row, idx.shopName);
     const phone = cell(row, idx.phone);
+    const newShopFlag = cell(row, idx.newShop).toLowerCase();
     // A completely blank row (common at the bottom of a template that
     // wasn't fully filled in) — nothing to group it by, skip silently.
     if (!shopId && !shopName) continue;
 
-    const isNew = !shopId;
-    const key = isNew ? `new:${shopName.toLowerCase()}|${phone}` : shopId;
+    // "New Shop?" is the authoritative signal when it's answered — Shop
+    // ID presence is only a fallback for a sheet that never set it (or
+    // an older download). This is what stops an accidentally-cleared
+    // Shop ID cell from turning an existing shop into a duplicate.
+    const isNew = newShopFlag === 'yes' ? true : newShopFlag === 'no' ? false : !shopId;
+    const isNewAmbiguous = !newShopFlag && !shopId && !!shopName;
+    const norm = (v: string) => v.trim().toLowerCase().replace(/\s+/g, ' ');
+    // One Excel row is one board, NOT one shop. Group all board rows for
+    // the same logical site into one shop even when phone is blank or
+    // formatting/case differs. Work Order + client/location are included
+    // to avoid merging two genuinely different outlets with the same name.
+    const naturalShopKey = [norm(shopName), norm(cell(row, idx.workOrder)), norm(cell(row, idx.client)), norm(cell(row, idx.city)), norm(cell(row, idx.address))].join('|');
+    const key = isNew ? `new:${naturalShopKey}` : (shopId || `byname:${naturalShopKey}`);
 
     let entry = byKey.get(key);
     if (!entry) {
       entry = {
-        key, shopId, isNew, shopName, phone,
-        clientName: cell(row, idx.client), city: cell(row, idx.city), district: cell(row, idx.district),
+        key, shopId, isNew, isNewAmbiguous, shopName, phone,
+        clientName: cell(row, idx.client), workOrderNumber: cell(row, idx.workOrder),
+        city: cell(row, idx.city), district: cell(row, idx.district),
         state: cell(row, idx.state), address: cell(row, idx.address), ownerName: cell(row, idx.ownerName),
         stage: null, stageRaw: '', items: [], surveyor: '', designer: '', production: '', installer: '', note: '',
       };

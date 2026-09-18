@@ -46,18 +46,18 @@ export function InstallationPhotoGrid({ photos }: { photos: InstallationPhotoRow
               const failed = failedIds[p.id];
               if (failed) {
                 return (
-                  <div key={p.id} className="rounded-lg overflow-hidden border border-slate-200 bg-slate-50 aspect-square flex flex-col items-center justify-center gap-1 text-slate-300">
+                  <div key={p.id} className="rounded-lg overflow-hidden border border-slate-200 bg-slate-50 aspect-[4/3] flex flex-col items-center justify-center gap-1 text-slate-300">
                     <ImageOff className="w-5 h-5" />
                     <span className="text-[9px] text-slate-400 text-center px-1">Photo unavailable</span>
                   </div>
                 );
               }
               return (
-                <button key={p.id} onClick={() => setLightbox(p.photo_url)} className="relative block aspect-square rounded-lg overflow-hidden border border-slate-200 bg-slate-100 text-left">
+                <button key={p.id} onClick={() => setLightbox(p.photo_url)} className="relative block aspect-[4/3] rounded-lg overflow-hidden border border-slate-200 bg-slate-100 text-left">
                   <img
                     src={p.photo_url}
                     alt={p.caption || p.photo_type}
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-contain"
                     onError={() => setFailedIds((prev) => ({ ...prev, [p.id]: true }))}
                   />
                   {p.angle && p.angle !== 'other' && (

@@ -556,7 +556,9 @@ async function drawInstallationSection(doc: jsPDF, entry: InstallationReportEntr
   const maxImgHeight = 90;
   for (const proof of proofs) {
     if (!proof.photo_url) continue;
-    const caption = `${proof.photo_type.charAt(0).toUpperCase()}${proof.photo_type.slice(1)}${proof.caption ? ' — ' + proof.caption : ''}`;
+    const mappedItem = proof.work_item_id ? workItems.find((w) => w.id === proof.work_item_id) : null;
+    const measurement = mappedItem ? `${mappedItem.approved_width ?? mappedItem.survey_width ?? '—'} x ${mappedItem.approved_height ?? mappedItem.survey_height ?? '—'} ${mappedItem.approved_unit ?? mappedItem.survey_unit ?? ''}` : '';
+    const caption = `${mappedItem?.work_type_name ? mappedItem.work_type_name + ' · ' : ''}${measurement ? measurement + ' · ' : ''}${proof.photo_type.charAt(0).toUpperCase()}${proof.photo_type.slice(1)}${proof.caption ? ' — ' + proof.caption : ''}`;
     try {
       const dataUrl = await toJpegDataUrl(proof.photo_url);
       py = await addCaptionedImage(doc, caption, dataUrl, 14, py, maxImgWidth, maxImgHeight, pageHeight);
@@ -936,7 +938,9 @@ async function drawFinalClientSection(doc: jsPDF, entry: FinalReportEntry, org: 
     y2 += 6;
     for (const proof of proofs) {
       if (!proof.photo_url) continue;
-      const caption = `${proof.photo_type.charAt(0).toUpperCase()}${proof.photo_type.slice(1)}`;
+      const mappedItem = proof.work_item_id ? workItems.find((w) => w.id === proof.work_item_id) : null;
+      const measurement = mappedItem ? `${mappedItem.approved_width ?? mappedItem.survey_width ?? '—'} x ${mappedItem.approved_height ?? mappedItem.survey_height ?? '—'} ${mappedItem.approved_unit ?? mappedItem.survey_unit ?? ''}` : '';
+      const caption = `${mappedItem?.work_type_name ? mappedItem.work_type_name + ' · ' : ''}${measurement ? measurement + ' · ' : ''}${proof.photo_type.charAt(0).toUpperCase()}${proof.photo_type.slice(1)}`;
       try {
         const dataUrl = await toJpegDataUrl(proof.photo_url);
         y2 = await addCaptionedImage(doc, caption, dataUrl, 14, y2, maxImgWidth, maxImgHeight, pageHeight);
@@ -1033,7 +1037,8 @@ function buildSurveyPhotoRows(shops: any[], workItems: any[], src: ExcelPhotoSou
 }
 
 /** One row per installation proof photo — same "one photo, one row" rule as survey photos above. */
-function buildInstallationPhotoRows(shops: any[], src: ExcelPhotoSources) {
+function buildInstallationPhotoRows(shops: any[], workItems: any[], src: ExcelPhotoSources) {
+  const workItemById = new Map((workItems || []).map((w) => [w.id, w]));
   const shopById = new Map(shops.map((s) => [s.id, s]));
   const angleLabels: Record<string, string> = { front: 'Front', side: 'Side', other: 'Other' };
   return (src.installationProofs || [])
@@ -1044,6 +1049,9 @@ function buildInstallationPhotoRows(shops: any[], src: ExcelPhotoSources) {
         'Shop Name': shop?.name || '',
         'Client': shopClientName(shop),
         'City': shop?.city || '',
+        'Work Item': p.work_item_id ? (workItemById.get(p.work_item_id)?.work_type_name || 'Mapped item') : 'Unmapped / legacy',
+        'Measurement': p.work_item_id ? (() => { const w:any = workItemById.get(p.work_item_id); return w ? `${w.approved_width ?? w.survey_width ?? ''} x ${w.approved_height ?? w.survey_height ?? ''} ${w.approved_unit ?? w.survey_unit ?? ''}`.trim() : '' })() : '',
+        'Approved Area (sq.ft)': p.work_item_id ? (workItemById.get(p.work_item_id)?.approved_area ?? workItemById.get(p.work_item_id)?.survey_area ?? '') : '',
         'Photo Type': PHOTO_TYPE_LABELS[p.photo_type] || p.photo_type || '',
         'Angle': angleLabels[p.angle || ''] || p.angle || '',
         'GPS Latitude': p.gps_lat ?? '',
@@ -1114,7 +1122,7 @@ export function exportShopsToExcel(
 ) {
   const wb = XLSX.utils.book_new();
   const surveyRows = buildSurveyPhotoRows(shops, workItems, photoSources);
-  const installRows = buildInstallationPhotoRows(shops, photoSources);
+  const installRows = buildInstallationPhotoRows(shops, workItems, photoSources);
   const designRows = buildDesignFileRows(shops, workItems, photoSources);
 
   const surveyCountByShop = new Map<string, number>();
@@ -1194,7 +1202,7 @@ export function exportMultiSheetExcel(
   // exportShopsToExcel, scoped to the full shop list passed in (not
   // filtered per stage, since a photo doesn't belong to a "stage").
   appendSheetWithLinks(wb, 'Survey Photos', buildSurveyPhotoRows(shops, workItems, photoSources), 'Photo Link');
-  appendSheetWithLinks(wb, 'Installation Photos', buildInstallationPhotoRows(shops, photoSources), 'Photo Link');
+  appendSheetWithLinks(wb, 'Installation Photos', buildInstallationPhotoRows(shops, workItems, photoSources), 'Photo Link');
   appendSheetWithLinks(wb, 'Design Files', buildDesignFileRows(shops, workItems, photoSources), 'File Link');
 
   XLSX.writeFile(wb, `${fileName}.xlsx`);
@@ -1724,7 +1732,9 @@ export async function generateFinalInstallationPPT(
     if (bestProof?.photo_url) {
       try {
         const dataUrl = await toJpegDataUrl(bestProof.photo_url);
-        slide.addImage({ data: dataUrl, x: 0.5, y: 1.5, w: 5.8, h: 4.8, sizing: { type: 'contain', w: 5.8, h: 4.8 } });
+        slide.addImage({ data: dataUrl, x: 0.5, y: 1.5, w: 5.8, h: 4.5, sizing: { type: 'contain', w: 5.8, h: 4.5 } });
+        const mapped = bestProof.work_item_id ? workItems.find((w) => w.id === bestProof.work_item_id) : null;
+        slide.addText(mapped ? `Installed proof: ${mapped.work_type_name || 'Work item'} · ${mapped.approved_width ?? mapped.survey_width ?? '—'} x ${mapped.approved_height ?? mapped.survey_height ?? '—'} ${mapped.approved_unit ?? mapped.survey_unit ?? ''}` : 'Installed proof · legacy/unmapped', { x: 0.5, y: 6.05, w: 5.8, h: 0.35, fontSize: 10, color: '475569', bold: true });
       } catch { /* skip if unreadable */ }
     }
 

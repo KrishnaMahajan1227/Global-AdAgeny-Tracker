@@ -581,14 +581,8 @@ export default function InstallationReviewPage() {
               mismatch jumps out without leaving this modal. */}
           {reviewModal && (
             <div>
-              <p className="text-xs font-medium text-slate-700 flex items-center gap-1.5 mb-2"><Palette className="w-3.5 h-3.5" /> Design Reference (approved)</p>
-              <DesignReferencePhotos shopId={reviewModal.shop_id} />
-            </div>
-          )}
-          {reviewModal && (
-            <div>
-              <p className="text-xs font-medium text-slate-700 flex items-center gap-1.5 mb-2"><Camera className="w-3.5 h-3.5" /> Installation Photos (submitted)</p>
-              <ReviewProofPhotos jobId={reviewModal.id} onOpenPhoto={setLightbox} />
+              <p className="text-xs font-medium text-slate-700 flex items-center gap-1.5 mb-2"><Palette className="w-3.5 h-3.5" /> Work Item Evidence — Survey → Measurement → Design → Installation</p>
+              <WorkItemEvidenceReview shopId={reviewModal.shop_id} jobId={reviewModal.id} onOpenPhoto={setLightbox} />
             </div>
           )}
 
@@ -783,6 +777,90 @@ function MaterialLoadedSummary({ job, onOpenPhoto }: { job: any; onOpenPhoto: (u
 // Shows before/after/installed proof photos plus GPS, so Admin/Owner can
 // actually see the completed work before approving it. Click any photo to
 // open it full-size.
+function WorkItemEvidenceReview({ shopId, jobId, onOpenPhoto }: { shopId: string; jobId: string; onOpenPhoto: (url: string) => void }) {
+  const { data: workItems } = useQuery({
+    queryKey: ['review-evidence-work-items', shopId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('work_items').select('*').eq('shop_id', shopId).order('created_at');
+      if (error) throw new Error(error.message);
+      return (data || []) as WorkItem[];
+    }, enabled: !!shopId,
+  });
+  const { data: surveyPhotos } = useQuery({
+    queryKey: ['review-evidence-survey-photos', shopId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('survey_photos').select('*').eq('shop_id', shopId).order('created_at');
+      if (error) throw new Error(error.message);
+      return (data || []) as SurveyPhoto[];
+    }, enabled: !!shopId,
+  });
+  const { data: markings } = useQuery({
+    queryKey: ['review-evidence-markings', shopId, surveyPhotos?.length],
+    queryFn: async () => {
+      const ids = (surveyPhotos || []).map(p => p.id); if (!ids.length) return [] as BoardMarking[];
+      const { data, error } = await supabase.from('board_markings').select('*').in('survey_photo_id', ids);
+      if (error) throw new Error(error.message); return (data || []) as BoardMarking[];
+    }, enabled: !!surveyPhotos,
+  });
+  const { data: photoLinks } = useQuery({
+    queryKey: ['review-evidence-photo-links', shopId, surveyPhotos?.length],
+    queryFn: async () => {
+      const ids = (surveyPhotos || []).map(p => p.id); if (!ids.length) return [] as any[];
+      const { data, error } = await supabase.from('survey_photo_items').select('survey_photo_id, work_item_id').in('survey_photo_id', ids);
+      if (error && /survey_photo_items|schema cache|could not find the table/i.test(error.message || '')) return [];
+      if (error) throw new Error(error.message); return data || [];
+    }, enabled: !!surveyPhotos,
+  });
+  const { data: designTasks } = useQuery({
+    queryKey: ['review-evidence-designs', shopId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('design_tasks').select('id, design_versions(*, design_version_items(work_item_id))').eq('shop_id', shopId);
+      if (error) throw new Error(error.message); return data || [];
+    }, enabled: !!shopId,
+  });
+  const { data: proofs } = useQuery({
+    queryKey: ['review-evidence-proofs', jobId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('installation_proofs').select('*').eq('installation_job_id', jobId).order('captured_at');
+      if (error) throw new Error(error.message); return (data || []) as any[];
+    }, enabled: !!jobId,
+  });
+  const items = workItems || [];
+  if (!items.length) return <p className="text-xs text-slate-400">No approved work items found for this shop.</p>;
+  const dim = (it:any) => {
+    const w=it.approved_width ?? it.survey_width, h=it.approved_height ?? it.survey_height, u=it.approved_unit ?? it.survey_unit ?? 'ft';
+    const q=it.approved_quantity ?? it.survey_quantity ?? 1, a=it.approved_area ?? it.survey_area;
+    return `${w ?? '—'} × ${h ?? '—'} ${u} · Qty ${q}${a != null ? ` · ${Number(a).toFixed(2)} sq.ft` : ''}`;
+  };
+  const Photo = ({url,label}:{url?:string|null;label:string}) => url ? (
+    <button onClick={()=>onOpenPhoto(url)} className="group relative overflow-hidden rounded-xl border border-slate-200 bg-slate-50 text-left">
+      <img src={url} alt={label} className="w-full aspect-[4/3] object-contain bg-slate-100" />
+      <span className="absolute left-2 bottom-2 rounded-md bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-white">{label}</span>
+    </button>
+  ) : <div className="aspect-[4/3] rounded-xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center text-[11px] text-slate-400">No {label.toLowerCase()}</div>;
+  return <div className="space-y-3">
+    {items.map((item:any, index:number)=>{
+      const linkedSurvey=(surveyPhotos||[]).filter(p => (photoLinks||[]).some((x:any)=>x.work_item_id===item.id && x.survey_photo_id===p.id) || (markings||[]).some(m=>m.work_item_id===item.id && m.survey_photo_id===p.id));
+      const designs=(designTasks||[]).flatMap((t:any)=>t.design_versions||[]).filter((v:any)=>(v.design_version_items||[]).some((x:any)=>x.work_item_id===item.id)).sort((a:any,b:any)=>(b.version_number||0)-(a.version_number||0));
+      const itemProofs=(proofs||[]).filter((p:any)=>p.work_item_id===item.id);
+      return <div key={item.id} className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 bg-slate-50 border-b border-slate-200">
+          <div><p className="text-[10px] font-bold tracking-[.16em] text-slate-400 uppercase">Work Item {index+1}</p><h4 className="text-sm font-semibold text-slate-900 mt-0.5">{item.work_type_name || 'Work item'}</h4><p className="text-xs text-slate-500 mt-1">{dim(item)}</p></div>
+          <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${itemProofs.length?'bg-emerald-50 text-emerald-700 border border-emerald-200':'bg-amber-50 text-amber-700 border border-amber-200'}`}>{itemProofs.length} installation photo{itemProofs.length===1?'':'s'}</span>
+        </div>
+        <div className="p-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div><p className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-1.5">1 · Survey / Measurement</p><Photo url={linkedSurvey[0]?.photo_url} label="Survey" />{linkedSurvey.length>1&&<p className="text-[10px] text-slate-400 mt-1">+{linkedSurvey.length-1} more survey photo(s)</p>}</div>
+            <div><p className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1.5">2 · Approved Design</p><Photo url={designs[0]?.file_url} label={designs[0] ? `Design v${designs[0].version_number}` : 'Design'} /></div>
+            <div><p className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 mb-1.5">3 · Installed Proof</p>{itemProofs.length?<div className="grid grid-cols-2 gap-2">{itemProofs.map((p:any)=><Photo key={p.id} url={p.photo_url} label={p.angle || 'Installed'} />)}</div>:<Photo label="Installation proof" />}</div>
+          </div>
+        </div>
+      </div>;
+    })}
+    {(proofs||[]).some((p:any)=>!p.work_item_id) && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold text-amber-800">Legacy/unmapped installation photos</p><p className="text-[11px] text-amber-700 mt-0.5">These proofs predate Work Item mapping. They are shown separately and are not silently assigned to a measurement.</p><div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">{(proofs||[]).filter((p:any)=>!p.work_item_id).map((p:any)=><Photo key={p.id} url={p.photo_url} label="Unmapped proof" />)}</div></div>}
+  </div>;
+}
+
 function ReviewProofPhotos({ jobId, onOpenPhoto }: { jobId: string; onOpenPhoto: (url: string) => void }) {
   const { data: photos } = useQuery({
     queryKey: ['review-installation-photos', jobId],

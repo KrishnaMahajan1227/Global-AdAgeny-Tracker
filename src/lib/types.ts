@@ -601,6 +601,7 @@ export interface InstallationProof {
   organization_id: string;
   installation_job_id: string;
   shop_id: string;
+  work_item_id?: string | null;
   storage_path: string;
   photo_url: string;
   photo_type: string;

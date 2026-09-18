@@ -156,7 +156,7 @@ async function fetchShopDetail(shopId: string, designTaskId: string): Promise<Sh
   ]);
   if (markingsRes.error) throw new Error(`Could not load survey markings: ${markingsRes.error.message}`);
   if (versionItemsRes.error) throw new Error(`Could not load design coverage: ${versionItemsRes.error.message}`);
-  if (photoItemsRes.error) throw new Error(`Could not load survey photo coverage: ${photoItemsRes.error.message}`);
+  if (photoItemsRes.error && !/survey_photo_items|schema cache|could not find the table/i.test(photoItemsRes.error.message || '')) throw new Error(`Could not load survey photo coverage: ${photoItemsRes.error.message}`);
 
   return {
     items: (items || []) as WorkItem[],
@@ -164,7 +164,7 @@ async function fetchShopDetail(shopId: string, designTaskId: string): Promise<Sh
     markings: (markingsRes.data || []) as BoardMarking[],
     versions: (versions || []) as DesignVersion[],
     versionItems: (versionItemsRes.data || []) as DesignVersionItem[],
-    photoItems: (photoItemsRes.data || []) as { survey_photo_id: string; work_item_id: string }[],
+    photoItems: (photoItemsRes.error ? [] : (photoItemsRes.data || [])) as { survey_photo_id: string; work_item_id: string }[],
   };
 }
 

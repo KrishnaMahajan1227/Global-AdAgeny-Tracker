@@ -200,8 +200,9 @@ export default function ReportsPage() {
   const { data: surveyPhotoItems } = useQuery({
     queryKey: ['survey-photo-items-reports', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('survey_photo_items').select('survey_photo_id,work_item_id').eq('organization_id', orgId);
-      return data || [];
+      const { data, error } = await supabase.from('survey_photo_items').select('survey_photo_id,work_item_id').eq('organization_id', orgId);
+      if (error && !/survey_photo_items|schema cache|could not find the table/i.test(error.message || '')) throw error;
+      return error ? [] : (data || []);
     },
     enabled: !!orgId,
   });

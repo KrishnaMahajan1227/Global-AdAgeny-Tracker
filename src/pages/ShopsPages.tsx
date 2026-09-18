@@ -2832,12 +2832,15 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const [surveyPhotoCaption, setSurveyPhotoCaption] = useState('');
   const [surveyPhotoType, setSurveyPhotoType] = useState('survey');
   const [surveyPhotoSurveyId, setSurveyPhotoSurveyId] = useState('');
+  // When upload is launched from a Work Item, lock every selected file to that item. Bulk upload leaves this null.
+  const [surveyPhotoTargetItemId, setSurveyPhotoTargetItemId] = useState<string | null>(null);
   const [designUploadOpen, setDesignUploadOpen] = useState(false);
   const [designUploadFiles, setDesignUploadFiles] = useState<File[]>([]);
   const [designUploadItemIds, setDesignUploadItemIds] = useState<Set<string>>(new Set());
   // Exact per-file mapping. A multi-file selection is never collapsed into one upload.
   const [designUploadFileMap, setDesignUploadFileMap] = useState<Record<number, string>>({});
   const [designUploadNotes, setDesignUploadNotes] = useState('');
+  const [designUploadTargetItemId, setDesignUploadTargetItemId] = useState<string | null>(null);
 
   // ---- BACKFILL (Owner/Admin entering work already completed outside
   // the app — survey/design/production done on paper or another system,
@@ -3001,8 +3004,16 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           if (dbErr) { await supabase.storage.from('survey-photos').remove([path]); throw dbErr; }
           const mappedWorkItemId = surveyPhotoFileMap[i];
           if (mappedWorkItemId) {
+            // Prefer the semantic link table when the migration is deployed. For older deployments,
+            // gracefully fall back to an empty board_marking link so uploads never fail just because
+            // PostgREST has not refreshed / the migration has not been applied yet.
             const { error: linkErr } = await supabase.from('survey_photo_items').insert({ organization_id: orgId, survey_photo_id: photo.id, work_item_id: mappedWorkItemId });
-            if (linkErr) throw linkErr;
+            if (linkErr) {
+              const missingRelation = /survey_photo_items|schema cache|could not find the table/i.test(linkErr.message || '');
+              if (!missingRelation) throw linkErr;
+              const { error: fallbackErr } = await supabase.from('board_markings').insert({ organization_id: orgId, survey_photo_id: photo.id, work_item_id: mappedWorkItemId, points: [] });
+              if (fallbackErr) throw fallbackErr;
+            }
           }
           successCount++;
         } catch (err: any) { failures.push(`Photo ${i + 1} (${file.name}): ${err?.message || 'upload failed'}`); }
@@ -3014,7 +3025,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         queryClient.invalidateQueries({ queryKey: ['shop-surveys', shopId] }),
       ]);
       if (failures.length) throw new Error(`${successCount} of ${surveyPhotoUploadFiles.length} uploaded. ${failures.join(' | ')}`);
-      setSurveyPhotoUploadFiles([]); setSurveyPhotoItemIds(new Set()); setSurveyPhotoFileMap({}); setSurveyPhotoCaption(''); setSurveyPhotoSurveyId(''); setSurveyPhotoUploadOpen(false);
+      setSurveyPhotoUploadFiles([]); setSurveyPhotoItemIds(new Set()); setSurveyPhotoFileMap({}); setSurveyPhotoCaption(''); setSurveyPhotoSurveyId(''); setSurveyPhotoTargetItemId(null); setSurveyPhotoUploadOpen(false);
     } finally { setPhotoUploading(false); }
   };
   const deleteDetailPhoto = async (photo: SurveyPhoto) => {
@@ -3030,7 +3041,10 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       const photoIds = (surveyPhotos || []).map((p) => p.id);
       if (!photoIds.length) return [] as { survey_photo_id: string; work_item_id: string }[];
       const { data, error } = await supabase.from('survey_photo_items').select('survey_photo_id,work_item_id').in('survey_photo_id', photoIds);
-      if (error) throw error;
+      if (error) {
+        if (/survey_photo_items|schema cache|could not find the table/i.test(error.message || '')) return [] as { survey_photo_id: string; work_item_id: string }[];
+        throw error;
+      }
       return (data || []) as { survey_photo_id: string; work_item_id: string }[];
     },
     enabled: !!surveyPhotos,
@@ -3385,7 +3399,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['shop-design-tasks', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
-      setDesignUploadOpen(false); setDesignUploadFiles([]); setDesignUploadItemIds(new Set()); setDesignUploadFileMap({}); setDesignUploadNotes('');
+      setDesignUploadOpen(false); setDesignUploadTargetItemId(null); setDesignUploadFiles([]); setDesignUploadItemIds(new Set()); setDesignUploadFileMap({}); setDesignUploadNotes('');
     },
   });
 
@@ -3721,7 +3735,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         <Card className="p-4 lg:col-span-2">
           <div className="flex items-center justify-between mb-3"><h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
             <Ruler className="w-5 h-5 text-blue-600" /> Work Items ({workItems?.length || 0})
-          </h2>{canCrudShop && <button onClick={() => { setEditWorkItem({ id: '__new__' } as WorkItem); setWorkItemForm({ work_type_name: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }); }} className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 border border-blue-200 bg-blue-50 px-2.5 py-1.5 rounded-lg"><Plus className="w-3.5 h-3.5" /> Add item</button>}</div>
+          </h2>{canCrudShop && <div className="flex flex-wrap items-center gap-2"><button onClick={() => { setSurveyPhotoTargetItemId(null); setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 border border-blue-200 bg-blue-50 px-2.5 py-1.5 rounded-lg"><UploadCloud className="w-3.5 h-3.5" /> Bulk survey</button><button onClick={() => { setDesignUploadTargetItemId(null); setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set()); setDesignUploadOpen(true); }} className="inline-flex items-center gap-1 text-xs font-medium text-violet-700 border border-violet-200 bg-violet-50 px-2.5 py-1.5 rounded-lg"><Palette className="w-3.5 h-3.5" /> Bulk designs</button><button onClick={() => { setEditWorkItem({ id: '__new__' } as WorkItem); setWorkItemForm({ work_type_name: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }); }} className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 border border-blue-200 bg-blue-50 px-2.5 py-1.5 rounded-lg"><Plus className="w-3.5 h-3.5" /> Add item</button></div>}</div>
           {workItems && workItems.length > 0 ? (
             <div className="space-y-3">
               {workItems.map((item) => (
@@ -3749,7 +3763,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                     const installForItem = (installations || []).flatMap((inst: any) => (inst.installation_proofs || []).filter((proof: any) => proof.work_item_id === item.id));
                     const Thumb = ({ src, label, href }: { src: string; label: string; href?: string }) => <a href={href || src} target="_blank" rel="noreferrer" className="group relative shrink-0 block" title="Hover to preview · click to open"><img src={src} className="w-16 h-16 rounded-lg object-cover border border-slate-200 shadow-sm"/><span className="absolute bottom-1 left-1 bg-black/65 text-white text-[9px] px-1.5 py-0.5 rounded">{label}</span><div className="hidden group-hover:flex fixed inset-0 z-[120] pointer-events-none items-center justify-center bg-slate-950/75 p-10"><div className="max-w-[90vw] max-h-[88vh] rounded-xl overflow-hidden shadow-2xl bg-white p-2"><img src={src} className="max-w-[88vw] max-h-[84vh] object-contain"/></div></div></a>;
                     return <div className="mt-4 pt-4 border-t border-slate-200">
-                      <div className="flex items-center justify-between mb-3"><p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Complete evidence · this work item</p><div className="flex gap-2">{canCrudShop && <><button onClick={() => { setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700">+ Survey photos</button><button onClick={() => { setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set([item.id])); setDesignUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-violet-200 bg-violet-50 text-violet-700">+ Designs</button></>}</div></div>
+                      <div className="flex items-center justify-between mb-3"><p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Complete evidence · this work item</p><div className="flex gap-2">{canCrudShop && <><button onClick={() => { setSurveyPhotoTargetItemId(item.id); setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700">+ Survey photos</button><button onClick={() => { setDesignUploadTargetItemId(item.id); setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set([item.id])); setDesignUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-violet-200 bg-violet-50 text-violet-700">+ Designs</button></>}</div></div>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                         <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-blue-800">SURVEY / BEFORE</p><span className="text-[10px] text-blue-600">{surveyForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`S${i+1}`} />) : <span className="text-xs text-slate-400 py-5">No mapped survey photo</span>}</div></div>
                         <div className="rounded-lg bg-violet-50/50 border border-violet-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-violet-800">DESIGN / ARTWORK</p><span className="text-[10px] text-violet-600">{designForItem.length} file(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{designForItem.length ? designForItem.map((v:any)=> v.file_url?.match(/\.(png|jpe?g|webp|gif)(\?|$)/i) ? <Thumb key={v.id} src={v.file_url} label={`v${v.version_number}`} /> : <a key={v.id} href={v.file_url} target="_blank" rel="noreferrer" className="w-16 h-16 rounded-lg border border-violet-200 bg-white text-violet-700 flex flex-col items-center justify-center text-[10px] font-semibold shrink-0"><Palette className="w-4 h-4 mb-1"/>v{v.version_number}</a>) : <span className="text-xs text-slate-400 py-5">No mapped design</span>}</div></div>
@@ -3845,11 +3859,11 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       <Modal open={surveyPhotoUploadOpen} onClose={() => setSurveyPhotoUploadOpen(false)} title="Upload Survey Photos · Link to Board" size="lg">
         <div className="space-y-4">
           <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-            Link each uploaded survey photo to the exact work item / measurement it documents. This keeps Survey → Board → Measurement → Design mapping unambiguous for review and exports.
+            {surveyPhotoTargetItemId ? <>These photos will be attached directly to <b>{(() => { const x=(workItems||[]).find(w=>w.id===surveyPhotoTargetItemId); return `${x?.work_type_name || 'this work item'} · ${x?.approved_width ?? x?.survey_width ?? '—'} × ${x?.approved_height ?? x?.survey_height ?? '—'} ${x?.approved_unit || x?.survey_unit || ''}`; })()}</b>. No re-selection is required.</> : <>Bulk mode: map each uploaded survey photo to the exact work item / measurement it documents.</>}
           </div>
           <label className="flex cursor-pointer items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-lg py-5 text-sm text-slate-600 hover:border-blue-400">
             <UploadCloud className="w-5 h-5" /> {surveyPhotoUploadFiles.length ? `${surveyPhotoUploadFiles.length} photo(s) selected` : 'Choose survey photos'}
-            <input type="file" multiple className="hidden" accept="image/*" onChange={(e) => setSurveyPhotoUploadFiles(Array.from(e.target.files || []))} />
+            <input type="file" multiple className="hidden" accept="image/*" onChange={(e) => { const files = Array.from(e.target.files || []); setSurveyPhotoUploadFiles(files); setSurveyPhotoFileMap(surveyPhotoTargetItemId ? Object.fromEntries(files.map((_, i) => [i, surveyPhotoTargetItemId])) : {}); }} />
           </label>
           {(surveys || []).length > 0 && <div><label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Survey record</label><select value={surveyPhotoSurveyId} onChange={(e) => setSurveyPhotoSurveyId(e.target.value)} className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"><option value="">Latest survey</option>{(surveys || []).map((sr: any) => <option key={sr.id} value={sr.id}>{sr.profiles?.full_name || 'Survey'} · {sr.submitted_at ? new Date(sr.submitted_at).toLocaleDateString('en-IN') : 'Draft'}</option>)}</select></div>}
           <div className="grid grid-cols-2 gap-3"><div><label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Photo type</label><select value={surveyPhotoType} onChange={(e) => setSurveyPhotoType(e.target.value)} className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"><option value="survey">Survey / Board</option><option value="shop_front">Shop Front</option><option value="interior">Interior</option><option value="other">Other</option><option value="marked">Marked</option></select></div><Input label="Caption / reference" value={surveyPhotoCaption} onChange={setSurveyPhotoCaption} /></div>
@@ -3860,10 +3874,10 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
               {surveyPhotoUploadFiles.map((file, photoIndex) => <div key={`${file.name}-${photoIndex}`} className="p-3 grid grid-cols-[56px_1fr] gap-3 items-center">
                 <div className="w-14 h-14 rounded-lg bg-slate-100 overflow-hidden flex items-center justify-center text-xs font-bold text-slate-500">{file.type.startsWith('image/') ? <img src={URL.createObjectURL(file)} className="w-full h-full object-cover" /> : `#${photoIndex + 1}`}</div>
                 <div className="min-w-0"><div className="flex items-center gap-2 mb-1"><span className="text-xs font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded">Photo {photoIndex + 1}</span><span className="text-xs text-slate-500 truncate">{file.name}</span></div>
-                  <select value={surveyPhotoFileMap[photoIndex] || ''} onChange={(e) => setSurveyPhotoFileMap((prev) => ({ ...prev, [photoIndex]: e.target.value }))} className="w-full border border-slate-300 rounded-lg px-2.5 py-2 text-sm bg-white">
+                  {surveyPhotoTargetItemId ? <div className="w-full border border-blue-200 bg-blue-50 rounded-lg px-2.5 py-2 text-sm text-blue-800 font-medium">Automatically linked to this Work Item</div> : <select value={surveyPhotoFileMap[photoIndex] || ''} onChange={(e) => setSurveyPhotoFileMap((prev) => ({ ...prev, [photoIndex]: e.target.value }))} className="w-full border border-slate-300 rounded-lg px-2.5 py-2 text-sm bg-white">
                     <option value="">Select exact board / measurement...</option>
                     {(workItems || []).map((item, index) => <option key={item.id} value={item.id}>Board {index + 1} · {item.work_type_name || 'Work Item'} · {item.approved_width ?? item.survey_width ?? '—'} × {item.approved_height ?? item.survey_height ?? '—'} {item.approved_unit || item.survey_unit || ''} · Qty {item.approved_quantity ?? item.survey_quantity ?? 1}</option>)}
-                  </select>
+                  </select>}
                 </div>
               </div>)}
             </div>
@@ -3874,9 +3888,9 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
 
       <Modal open={designUploadOpen} onClose={() => setDesignUploadOpen(false)} title="Upload Designs · Map Every File" size="lg">
         <div className="space-y-4">
-          <div className="rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm text-violet-900">Select all files once. They stay in the exact browser selection order below. Map <b>each file</b> to its own Work Item / measurement; every selected file is processed independently.</div>
-          <label className="flex cursor-pointer items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-lg py-5 text-sm text-slate-600 hover:border-violet-400"><UploadCloud className="w-5 h-5" /> {designUploadFiles.length ? `${designUploadFiles.length} file(s) selected` : 'Choose multiple design files'}<input type="file" multiple className="hidden" accept="image/*,.pdf,.ai,.eps,.svg,.cdr" onChange={(e) => { const files=Array.from(e.target.files || []); setDesignUploadFiles(files); const preset=Array.from(designUploadItemIds)[0]; setDesignUploadFileMap(Object.fromEntries(files.map((_,i)=>[i,preset || '']))); }} /></label>
-          {designUploadFiles.length > 0 && <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">{designUploadFiles.map((file,i)=><div key={`${file.name}-${i}`} className="grid grid-cols-[44px_1fr] sm:grid-cols-[44px_1fr_1.3fr] gap-2 items-center border rounded-lg p-2 bg-white"><div className="w-10 h-10 rounded bg-violet-100 text-violet-700 flex items-center justify-center font-bold text-xs">D{i+1}</div><div className="min-w-0"><p className="text-xs font-medium truncate">{file.name}</p><p className="text-[10px] text-slate-400">{(file.size/1024/1024).toFixed(1)} MB</p></div><select value={designUploadFileMap[i] || ''} onChange={(e)=>setDesignUploadFileMap(prev=>({...prev,[i]:e.target.value}))} className="col-span-2 sm:col-span-1 w-full px-2 py-2 text-xs border rounded-lg bg-white"><option value="">Select exact work item...</option>{(workItems||[]).map((item,index)=><option key={item.id} value={item.id}>#{index+1} · {item.work_type_name || 'Work Item'} · {item.approved_width ?? item.survey_width ?? '—'} × {item.approved_height ?? item.survey_height ?? '—'} {item.approved_unit || item.survey_unit || ''}</option>)}</select></div>)}</div>}
+          <div className="rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm text-violet-900">{designUploadTargetItemId ? <>Every selected design will be attached directly to <b>{(() => { const x=(workItems||[]).find(w=>w.id===designUploadTargetItemId); return `${x?.work_type_name || 'this work item'} · ${x?.approved_width ?? x?.survey_width ?? '—'} × ${x?.approved_height ?? x?.survey_height ?? '—'} ${x?.approved_unit || x?.survey_unit || ''}`; })()}</b>. No board selection is required.</> : <>Bulk mode: select all files once and map each design to its exact Work Item / measurement.</>}</div>
+          <label className="flex cursor-pointer items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-lg py-5 text-sm text-slate-600 hover:border-violet-400"><UploadCloud className="w-5 h-5" /> {designUploadFiles.length ? `${designUploadFiles.length} file(s) selected` : 'Choose multiple design files'}<input type="file" multiple className="hidden" accept="image/*,.pdf,.ai,.eps,.svg,.cdr" onChange={(e) => { const files=Array.from(e.target.files || []); setDesignUploadFiles(files); const preset=designUploadTargetItemId || Array.from(designUploadItemIds)[0]; setDesignUploadFileMap(Object.fromEntries(files.map((_,i)=>[i,preset || '']))); }} /></label>
+          {designUploadFiles.length > 0 && <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">{designUploadFiles.map((file,i)=><div key={`${file.name}-${i}`} className="grid grid-cols-[44px_1fr] sm:grid-cols-[44px_1fr_1.3fr] gap-2 items-center border rounded-lg p-2 bg-white"><div className="w-10 h-10 rounded bg-violet-100 text-violet-700 flex items-center justify-center font-bold text-xs">D{i+1}</div><div className="min-w-0"><p className="text-xs font-medium truncate">{file.name}</p><p className="text-[10px] text-slate-400">{(file.size/1024/1024).toFixed(1)} MB</p></div>{designUploadTargetItemId ? <div className="col-span-2 sm:col-span-1 w-full px-2 py-2 text-xs border border-violet-200 rounded-lg bg-violet-50 text-violet-800 font-medium">Automatically linked to this Work Item</div> : <select value={designUploadFileMap[i] || ''} onChange={(e)=>setDesignUploadFileMap(prev=>({...prev,[i]:e.target.value}))} className="col-span-2 sm:col-span-1 w-full px-2 py-2 text-xs border rounded-lg bg-white"><option value="">Select exact work item...</option>{(workItems||[]).map((item,index)=><option key={item.id} value={item.id}>#{index+1} · {item.work_type_name || 'Work Item'} · {item.approved_width ?? item.survey_width ?? '—'} × {item.approved_height ?? item.survey_height ?? '—'} {item.approved_unit || item.survey_unit || ''}</option>)}</select>}</div>)}</div>}
           <Textarea label="Design notes (optional)" value={designUploadNotes} onChange={setDesignUploadNotes} rows={2} />
           {uploadDesignMutation.isError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(uploadDesignMutation.error as Error).message}</p>}
           <button onClick={() => uploadDesignMutation.mutate()} disabled={uploadDesignMutation.isPending || !designUploadFiles.length || ((workItems?.length || 0)>0 && designUploadFiles.some((_,i)=>!designUploadFileMap[i]))} className="w-full bg-violet-600 hover:bg-violet-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{uploadDesignMutation.isPending ? `Uploading all ${designUploadFiles.length} files...` : `Upload all ${designUploadFiles.length} mapped design${designUploadFiles.length===1?'':'s'}`}</button>

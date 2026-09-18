@@ -2835,6 +2835,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const [designUploadOpen, setDesignUploadOpen] = useState(false);
   const [designUploadFiles, setDesignUploadFiles] = useState<File[]>([]);
   const [designUploadItemIds, setDesignUploadItemIds] = useState<Set<string>>(new Set());
+  // Exact per-file mapping. A multi-file selection is never collapsed into one upload.
+  const [designUploadFileMap, setDesignUploadFileMap] = useState<Record<number, string>>({});
   const [designUploadNotes, setDesignUploadNotes] = useState('');
 
   // ---- BACKFILL (Owner/Admin entering work already completed outside
@@ -2975,32 +2977,43 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     if (!surveyPhotoUploadFiles.length || !orgId || !profile?.id) return;
     if ((workItems?.length || 0) > 0) {
       const missing = surveyPhotoUploadFiles.findIndex((_, i) => !surveyPhotoFileMap[i]);
-      if (missing >= 0) throw new Error(`Map Photo ${missing + 1} to its exact board / measurement before uploading.`);
+      if (missing >= 0) throw new Error(`Map Photo ${missing + 1} to its exact work item before uploading.`);
     }
     setPhotoUploading(true);
+    const failures: string[] = [];
+    let successCount = 0;
     try {
       let surveyId = surveyPhotoSurveyId || (surveys?.[0]?.id as string | undefined);
       if (!surveyId) {
         const { data: sr, error } = await supabase.from('surveys').insert({ organization_id: orgId, shop_id: shopId, surveyor_id: profile.id, status: 'draft', notes: 'Created from Shop Detail photo manager', submitted_at: null }).select('id').single();
         if (error) throw error; surveyId = sr.id;
       }
+      // Intentionally process every selected file independently. One failed file must not stop the remaining queue.
       for (let i = 0; i < surveyPhotoUploadFiles.length; i++) {
         const file = surveyPhotoUploadFiles[i];
-        const path = `${orgId}/${surveyId}/${Date.now()}-${i}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-        const { error: upErr } = await supabase.storage.from('survey-photos').upload(path, file); if (upErr) throw upErr;
-        const { data: u } = supabase.storage.from('survey-photos').getPublicUrl(path);
-        const { data: photo, error: dbErr } = await supabase.from('survey_photos').insert({ organization_id: orgId, survey_id: surveyId, shop_id: shopId, storage_path: path, photo_url: u.publicUrl, photo_type: surveyPhotoType, caption: surveyPhotoCaption.trim() || 'Survey photo uploaded by Owner/Admin' }).select('id').single();
-        if (dbErr) throw dbErr;
-        const mappedWorkItemId = surveyPhotoFileMap[i];
-        if (mappedWorkItemId) {
-          const { error: linkErr } = await supabase.from('survey_photo_items').insert({ organization_id: orgId, survey_photo_id: photo.id, work_item_id: mappedWorkItemId });
-          if (linkErr) throw new Error(`Photo ${i + 1} uploaded, but its board mapping could not be saved: ${linkErr.message}`);
-        }
+        try {
+          const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          const path = `${orgId}/${surveyId}/${Date.now()}-${crypto.randomUUID()}-${i + 1}-${safeName}`;
+          const { error: upErr } = await supabase.storage.from('survey-photos').upload(path, file);
+          if (upErr) throw upErr;
+          const { data: u } = supabase.storage.from('survey-photos').getPublicUrl(path);
+          const { data: photo, error: dbErr } = await supabase.from('survey_photos').insert({ organization_id: orgId, survey_id: surveyId, shop_id: shopId, storage_path: path, photo_url: u.publicUrl, photo_type: surveyPhotoType, caption: surveyPhotoCaption.trim() || `Survey photo ${i + 1}` }).select('id').single();
+          if (dbErr) { await supabase.storage.from('survey-photos').remove([path]); throw dbErr; }
+          const mappedWorkItemId = surveyPhotoFileMap[i];
+          if (mappedWorkItemId) {
+            const { error: linkErr } = await supabase.from('survey_photo_items').insert({ organization_id: orgId, survey_photo_id: photo.id, work_item_id: mappedWorkItemId });
+            if (linkErr) throw linkErr;
+          }
+          successCount++;
+        } catch (err: any) { failures.push(`Photo ${i + 1} (${file.name}): ${err?.message || 'upload failed'}`); }
       }
-      await logAudit('survey_photos', null, 'upload', null, null, null, `Uploaded ${surveyPhotoUploadFiles.length} survey photo(s) for ${shop?.name || 'shop'} with ordered one-to-one board mapping`);
-      queryClient.invalidateQueries({ queryKey: ['shop-survey-photos', shopId] });
-      queryClient.invalidateQueries({ queryKey: ['shop-survey-photo-items', shopId] });
-      queryClient.invalidateQueries({ queryKey: ['shop-surveys', shopId] });
+      await logAudit('survey_photos', null, 'upload', null, null, null, `Survey photo batch: ${successCount}/${surveyPhotoUploadFiles.length} uploaded for ${shop?.name || 'shop'}`);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['shop-survey-photos', shopId] }),
+        queryClient.invalidateQueries({ queryKey: ['shop-survey-photo-items', shopId] }),
+        queryClient.invalidateQueries({ queryKey: ['shop-surveys', shopId] }),
+      ]);
+      if (failures.length) throw new Error(`${successCount} of ${surveyPhotoUploadFiles.length} uploaded. ${failures.join(' | ')}`);
       setSurveyPhotoUploadFiles([]); setSurveyPhotoItemIds(new Set()); setSurveyPhotoFileMap({}); setSurveyPhotoCaption(''); setSurveyPhotoSurveyId(''); setSurveyPhotoUploadOpen(false);
     } finally { setPhotoUploading(false); }
   };
@@ -3334,43 +3347,45 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     mutationFn: async () => {
       if (!profile?.id || !orgId) throw new Error('You must be signed in.');
       if (designUploadFiles.length === 0) throw new Error('Choose at least one design file.');
-      if ((workItems?.length || 0) > 0 && designUploadItemIds.size === 0) throw new Error('Select the board/measurement this design belongs to.');
-
+      if ((workItems?.length || 0) > 0) {
+        const missing = designUploadFiles.findIndex((_, i) => !designUploadFileMap[i]);
+        if (missing >= 0) throw new Error(`Map Design ${missing + 1} to its exact work item before uploading.`);
+      }
       let task = designTasks?.[0];
       if (!task) {
         const { data, error } = await supabase.from('design_tasks').insert({ organization_id: orgId, shop_id: shopId, status: 'designing' }).select('*').single();
-        if (error) throw new Error(`Could not create design task: ${error.message}`);
-        task = data;
+        if (error) throw new Error(`Could not create design task: ${error.message}`); task = data;
       }
       const startVersion = task.design_versions?.length || 0;
+      const failures: string[] = []; let successCount = 0;
       for (let i = 0; i < designUploadFiles.length; i++) {
         const file = designUploadFiles[i];
-        const versionNumber = startVersion + i + 1;
-        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const path = `${orgId}/${task.id}/v${versionNumber}-${Date.now()}-${safeName}`;
-        const { error: storageError } = await supabase.storage.from('design-files').upload(path, file);
-        if (storageError) throw new Error(`Could not upload ${file.name}: ${storageError.message}`);
-        const { data: urlData } = supabase.storage.from('design-files').getPublicUrl(path);
-        const { data: version, error: versionError } = await supabase.from('design_versions').insert({
-          organization_id: orgId, design_task_id: task.id, version_number: versionNumber,
-          storage_path: path, file_url: urlData.publicUrl, file_name: file.name,
-          uploaded_by: profile.id, notes: designUploadNotes || null, status: 'uploaded', source: 'admin'
-        }).select('id').single();
-        if (versionError) throw new Error(`Could not save ${file.name}: ${versionError.message}`);
-        if (designUploadItemIds.size > 0) {
-          const links = Array.from(designUploadItemIds).map((workItemId) => ({ organization_id: orgId, design_version_id: version.id, work_item_id: workItemId }));
-          const { error: linkError } = await supabase.from('design_version_items').insert(links);
-          if (linkError) throw new Error(`Could not link design to board: ${linkError.message}`);
-        }
+        try {
+          const versionNumber = startVersion + i + 1;
+          const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          const path = `${orgId}/${task.id}/v${versionNumber}-${crypto.randomUUID()}-${safeName}`;
+          const { error: storageError } = await supabase.storage.from('design-files').upload(path, file);
+          if (storageError) throw storageError;
+          const { data: urlData } = supabase.storage.from('design-files').getPublicUrl(path);
+          const { data: version, error: versionError } = await supabase.from('design_versions').insert({ organization_id: orgId, design_task_id: task.id, version_number: versionNumber, storage_path: path, file_url: urlData.publicUrl, file_name: file.name, uploaded_by: profile.id, notes: designUploadNotes || null, status: 'uploaded', source: 'admin' }).select('id').single();
+          if (versionError) { await supabase.storage.from('design-files').remove([path]); throw versionError; }
+          const workItemId = designUploadFileMap[i];
+          if (workItemId) {
+            const { error: linkError } = await supabase.from('design_version_items').insert({ organization_id: orgId, design_version_id: version.id, work_item_id: workItemId });
+            if (linkError) throw linkError;
+            await supabase.from('work_items').update({ status: 'designed' }).eq('id', workItemId).in('status', ['approved', 'designing']);
+          }
+          successCount++;
+        } catch (err: any) { failures.push(`Design ${i + 1} (${file.name}): ${err?.message || 'upload failed'}`); }
       }
-      if (designUploadItemIds.size > 0) await supabase.from('work_items').update({ status: 'designed' }).in('id', Array.from(designUploadItemIds)).in('status', ['approved', 'designing']);
-      await supabase.from('design_tasks').update({ status: 'design_ready' }).eq('id', task.id);
-      await logAudit('design_versions', null, 'upload', null, null, null, `Uploaded ${designUploadFiles.length} design file(s) for ${shop?.name || 'shop'} linked to ${designUploadItemIds.size} board(s)`);
+      if (successCount) await supabase.from('design_tasks').update({ status: 'design_ready' }).eq('id', task.id);
+      await logAudit('design_versions', null, 'upload', null, null, null, `Design batch: ${successCount}/${designUploadFiles.length} uploaded for ${shop?.name || 'shop'}`);
+      if (failures.length) throw new Error(`${successCount} of ${designUploadFiles.length} uploaded. ${failures.join(' | ')}`);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['shop-design-tasks', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
-      setDesignUploadOpen(false); setDesignUploadFiles([]); setDesignUploadItemIds(new Set()); setDesignUploadNotes('');
+      setDesignUploadOpen(false); setDesignUploadFiles([]); setDesignUploadItemIds(new Set()); setDesignUploadFileMap({}); setDesignUploadNotes('');
     },
   });
 
@@ -3703,8 +3718,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         )}
 
         {/* Work Items */}
-        <Card className="p-4 max-h-[520px] overflow-y-auto">
-          <div className="flex items-center justify-between mb-3 sticky top-0 bg-white z-10 pb-2"><h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
+        <Card className="p-4 lg:col-span-2">
+          <div className="flex items-center justify-between mb-3"><h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
             <Ruler className="w-5 h-5 text-blue-600" /> Work Items ({workItems?.length || 0})
           </h2>{canCrudShop && <button onClick={() => { setEditWorkItem({ id: '__new__' } as WorkItem); setWorkItemForm({ work_type_name: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }); }} className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 border border-blue-200 bg-blue-50 px-2.5 py-1.5 rounded-lg"><Plus className="w-3.5 h-3.5" /> Add item</button>}</div>
           {workItems && workItems.length > 0 ? (
@@ -3732,11 +3747,15 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                     const surveyForItem = (surveyPhotos || []).filter((p) => (surveyPhotoItems || []).some((x) => x.survey_photo_id === p.id && x.work_item_id === item.id) || (boardMarkings || []).some((m) => m.survey_photo_id === p.id && m.work_item_id === item.id));
                     const designForItem = (designTasks || []).flatMap((d: any) => (d.design_versions || []).filter((v: any) => (v.design_version_items || []).some((x: any) => x.work_item_id === item.id)));
                     const installForItem = (installations || []).flatMap((inst: any) => (inst.installation_proofs || []).filter((proof: any) => proof.work_item_id === item.id));
-                    return <div className="mt-3 pt-3 border-t border-slate-100"><p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">Evidence for this measurement</p><div className="grid grid-cols-3 gap-2">
-                      <div><p className="text-[10px] text-slate-400 mb-1">Survey</p><div className="flex gap-1 overflow-x-auto">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><a key={p.id} href={p.photo_url} target="_blank" rel="noreferrer" className="shrink-0 relative"><img src={p.photo_url} className="w-12 h-12 rounded object-cover border"/><span className="absolute bottom-0 left-0 bg-black/60 text-white text-[8px] px-1">S{i+1}</span></a>) : <span className="text-[10px] text-slate-400">—</span>}</div></div>
-                      <div><p className="text-[10px] text-slate-400 mb-1">Design</p><div className="flex gap-1 overflow-x-auto">{designForItem.length ? designForItem.map((v:any)=><a key={v.id} href={v.file_url} target="_blank" rel="noreferrer" className="w-12 h-12 rounded border bg-violet-50 text-violet-700 flex items-center justify-center text-[9px] font-semibold shrink-0">v{v.version_number}</a>) : <span className="text-[10px] text-slate-400">—</span>}</div></div>
-                      <div><p className="text-[10px] text-slate-400 mb-1">Installed</p><div className="flex gap-1 overflow-x-auto">{installForItem.length ? installForItem.map((p:any, i:number)=><a key={p.id} href={p.photo_url} target="_blank" rel="noreferrer" className="shrink-0 relative"><img src={p.photo_url} className="w-12 h-12 rounded object-cover border"/><span className="absolute bottom-0 left-0 bg-black/60 text-white text-[8px] px-1">I{i+1}</span></a>) : <span className="text-[10px] text-slate-400">Not mapped</span>}</div></div>
-                    </div></div>;
+                    const Thumb = ({ src, label, href }: { src: string; label: string; href?: string }) => <a href={href || src} target="_blank" rel="noreferrer" className="group relative shrink-0 block" title="Hover to preview · click to open"><img src={src} className="w-16 h-16 rounded-lg object-cover border border-slate-200 shadow-sm"/><span className="absolute bottom-1 left-1 bg-black/65 text-white text-[9px] px-1.5 py-0.5 rounded">{label}</span><div className="hidden group-hover:flex fixed inset-0 z-[120] pointer-events-none items-center justify-center bg-slate-950/75 p-10"><div className="max-w-[90vw] max-h-[88vh] rounded-xl overflow-hidden shadow-2xl bg-white p-2"><img src={src} className="max-w-[88vw] max-h-[84vh] object-contain"/></div></div></a>;
+                    return <div className="mt-4 pt-4 border-t border-slate-200">
+                      <div className="flex items-center justify-between mb-3"><p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Complete evidence · this work item</p><div className="flex gap-2">{canCrudShop && <><button onClick={() => { setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700">+ Survey photos</button><button onClick={() => { setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set([item.id])); setDesignUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-violet-200 bg-violet-50 text-violet-700">+ Designs</button></>}</div></div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-blue-800">SURVEY / BEFORE</p><span className="text-[10px] text-blue-600">{surveyForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`S${i+1}`} />) : <span className="text-xs text-slate-400 py-5">No mapped survey photo</span>}</div></div>
+                        <div className="rounded-lg bg-violet-50/50 border border-violet-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-violet-800">DESIGN / ARTWORK</p><span className="text-[10px] text-violet-600">{designForItem.length} file(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{designForItem.length ? designForItem.map((v:any)=> v.file_url?.match(/\.(png|jpe?g|webp|gif)(\?|$)/i) ? <Thumb key={v.id} src={v.file_url} label={`v${v.version_number}`} /> : <a key={v.id} href={v.file_url} target="_blank" rel="noreferrer" className="w-16 h-16 rounded-lg border border-violet-200 bg-white text-violet-700 flex flex-col items-center justify-center text-[10px] font-semibold shrink-0"><Palette className="w-4 h-4 mb-1"/>v{v.version_number}</a>) : <span className="text-xs text-slate-400 py-5">No mapped design</span>}</div></div>
+                        <div className="rounded-lg bg-emerald-50/50 border border-emerald-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-emerald-800">INSTALLATION / AFTER</p><span className="text-[10px] text-emerald-600">{installForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{installForItem.length ? installForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`I${i+1}`} />) : <span className="text-xs text-slate-400 py-5">No mapped installation proof</span>}</div></div>
+                      </div>
+                    </div>;
                   })()}
                   {item.material && <p className="text-xs text-slate-500 mt-2 pt-2 border-t border-slate-100">Material: {item.material}</p>}
                   {(item.approved_notes || item.survey_notes) && (
@@ -3787,181 +3806,6 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           ) : <p className="text-sm text-slate-400">No work items yet</p>}
         </Card>
 
-        {/* Surveys */}
-        <Card className="p-4 max-h-[480px] overflow-y-auto">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
-            <FileText className="w-5 h-5 text-blue-600" /> Surveys
-          </h2>
-          {surveys && surveys.length > 0 ? (
-            <div className="space-y-3">
-              {surveys.map((s) => (
-                <div key={s.id} className="border border-slate-200 rounded-lg p-3 text-sm">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-medium text-slate-900">{s.profiles?.full_name || 'Unknown'}</span>
-                    <StatusBadge status={s.status} />
-                  </div>
-                  <p className="text-xs text-slate-500">Submitted: {s.submitted_at ? new Date(s.submitted_at).toLocaleString('en-IN') : 'Draft'}</p>
-                  {s.reviewed_at && <p className="text-xs text-slate-500">Reviewed: {new Date(s.reviewed_at).toLocaleString('en-IN')}</p>}
-                  {s.gps_lat && <p className="text-xs text-slate-500">GPS: {s.gps_lat.toFixed(4)}, {s.gps_lng?.toFixed(4)}{s.gps_accuracy ? ` (±${Math.round(s.gps_accuracy)}m)` : ''}</p>}
-                  {s.notes && <p className="text-xs text-slate-500 mt-1">Notes: {s.notes}</p>}
-                  {s.review_note && (
-                    <p className={`text-xs mt-1 rounded px-2 py-1 ${s.status === 'rejected' || s.status === 'correction_requested' ? 'text-amber-700 bg-amber-50 border border-amber-100' : 'text-slate-600 bg-slate-50'}`}>
-                      Review: {s.review_note}
-                    </p>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : workItemsSurveyed && surveyorAssignment ? (
-            // No `surveys` row exists for this shop, but the work items
-            // already carry real survey (and possibly approved) measurements
-            // and a surveyor is on record — so the survey did happen, it just
-            // isn't tracked as its own row. Show what's actually known
-            // instead of claiming nothing was done.
-            <div className="border border-slate-200 rounded-lg p-3 text-sm">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-medium text-slate-900">{surveyorAssignment.profiles?.full_name || 'Unknown'}</span>
-                <StatusBadge status={workItemsApproved ? 'approved' : 'submitted'} />
-              </div>
-              <p className="text-xs text-slate-500">
-                {surveyorAssignment.completed_at
-                  ? `Completed: ${new Date(surveyorAssignment.completed_at).toLocaleDateString('en-IN')}`
-                  : `Assigned: ${new Date(surveyorAssignment.assigned_at).toLocaleDateString('en-IN')}`}
-              </p>
-              <p className="text-xs text-amber-600 mt-2 bg-amber-50 border border-amber-100 rounded px-2 py-1">
-                No dedicated survey record on file — shown from work item measurements and assignment history.
-              </p>
-            </div>
-          ) : <p className="text-sm text-slate-400">No surveys yet</p>}
-        </Card>
-
-        {/* Marked Board Photos — shows exactly what the surveyor drew,
-            using the same composite render the PDF/PPT exports use. */}
-        <Card className="p-4 max-h-[480px] overflow-y-auto">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
-            <Camera className="w-5 h-5 text-blue-600" /> Marked Board Photos
-          </h2>
-          {canCrudShop && (
-            <div className="mb-4">
-              <button onClick={() => { setSurveyPhotoUploadFiles([]); setSurveyPhotoItemIds(new Set()); setSurveyPhotoFileMap({}); setSurveyPhotoCaption(''); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-sm font-medium">
-                <UploadCloud className="w-4 h-4" /> Upload & Link Survey Photos
-              </button>
-            </div>
-          )}
-          {surveyPhotos && surveyPhotos.length > 0 ? (
-            <>
-              <MarkedPhotoGrid photos={surveyPhotos} markings={boardMarkings || []} workItems={workItems || []} />
-              {canCrudShop && <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">{surveyPhotos.map((p) => { const linkedIds = new Set([...(surveyPhotoItems || []).filter((x) => x.survey_photo_id === p.id).map((x) => x.work_item_id), ...(boardMarkings || []).filter((m) => m.survey_photo_id === p.id && m.work_item_id).map((m) => m.work_item_id as string)]); const linked = (workItems || []).filter((wi) => linkedIds.has(wi.id)); return <div key={p.id} className="relative rounded-lg overflow-hidden border border-slate-200 bg-white"><img src={p.photo_url} className="w-full h-32 object-cover" /><button onClick={() => deleteDetailPhoto(p)} className="absolute top-1 right-1 p-1.5 rounded-md bg-white/95 text-red-600 shadow" title="Delete photo"><Trash2 className="w-3.5 h-3.5" /></button><div className="p-2"><p className="text-[11px] font-semibold text-slate-700 truncate">{p.caption || 'Survey photo'}</p><div className="mt-1 flex flex-wrap gap-1">{linked.length ? linked.map((wi, idx) => <span key={wi.id} className="text-[10px] rounded bg-blue-50 text-blue-700 px-1.5 py-0.5">{wi.work_type_name || `Board ${idx + 1}`} · {wi.approved_width ?? wi.survey_width ?? '—'}×{wi.approved_height ?? wi.survey_height ?? '—'} {wi.approved_unit || wi.survey_unit || ''}</span>) : <span className="text-[10px] text-amber-600">Not linked to a board yet</span>}</div></div></div>; })}</div>}
-            </>
-          ) : (
-            <p className="text-sm text-slate-400">No survey photos yet</p>
-          )}
-        </Card>
-
-        {/* Design */}
-        <Card className="p-4 max-h-[480px] overflow-y-auto">
-          <div className="flex items-center justify-between mb-3 sticky top-0 bg-white z-10 pb-2">
-            <h2 className="text-base font-semibold text-slate-900 flex items-center gap-2"><Palette className="w-5 h-5 text-blue-600" /> Designs</h2>
-            {canCrudShop && <button onClick={() => { setDesignUploadItemIds(new Set()); setDesignUploadFiles([]); setDesignUploadOpen(true); }} className="inline-flex items-center gap-1.5 text-xs font-medium text-violet-700 border border-violet-200 bg-violet-50 px-2.5 py-1.5 rounded-lg"><UploadCloud className="w-3.5 h-3.5" /> Upload Design</button>}
-          </div>
-          {designTasks && designTasks.length > 0 ? (
-            <div className="space-y-3">
-              {designTasks.map((d) => (
-                <div key={d.id} className="border border-slate-200 rounded-lg p-3 text-sm">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-medium text-slate-900">{d.profiles?.full_name || 'Unassigned'}</span>
-                    <StatusBadge status={d.status} />
-                  </div>
-                  <p className="text-xs text-slate-500">Versions: {d.design_versions?.length || 0}</p>
-                  {d.design_versions?.map((v: any) => (
-                    <div key={v.id} className="text-xs text-slate-600 mt-1 flex items-center gap-2">
-                      <span>v{v.version_number}</span>
-                      <a href={v.file_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">{v.file_name || 'View file'}</a>
-                      <StatusBadge status={v.status} />
-                      <span className="text-slate-400">{(() => { const ids = new Set((v.design_version_items || []).map((x: any) => x.work_item_id)); const labels = (workItems || []).filter((wi) => ids.has(wi.id)).map((wi) => `${wi.work_type_name || 'Board'} · ${wi.approved_width ?? wi.survey_width ?? '—'}×${wi.approved_height ?? wi.survey_height ?? '—'} ${wi.approved_unit || wi.survey_unit || ''}`); return labels.length ? `→ ${labels.join(', ')}` : '→ not linked'; })()}</span>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          ) : <p className="text-sm text-slate-400">No design tasks yet</p>}
-        </Card>
-
-        {/* Installation */}
-        <Card className="p-4 max-h-[480px] overflow-y-auto">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
-            <Wrench className="w-5 h-5 text-blue-600" /> Installation
-          </h2>
-          {installations && installations.length > 0 ? (
-            <div className="space-y-3">
-              {installations.map((inst) => (
-                <div key={inst.id} className="border border-slate-200 rounded-lg p-3 text-sm">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-medium text-slate-900">{inst.profiles?.full_name || 'Unknown'}</span>
-                    <div className="flex items-center gap-1.5">
-                      <StatusBadge status={inst.status} />
-                      {/* Job status alone doesn't say whether Owner/Admin has
-                          actually signed off — review_status is the field
-                          that flips shops.status to 'installed', so surface
-                          it explicitly instead of only showing job.status. */}
-                      {inst.status === 'completed' && <StatusBadge status={inst.review_status} label={inst.review_status === 'pending' ? 'Awaiting Approval' : inst.review_status === 'approved' ? 'Approved' : inst.review_status === 'rejected' ? 'Sent Back for Redo' : inst.review_status} />}
-                    </div>
-                  </div>
-                  <p className="text-xs text-slate-500">Started: {inst.started_at ? new Date(inst.started_at).toLocaleDateString('en-IN') : 'Not started'}</p>
-                  <p className="text-xs text-slate-500">Completed: {inst.completed_at ? new Date(inst.completed_at).toLocaleDateString('en-IN') : 'Pending'}</p>
-                  {inst.gps_lat && <p className="text-xs text-slate-500">GPS: {inst.gps_lat.toFixed(4)}, {inst.gps_lng?.toFixed(4)}{inst.gps_accuracy ? ` (±${Math.round(inst.gps_accuracy)}m)` : ''}</p>}
-                  {inst.exception_reason && (
-                    <p className="text-xs text-red-600 mt-1 bg-red-50 border border-red-100 rounded px-2 py-1 flex items-center gap-1">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0" /> Exception: {inst.exception_reason}{inst.exception_note ? ` — ${inst.exception_note}` : ''}
-                    </p>
-                  )}
-                  {inst.review_note && (
-                    <p className={`text-xs mt-1 rounded px-2 py-1 ${inst.review_status === 'rejected' ? 'text-amber-700 bg-amber-50 border border-amber-100' : 'text-slate-600 bg-slate-50'}`}>
-                      Review note: {inst.review_note}
-                    </p>
-                  )}
-                  {inst.installation_proofs && inst.installation_proofs.length > 0 ? (
-                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mt-2">
-                      {inst.installation_proofs.map((proof: any) => (
-                        <a key={proof.id} href={proof.photo_url} target="_blank" rel="noopener noreferrer" className="relative rounded overflow-hidden border border-slate-200 block">
-                          <img src={proof.photo_url} alt={proof.photo_type} className="w-full aspect-square object-cover" />
-                          <span className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-[9px] px-1 py-0.5 capitalize">{proof.photo_type}</span>
-                        </a>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-xs text-slate-500 mt-1">No proof photos yet</p>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : workItemsInstalled && installerAssignment ? (
-            // No `installation_jobs` row for this shop, but the work items
-            // already carry real installed measurements and an installer is
-            // on record — the install did happen, just wasn't tracked as its
-            // own row. Show what's actually known instead of "not done".
-            <div className="border border-slate-200 rounded-lg p-3 text-sm">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-medium text-slate-900">{installerAssignment.profiles?.full_name || 'Unknown'}</span>
-                <div className="flex items-center gap-1.5">
-                  <StatusBadge status="completed" />
-                  <StatusBadge
-                    status={shop.status === 'installed' || shop.status === 'billed' ? 'approved' : 'pending'}
-                    label={shop.status === 'installed' || shop.status === 'billed' ? 'Approved' : 'Awaiting Approval'}
-                  />
-                </div>
-              </div>
-              <p className="text-xs text-slate-500">
-                {installerAssignment.completed_at
-                  ? `Completed: ${new Date(installerAssignment.completed_at).toLocaleDateString('en-IN')}`
-                  : `Assigned: ${new Date(installerAssignment.assigned_at).toLocaleDateString('en-IN')}`}
-              </p>
-              <p className="text-xs text-amber-600 mt-2 bg-amber-50 border border-amber-100 rounded px-2 py-1">
-                No dedicated installation record on file — shown from work item measurements and assignment history.
-              </p>
-            </div>
-          ) : <p className="text-sm text-slate-400">No installation jobs yet</p>}
-        </Card>
       </div>
 
       <Modal open={!!assignModal} onClose={() => setAssignModal(null)} title={`Assign ${assignModal === 'installer' ? 'Installer' : assignModal === 'designer' ? 'Designer' : 'Surveyor'}`}>
@@ -4028,30 +3872,14 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         </div>
       </Modal>
 
-      <Modal open={designUploadOpen} onClose={() => setDesignUploadOpen(false)} title="Upload Design · Link to Board" size="lg">
+      <Modal open={designUploadOpen} onClose={() => setDesignUploadOpen(false)} title="Upload Designs · Map Every File" size="lg">
         <div className="space-y-4">
-          <div className="rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm text-violet-900">
-            Every design must be linked to the exact marked board / measurement it belongs to. These links are stored in <b>design_version_items</b> and are the same relationship used by PDF/PPT reporting.
-          </div>
-          <label className="flex cursor-pointer items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-lg py-5 text-sm text-slate-600 hover:border-violet-400">
-            <UploadCloud className="w-5 h-5" /> {designUploadFiles.length ? `${designUploadFiles.length} file(s) selected` : 'Choose design files (PDF / image / artwork)'}
-            <input type="file" multiple className="hidden" accept="image/*,.pdf,.ai,.eps,.svg,.cdr" onChange={(e) => setDesignUploadFiles(Array.from(e.target.files || []))} />
-          </label>
-          <div>
-            <p className="text-sm font-semibold text-slate-900 mb-2">Which board / measurement does this design cover?</p>
-            <div className="max-h-64 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
-              {(workItems || []).map((item, index) => {
-                const checked = designUploadItemIds.has(item.id);
-                return <label key={item.id} className="flex items-start gap-3 p-3 cursor-pointer hover:bg-slate-50">
-                  <input type="checkbox" className="mt-1" checked={checked} onChange={() => setDesignUploadItemIds((prev) => { const n = new Set(prev); checked ? n.delete(item.id) : n.add(item.id); return n; })} />
-                  <div className="min-w-0"><p className="text-sm font-medium text-slate-900">Board {index + 1} · {item.work_type_name || 'Work Item'}</p><p className="text-xs text-slate-500">{item.material || 'No material'} · {item.approved_width ?? item.survey_width ?? '—'} × {item.approved_height ?? item.survey_height ?? '—'} {item.approved_unit || item.survey_unit || ''} · Qty {item.approved_quantity ?? item.survey_quantity ?? 1}</p></div>
-                </label>;
-              })}
-            </div>
-          </div>
+          <div className="rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm text-violet-900">Select all files once. They stay in the exact browser selection order below. Map <b>each file</b> to its own Work Item / measurement; every selected file is processed independently.</div>
+          <label className="flex cursor-pointer items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-lg py-5 text-sm text-slate-600 hover:border-violet-400"><UploadCloud className="w-5 h-5" /> {designUploadFiles.length ? `${designUploadFiles.length} file(s) selected` : 'Choose multiple design files'}<input type="file" multiple className="hidden" accept="image/*,.pdf,.ai,.eps,.svg,.cdr" onChange={(e) => { const files=Array.from(e.target.files || []); setDesignUploadFiles(files); const preset=Array.from(designUploadItemIds)[0]; setDesignUploadFileMap(Object.fromEntries(files.map((_,i)=>[i,preset || '']))); }} /></label>
+          {designUploadFiles.length > 0 && <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">{designUploadFiles.map((file,i)=><div key={`${file.name}-${i}`} className="grid grid-cols-[44px_1fr] sm:grid-cols-[44px_1fr_1.3fr] gap-2 items-center border rounded-lg p-2 bg-white"><div className="w-10 h-10 rounded bg-violet-100 text-violet-700 flex items-center justify-center font-bold text-xs">D{i+1}</div><div className="min-w-0"><p className="text-xs font-medium truncate">{file.name}</p><p className="text-[10px] text-slate-400">{(file.size/1024/1024).toFixed(1)} MB</p></div><select value={designUploadFileMap[i] || ''} onChange={(e)=>setDesignUploadFileMap(prev=>({...prev,[i]:e.target.value}))} className="col-span-2 sm:col-span-1 w-full px-2 py-2 text-xs border rounded-lg bg-white"><option value="">Select exact work item...</option>{(workItems||[]).map((item,index)=><option key={item.id} value={item.id}>#{index+1} · {item.work_type_name || 'Work Item'} · {item.approved_width ?? item.survey_width ?? '—'} × {item.approved_height ?? item.survey_height ?? '—'} {item.approved_unit || item.survey_unit || ''}</option>)}</select></div>)}</div>}
           <Textarea label="Design notes (optional)" value={designUploadNotes} onChange={setDesignUploadNotes} rows={2} />
           {uploadDesignMutation.isError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(uploadDesignMutation.error as Error).message}</p>}
-          <button onClick={() => uploadDesignMutation.mutate()} disabled={uploadDesignMutation.isPending || designUploadFiles.length === 0 || ((workItems?.length || 0) > 0 && designUploadItemIds.size === 0)} className="w-full bg-violet-600 hover:bg-violet-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{uploadDesignMutation.isPending ? 'Uploading & linking...' : `Upload & Link to ${designUploadItemIds.size} Board${designUploadItemIds.size === 1 ? '' : 's'}`}</button>
+          <button onClick={() => uploadDesignMutation.mutate()} disabled={uploadDesignMutation.isPending || !designUploadFiles.length || ((workItems?.length || 0)>0 && designUploadFiles.some((_,i)=>!designUploadFileMap[i]))} className="w-full bg-violet-600 hover:bg-violet-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{uploadDesignMutation.isPending ? `Uploading all ${designUploadFiles.length} files...` : `Upload all ${designUploadFiles.length} mapped design${designUploadFiles.length===1?'':'s'}`}</button>
         </div>
       </Modal>
 

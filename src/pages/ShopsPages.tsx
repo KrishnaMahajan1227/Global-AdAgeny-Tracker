@@ -2827,6 +2827,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const [surveyPhotoUploadOpen, setSurveyPhotoUploadOpen] = useState(false);
   const [surveyPhotoUploadFiles, setSurveyPhotoUploadFiles] = useState<File[]>([]);
   const [surveyPhotoItemIds, setSurveyPhotoItemIds] = useState<Set<string>>(new Set());
+  // Per-file mapping preserves the exact order selected by the user: Photo 1 -> Board X, Photo 2 -> Board Y.
+  const [surveyPhotoFileMap, setSurveyPhotoFileMap] = useState<Record<number, string>>({});
   const [surveyPhotoCaption, setSurveyPhotoCaption] = useState('');
   const [surveyPhotoType, setSurveyPhotoType] = useState('survey');
   const [surveyPhotoSurveyId, setSurveyPhotoSurveyId] = useState('');
@@ -2971,7 +2973,10 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
 
   const uploadDetailPhotos = async () => {
     if (!surveyPhotoUploadFiles.length || !orgId || !profile?.id) return;
-    if ((workItems?.length || 0) > 0 && surveyPhotoItemIds.size === 0) throw new Error('Select at least one board / measurement for these survey photos.');
+    if ((workItems?.length || 0) > 0) {
+      const missing = surveyPhotoUploadFiles.findIndex((_, i) => !surveyPhotoFileMap[i]);
+      if (missing >= 0) throw new Error(`Map Photo ${missing + 1} to its exact board / measurement before uploading.`);
+    }
     setPhotoUploading(true);
     try {
       let surveyId = surveyPhotoSurveyId || (surveys?.[0]?.id as string | undefined);
@@ -2986,17 +2991,17 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         const { data: u } = supabase.storage.from('survey-photos').getPublicUrl(path);
         const { data: photo, error: dbErr } = await supabase.from('survey_photos').insert({ organization_id: orgId, survey_id: surveyId, shop_id: shopId, storage_path: path, photo_url: u.publicUrl, photo_type: surveyPhotoType, caption: surveyPhotoCaption.trim() || 'Survey photo uploaded by Owner/Admin' }).select('id').single();
         if (dbErr) throw dbErr;
-        if (surveyPhotoItemIds.size > 0) {
-          const links = Array.from(surveyPhotoItemIds).map((workItemId) => ({ organization_id: orgId, survey_photo_id: photo.id, work_item_id: workItemId }));
-          const { error: linkErr } = await supabase.from('survey_photo_items').insert(links);
-          if (linkErr) throw new Error(`Photo uploaded, but board mapping could not be saved: ${linkErr.message}`);
+        const mappedWorkItemId = surveyPhotoFileMap[i];
+        if (mappedWorkItemId) {
+          const { error: linkErr } = await supabase.from('survey_photo_items').insert({ organization_id: orgId, survey_photo_id: photo.id, work_item_id: mappedWorkItemId });
+          if (linkErr) throw new Error(`Photo ${i + 1} uploaded, but its board mapping could not be saved: ${linkErr.message}`);
         }
       }
-      await logAudit('survey_photos', null, 'upload', null, null, null, `Uploaded ${surveyPhotoUploadFiles.length} survey photo(s) for ${shop?.name || 'shop'} linked to ${surveyPhotoItemIds.size} board(s)`);
+      await logAudit('survey_photos', null, 'upload', null, null, null, `Uploaded ${surveyPhotoUploadFiles.length} survey photo(s) for ${shop?.name || 'shop'} with ordered one-to-one board mapping`);
       queryClient.invalidateQueries({ queryKey: ['shop-survey-photos', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-survey-photo-items', shopId] });
       queryClient.invalidateQueries({ queryKey: ['shop-surveys', shopId] });
-      setSurveyPhotoUploadFiles([]); setSurveyPhotoItemIds(new Set()); setSurveyPhotoCaption(''); setSurveyPhotoSurveyId(''); setSurveyPhotoUploadOpen(false);
+      setSurveyPhotoUploadFiles([]); setSurveyPhotoItemIds(new Set()); setSurveyPhotoFileMap({}); setSurveyPhotoCaption(''); setSurveyPhotoSurveyId(''); setSurveyPhotoUploadOpen(false);
     } finally { setPhotoUploading(false); }
   };
   const deleteDetailPhoto = async (photo: SurveyPhoto) => {
@@ -3723,6 +3728,16 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                     </div>
                     <WorkItemStageRow label="Installed" width={item.installed_width} height={item.installed_height} unit={item.installed_unit} quantity={item.installed_quantity} area={item.installed_area} />
                   </div>
+                  {(() => {
+                    const surveyForItem = (surveyPhotos || []).filter((p) => (surveyPhotoItems || []).some((x) => x.survey_photo_id === p.id && x.work_item_id === item.id) || (boardMarkings || []).some((m) => m.survey_photo_id === p.id && m.work_item_id === item.id));
+                    const designForItem = (designTasks || []).flatMap((d: any) => (d.design_versions || []).filter((v: any) => (v.design_version_items || []).some((x: any) => x.work_item_id === item.id)));
+                    const installForItem = (installations || []).flatMap((inst: any) => (inst.installation_proofs || []).filter((proof: any) => proof.work_item_id === item.id));
+                    return <div className="mt-3 pt-3 border-t border-slate-100"><p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">Evidence for this measurement</p><div className="grid grid-cols-3 gap-2">
+                      <div><p className="text-[10px] text-slate-400 mb-1">Survey</p><div className="flex gap-1 overflow-x-auto">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><a key={p.id} href={p.photo_url} target="_blank" rel="noreferrer" className="shrink-0 relative"><img src={p.photo_url} className="w-12 h-12 rounded object-cover border"/><span className="absolute bottom-0 left-0 bg-black/60 text-white text-[8px] px-1">S{i+1}</span></a>) : <span className="text-[10px] text-slate-400">—</span>}</div></div>
+                      <div><p className="text-[10px] text-slate-400 mb-1">Design</p><div className="flex gap-1 overflow-x-auto">{designForItem.length ? designForItem.map((v:any)=><a key={v.id} href={v.file_url} target="_blank" rel="noreferrer" className="w-12 h-12 rounded border bg-violet-50 text-violet-700 flex items-center justify-center text-[9px] font-semibold shrink-0">v{v.version_number}</a>) : <span className="text-[10px] text-slate-400">—</span>}</div></div>
+                      <div><p className="text-[10px] text-slate-400 mb-1">Installed</p><div className="flex gap-1 overflow-x-auto">{installForItem.length ? installForItem.map((p:any, i:number)=><a key={p.id} href={p.photo_url} target="_blank" rel="noreferrer" className="shrink-0 relative"><img src={p.photo_url} className="w-12 h-12 rounded object-cover border"/><span className="absolute bottom-0 left-0 bg-black/60 text-white text-[8px] px-1">I{i+1}</span></a>) : <span className="text-[10px] text-slate-400">Not mapped</span>}</div></div>
+                    </div></div>;
+                  })()}
                   {item.material && <p className="text-xs text-slate-500 mt-2 pt-2 border-t border-slate-100">Material: {item.material}</p>}
                   {(item.approved_notes || item.survey_notes) && (
                     <p className="text-xs text-slate-400 mt-1">Note: {item.approved_notes || item.survey_notes}</p>
@@ -3828,7 +3843,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           </h2>
           {canCrudShop && (
             <div className="mb-4">
-              <button onClick={() => { setSurveyPhotoUploadFiles([]); setSurveyPhotoItemIds(new Set()); setSurveyPhotoCaption(''); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-sm font-medium">
+              <button onClick={() => { setSurveyPhotoUploadFiles([]); setSurveyPhotoItemIds(new Set()); setSurveyPhotoFileMap({}); setSurveyPhotoCaption(''); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-sm font-medium">
                 <UploadCloud className="w-4 h-4" /> Upload & Link Survey Photos
               </button>
             </div>
@@ -3994,8 +4009,22 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           </label>
           {(surveys || []).length > 0 && <div><label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Survey record</label><select value={surveyPhotoSurveyId} onChange={(e) => setSurveyPhotoSurveyId(e.target.value)} className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"><option value="">Latest survey</option>{(surveys || []).map((sr: any) => <option key={sr.id} value={sr.id}>{sr.profiles?.full_name || 'Survey'} · {sr.submitted_at ? new Date(sr.submitted_at).toLocaleDateString('en-IN') : 'Draft'}</option>)}</select></div>}
           <div className="grid grid-cols-2 gap-3"><div><label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Photo type</label><select value={surveyPhotoType} onChange={(e) => setSurveyPhotoType(e.target.value)} className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"><option value="survey">Survey / Board</option><option value="shop_front">Shop Front</option><option value="interior">Interior</option><option value="other">Other</option><option value="marked">Marked</option></select></div><Input label="Caption / reference" value={surveyPhotoCaption} onChange={setSurveyPhotoCaption} /></div>
-          <div><p className="text-sm font-semibold text-slate-900 mb-2">Which board / measurement is visible in these photos?</p><div className="max-h-64 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">{(workItems || []).map((item, index) => { const checked = surveyPhotoItemIds.has(item.id); return <label key={item.id} className="flex items-start gap-3 p-3 cursor-pointer hover:bg-slate-50"><input type="checkbox" className="mt-1" checked={checked} onChange={() => setSurveyPhotoItemIds((prev) => { const n = new Set(prev); checked ? n.delete(item.id) : n.add(item.id); return n; })} /><div><p className="text-sm font-medium text-slate-900">Board {index + 1} · {item.work_type_name || 'Work Item'}</p><p className="text-xs text-slate-500">{item.material || 'No material'} · {item.approved_width ?? item.survey_width ?? '—'} × {item.approved_height ?? item.survey_height ?? '—'} {item.approved_unit || item.survey_unit || ''} · Qty {item.approved_quantity ?? item.survey_quantity ?? 1}</p></div></label>; })}</div></div>
-          <button onClick={() => uploadDetailPhotos()} disabled={photoUploading || surveyPhotoUploadFiles.length === 0 || ((workItems?.length || 0) > 0 && surveyPhotoItemIds.size === 0)} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{photoUploading ? 'Uploading & linking...' : `Upload & Link to ${surveyPhotoItemIds.size} Board${surveyPhotoItemIds.size === 1 ? '' : 's'}`}</button>
+          {surveyPhotoUploadFiles.length > 0 && <div>
+            <div className="flex items-center justify-between mb-2"><p className="text-sm font-semibold text-slate-900">Map each photo in upload order</p><span className="text-xs text-slate-500">{Object.keys(surveyPhotoFileMap).length}/{surveyPhotoUploadFiles.length} mapped</span></div>
+            <p className="text-xs text-slate-500 mb-3">File names do not matter. The sequence below is exactly the sequence selected from your device. Choose the board visible in each photo one-by-one.</p>
+            <div className="max-h-[420px] overflow-y-auto border border-slate-200 rounded-xl divide-y divide-slate-100">
+              {surveyPhotoUploadFiles.map((file, photoIndex) => <div key={`${file.name}-${photoIndex}`} className="p-3 grid grid-cols-[56px_1fr] gap-3 items-center">
+                <div className="w-14 h-14 rounded-lg bg-slate-100 overflow-hidden flex items-center justify-center text-xs font-bold text-slate-500">{file.type.startsWith('image/') ? <img src={URL.createObjectURL(file)} className="w-full h-full object-cover" /> : `#${photoIndex + 1}`}</div>
+                <div className="min-w-0"><div className="flex items-center gap-2 mb-1"><span className="text-xs font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded">Photo {photoIndex + 1}</span><span className="text-xs text-slate-500 truncate">{file.name}</span></div>
+                  <select value={surveyPhotoFileMap[photoIndex] || ''} onChange={(e) => setSurveyPhotoFileMap((prev) => ({ ...prev, [photoIndex]: e.target.value }))} className="w-full border border-slate-300 rounded-lg px-2.5 py-2 text-sm bg-white">
+                    <option value="">Select exact board / measurement...</option>
+                    {(workItems || []).map((item, index) => <option key={item.id} value={item.id}>Board {index + 1} · {item.work_type_name || 'Work Item'} · {item.approved_width ?? item.survey_width ?? '—'} × {item.approved_height ?? item.survey_height ?? '—'} {item.approved_unit || item.survey_unit || ''} · Qty {item.approved_quantity ?? item.survey_quantity ?? 1}</option>)}
+                  </select>
+                </div>
+              </div>)}
+            </div>
+          </div>}
+          <button onClick={() => uploadDetailPhotos()} disabled={photoUploading || surveyPhotoUploadFiles.length === 0 || ((workItems?.length || 0) > 0 && surveyPhotoUploadFiles.some((_, i) => !surveyPhotoFileMap[i]))} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{photoUploading ? 'Uploading & linking in sequence...' : `Upload ${surveyPhotoUploadFiles.length} Mapped Photo${surveyPhotoUploadFiles.length === 1 ? '' : 's'}`}</button>
         </div>
       </Modal>
 

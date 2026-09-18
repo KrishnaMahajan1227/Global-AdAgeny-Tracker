@@ -353,6 +353,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   const [completed, setCompleted] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [cameraFor, setCameraFor] = useState<string | null>(null);
+  const [selectedProofWorkItemId, setSelectedProofWorkItemId] = useState('');
   const [jobBlockedReason, setJobBlockedReason] = useState<string | null>(null);
 
   // Live location sharing while this installation is in progress — pinged
@@ -642,6 +643,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       storage_path: path,
       photo_url: urlData.publicUrl,
       photo_type: 'installed',
+      work_item_id: selectedProofWorkItemId || (approvedItems.length === 1 ? approvedItems[0].id : null),
       angle,
       phash,
       duplicate_flag: duplicateFlag,
@@ -976,16 +978,18 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
           <div className="space-y-4">
             <p className="text-sm text-slate-600">Installation ho jaane ke baad kaam ki photo lo. Kam se kam 1 photo lena zaroori hai — client jitni angles maangta hai, utni le sakte ho.</p>
 
+            {approvedItems.length > 0 && <Card className="p-3 border-blue-100 bg-blue-50/40"><label className="block text-xs font-semibold text-slate-700 mb-1">Photo kis board / measurement ka hai?</label><select value={selectedProofWorkItemId} onChange={(e) => setSelectedProofWorkItemId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="">{approvedItems.length === 1 ? 'Only board — auto linked' : 'Select board before taking photo...'}</option>{approvedItems.map((it, idx) => <option key={it.id} value={it.id}>Board {idx + 1} · {it.work_type_name || it.material || 'Item'} · {formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}</option>)}</select><p className="text-[10px] text-slate-500 mt-1">Every captured installation photo is stored against this exact work item, so Owner/Admin sees Survey → Design → Installed proof together.</p></Card>}
+
             <div className="grid grid-cols-2 gap-2">
               <button
-                onClick={() => setCameraFor('front')}
+                onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Pehle exact board / measurement select karo.'); return; } setCameraFor('front'); }}
                 className={`flex flex-col items-center justify-center gap-1 border-2 font-bold py-3.5 rounded-xl ${proofPhotos.some((p) => p.angle === 'front') ? 'bg-green-50 border-green-300 text-green-700' : 'bg-blue-50 border-blue-200 text-blue-700'}`}
               >
                 <Camera className="w-5 h-5" />
                 <span className="text-sm">{proofPhotos.some((p) => p.angle === 'front') ? 'Front ✓ (retake)' : 'Front Photo'}</span>
               </button>
               <button
-                onClick={() => setCameraFor('side')}
+                onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Pehle exact board / measurement select karo.'); return; } setCameraFor('side'); }}
                 className={`flex flex-col items-center justify-center gap-1 border-2 font-bold py-3.5 rounded-xl ${proofPhotos.some((p) => p.angle === 'side') ? 'bg-green-50 border-green-300 text-green-700' : 'bg-blue-50 border-blue-200 text-blue-700'}`}
               >
                 <Camera className="w-5 h-5" />
@@ -994,7 +998,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
             </div>
 
             <button
-              onClick={() => setCameraFor('other')}
+              onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Pehle exact board / measurement select karo.'); return; } setCameraFor('other'); }}
               className="w-full flex items-center justify-center gap-2 text-slate-500 text-sm font-medium py-2"
             >
               <Camera className="w-4 h-4" /> Ek aur photo jodo (optional)

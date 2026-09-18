@@ -32,6 +32,23 @@ export interface GeoStampInfo {
  * — it stamps "Location unavailable" instead, since a field photo with no
  * signal is still real proof and shouldn't be blocked from uploading.
  */
+
+/** Rotates portrait evidence into landscape without cropping. */
+export async function ensureLandscape(dataUrl: string): Promise<string> {
+  const img = await loadImage(dataUrl);
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (w >= h) return dataUrl;
+  const canvas = document.createElement('canvas');
+  canvas.width = h; canvas.height = w;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return dataUrl;
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate(Math.PI / 2);
+  ctx.drawImage(img, -w / 2, -h / 2, w, h);
+  return canvas.toDataURL('image/jpeg', 0.92);
+}
+
 export async function stampGeoTag(dataUrl: string, info: GeoStampInfo): Promise<string> {
   const img = await loadImage(dataUrl);
   const canvas = document.createElement('canvas');

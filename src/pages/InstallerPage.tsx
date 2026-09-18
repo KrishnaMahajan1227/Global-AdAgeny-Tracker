@@ -7,12 +7,12 @@ import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { CameraCapture } from '@/components/CameraCapture';
 import { formatDim, LENGTH_UNIT_OPTIONS, areaSqFt } from '@/lib/units';
-import { useLiveLocationTracking, LocationShareIndicator } from '@/lib/locationTracking';
+import { useLiveLocationTracking } from '@/lib/locationTracking';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { computeImageHash, hammingDistance, DUPLICATE_HASH_THRESHOLD } from '@/lib/imageHash';
 import { haversineDistanceMeters, GPS_DISTANCE_FLAG_METERS } from '@/lib/geoDistance';
 import { reverseGeocode } from '@/lib/geocode';
-import { stampGeoTag } from '@/lib/geoStamp';
+import { stampGeoTag, ensureLandscape } from '@/lib/geoStamp';
 import { computePOVariance } from '@/lib/poVariance';
 import type { SurveyPhoto, BoardMarking, WorkItem, POWorkContext, POLineItemWorkContext } from '@/lib/types';
 import {
@@ -270,27 +270,7 @@ function InstallerWork({ onStart }: { onStart: (shopId: string) => void }) {
         }}
         onStart={onStart}
         emptyLabel="No installations assigned"
-        renderExtra={(a) => {
-          const shopStatus = a.shops?.status || 'pending';
-          const isInstalled = shopStatus === 'installed';
-          const isAwaitingApproval = shopStatus === 'installation_review';
-          const isReady = READY_STATUSES.includes(shopStatus);
-          return (
-            <>
-              {isAwaitingApproval && (
-                <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1.5">
-                  Submitted — waiting for Admin/Owner to approve this installation.
-                </p>
-              )}
-              {!isInstalled && !isAwaitingApproval && !isReady && (
-                <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1.5">
-                  Waiting on production to be completed and approved.
-                </p>
-              )}
-              <MaterialsToBring items={(approvedItems || []).filter((it) => it.shop_id === a.shop_id)} />
-            </>
-          );
-        }}
+        renderExtra={() => null}
       />
     </div>
   );
@@ -339,7 +319,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   const [materialLoadedQty, setMaterialLoadedQty] = useState<Record<string, string>>({});
   const [materialCheckConfirmed, setMaterialCheckConfirmed] = useState(false);
   const [materialCheckSaving, setMaterialCheckSaving] = useState(false);
-  const [proofPhotos, setProofPhotos] = useState<{ url: string; type: string; angle: 'front' | 'side' | 'other' }[]>([]);
+  const [proofPhotos, setProofPhotos] = useState<{ url: string; type: string; angle: 'front' | 'side' | 'other'; workItemId?: string }[]>([]);
   // No manual measurement entry anymore — installed_* is auto-copied from
   // the Owner/Admin-approved work item specs at submit time. Only a free
   // text note is still collected, in case the installer wants to flag
@@ -359,7 +339,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   // Live location sharing while this installation is in progress — pinged
   // to worker_locations so the Owner/Admin Live Field Map shows the
   // installer moving in real time, same as the surveyor flow.
-  const { status: locStatus, lastSentAt } = useLiveLocationTracking(true, profile?.id, profile?.organization_id);
+  useLiveLocationTracking(true, profile?.id, profile?.organization_id);
 
   const { data: shop } = useQuery({
     queryKey: ['shop', shopId],
@@ -582,12 +562,13 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     // never blocks a real installation photo from uploading.
     let uploadDataUrl = dataUrl;
     try {
-      uploadDataUrl = await stampGeoTag(dataUrl, {
+      uploadDataUrl = await ensureLandscape(dataUrl);
+      uploadDataUrl = await stampGeoTag(uploadDataUrl, {
         siteName: shop?.name,
         addressLine: [shop?.address, shop?.city, shop?.state].filter(Boolean).join(', ') || null,
-        lat: gps?.lat ?? null,
-        lng: gps?.lng ?? null,
-        accuracy: gps?.accuracy ?? null,
+        lat: shop?.latitude ?? null,
+        lng: shop?.longitude ?? null,
+        accuracy: null,
       });
     } catch (stampErr) {
       console.error('[handlePhotoCaptured] geo-tag stamp failed (non-fatal, uploading unstamped):', stampErr);
@@ -672,7 +653,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       }
     }
 
-    setProofPhotos((current) => [...current, { url: urlData.publicUrl, type: 'installed', angle }]);
+    setProofPhotos((current) => [...current, { url: urlData.publicUrl, type: 'installed', angle, workItemId: selectedProofWorkItemId || (approvedItems.length === 1 ? approvedItems[0].id : undefined) }]);
   }
 
 
@@ -857,28 +838,24 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     );
   }
 
-  const steps = exception
-    ? ['Shop', 'Material Check', 'Photo', 'Exception', 'Submit']
-    : ['Shop', 'Material Check', 'Photo', 'Review', 'Submit'];
+  const steps = exception ? ['Shop', 'Photos', 'Exception'] : ['Shop', 'Photos', 'Review & Submit'];
+  const visibleStep = step === 1 ? 1 : step === 3 ? 2 : 3;
 
   return (
     <div className="min-h-screen bg-slate-50 max-w-md mx-auto">
       <div className="bg-white border-b border-slate-200 sticky top-0 z-30">
         <div className="flex items-center justify-between p-4">
           <button onClick={() => onExit()} className="text-sm text-slate-500">Cancel</button>
-          <p className="font-semibold text-slate-900">Step {step} of {steps.length}</p>
-          <span className="text-xs text-slate-400">{steps[step - 1]}</span>
+          <p className="font-semibold text-slate-900">Step {visibleStep} of {steps.length}</p>
+          <span className="text-xs text-slate-400">{steps[visibleStep - 1]}</span>
         </div>
         {jobQueuePosition >= 0 && jobQueueTotal > 0 && (
           <p className="px-4 pb-1 text-xs text-blue-600 font-medium">Job {jobQueuePosition + 1} of {jobQueueTotal} today</p>
         )}
         <div className="flex px-4 pb-3 gap-1">
           {steps.map((_, i) => (
-            <div key={i} className={`h-1.5 flex-1 rounded-full ${i < step ? 'bg-blue-600' : 'bg-slate-200'}`} />
+            <div key={i} className={`h-1.5 flex-1 rounded-full ${i < visibleStep ? 'bg-blue-600' : 'bg-slate-200'}`} />
           ))}
-        </div>
-        <div className="px-4 pb-3">
-          <LocationShareIndicator status={locStatus} lastSentAt={lastSentAt} />
         </div>
       </div>
 
@@ -926,7 +903,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <Navigation className="w-4 h-4" /> Navigate to Shop
             </button>
 
-            <button onClick={() => setStep(2)} className="w-full bg-slate-900 text-white font-medium py-3 rounded-lg">Continue</button>
+            <button onClick={() => setStep(3)} className="w-full bg-slate-900 text-white font-medium py-3 rounded-lg">Start Installation</button>
           </div>
         )}
 
@@ -936,7 +913,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
             each approved board is physically loaded before heading out,
             not just a yes/no tick, so Owner/Admin can see produced vs
             loaded vs approved on Installation Review afterwards. */}
-        {step === 2 && (
+        {false && step === 2 && (
           <div className="space-y-4">
             {vehicleLoad ? (
               <div className="flex items-start gap-2.5 bg-emerald-50 border-2 border-emerald-300 rounded-xl px-3.5 py-3">
@@ -945,14 +922,14 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                   <p className="text-sm font-bold text-emerald-800">Gaadi Load Ho Chuki Hai</p>
                   <p className="text-xs text-emerald-700 mt-0.5">
                     Vehicle <span className="font-semibold">{vehicleLoad.vehicle_number}</span>
-                    {vehicleLoad.driver_name ? ` · Driver ${vehicleLoad.driver_name}` : ''} — neeche jo quantity dikh rahi hai wahi maal load kiya gaya hai. Gaadi par ek baar dekh lo sab sahi hai, kuch kam-zyada ho to number badal do, phir confirm kar do.
+                    {vehicleLoad.driver_name ? ` · Driver ${vehicleLoad.driver_name}` : ''} — quantities shown below are the recorded loaded quantities.
                   </p>
                 </div>
               </div>
             ) : (
               <div className="flex items-start gap-2.5 bg-amber-50 border-2 border-amber-300 rounded-xl px-3.5 py-3">
                 <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                <p className="text-xs text-amber-800">Is shop ke liye Production ne abhi tak load record nahi kiya — jitna maal gaadi mein le ja rahe ho, wahi quantity yahan bhar do.</p>
+                <p className="text-xs text-amber-800">No production load record is available for this shop.</p>
               </div>
             )}
             <Card className="p-4">
@@ -1017,31 +994,9 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
           <div className="space-y-4">
             <p className="text-sm text-slate-600">After installation, capture or upload proof photos. At least one photo is required; add as many angles as the client requires.</p>
 
-            {approvedItems.length > 0 && <Card className="p-3 border-blue-100 bg-blue-50/40"><label className="block text-xs font-semibold text-slate-700 mb-1">Which work item / measurement is this proof for?</label><select value={selectedProofWorkItemId} onChange={(e) => setSelectedProofWorkItemId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="">{approvedItems.length === 1 ? 'Only board — auto linked' : 'Select board before taking photo...'}</option>{approvedItems.map((it, idx) => <option key={it.id} value={it.id}>Board {idx + 1} · {it.work_type_name || it.material || 'Item'} · {formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}</option>)}</select><p className="text-[10px] text-slate-500 mt-1">Every captured installation photo is stored against this exact work item, so Owner/Admin sees Survey → Design → Installed proof together.</p></Card>}
+            {approvedItems.length > 0 && <Card className="p-3"><p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Approved installation items — tap an item to take its photo</p><div className="space-y-2">{approvedItems.map((it, idx) => <button key={it.id} onClick={() => { setSelectedProofWorkItemId(it.id); setCameraFor('installed'); }} className="w-full text-left border border-slate-200 rounded-xl p-3 bg-white active:bg-blue-50"><p className="font-semibold text-slate-900 text-sm">{it.work_type_name || it.material || `Work Item ${idx + 1}`}</p><p className="text-xs text-slate-500 mt-0.5">{formatDim(it.approved_width)} × {formatDim(it.approved_height)} {it.approved_unit} · {Math.round((it.approved_area || 0) * 100) / 100} sq.ft · Qty {it.approved_quantity || 1}</p><p className="text-xs text-blue-600 font-medium mt-1">Tap to take photo</p></button>)}</div></Card>}
 
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Select the exact work item / measurement first.'); return; } setCameraFor('front'); }}
-                className={`flex flex-col items-center justify-center gap-1 border-2 font-bold py-3.5 rounded-xl ${proofPhotos.some((p) => p.angle === 'front') ? 'bg-green-50 border-green-300 text-green-700' : 'bg-blue-50 border-blue-200 text-blue-700'}`}
-              >
-                <Camera className="w-5 h-5" />
-                <span className="text-sm">{proofPhotos.some((p) => p.angle === 'front') ? 'Front ✓ (retake)' : 'Front Photo'}</span>
-              </button>
-              <button
-                onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Select the exact work item / measurement first.'); return; } setCameraFor('side'); }}
-                className={`flex flex-col items-center justify-center gap-1 border-2 font-bold py-3.5 rounded-xl ${proofPhotos.some((p) => p.angle === 'side') ? 'bg-green-50 border-green-300 text-green-700' : 'bg-blue-50 border-blue-200 text-blue-700'}`}
-              >
-                <Camera className="w-5 h-5" />
-                <span className="text-sm">{proofPhotos.some((p) => p.angle === 'side') ? 'Side ✓ (retake)' : 'Side Photo'}</span>
-              </button>
-            </div>
-
-            <button
-              onClick={() => { if (approvedItems.length > 1 && !selectedProofWorkItemId) { alert('Select the exact work item / measurement first.'); return; } setCameraFor('other'); }}
-              className="w-full flex items-center justify-center gap-2 text-slate-500 text-sm font-medium py-2"
-            >
-              <Camera className="w-4 h-4" /> Add another camera photo (optional)
-            </button>
+            <Card className="p-3 border-slate-200"><label className="block text-xs font-semibold text-slate-700 mb-1">Gallery upload: choose work item</label><select value={selectedProofWorkItemId} onChange={(e) => setSelectedProofWorkItemId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="">Select work item...</option>{approvedItems.map((it, idx) => <option key={it.id} value={it.id}>{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}</option>)}</select></Card>
 
             <label className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-blue-200 bg-blue-50/50 text-blue-700 text-sm font-semibold py-3 rounded-xl cursor-pointer hover:bg-blue-50">
               <ImagePlus className="w-4 h-4" /> Upload one or multiple installation photos
@@ -1075,7 +1030,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
             >
               Continue
             </button>
-            <button onClick={() => setStep(2)} className="w-full flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg">
+            <button onClick={() => setStep(1)} className="w-full flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg">
               <ChevronLeft className="w-4 h-4" /> Back
             </button>
 
@@ -1117,7 +1072,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <button onClick={() => setStep(3)} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
                 <ChevronLeft className="w-4 h-4" /> Back
               </button>
-              <button onClick={() => setStep(5)} className="bg-slate-900 text-white font-medium py-3 rounded-lg flex-1">Continue</button>
+              <button onClick={completeInstallation} disabled={submitting} className="bg-blue-600 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex-1">{submitting ? 'Submitting...' : 'Final Submit'}</button>
             </div>
           </div>
         )}
@@ -1136,13 +1091,13 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <button onClick={() => { setException(null); setStep(3); }} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
                 <ChevronLeft className="w-4 h-4" /> Back
               </button>
-              <button onClick={() => setStep(5)} className="bg-slate-900 text-white font-medium py-3 rounded-lg flex-1">Continue</button>
+              <button onClick={completeInstallation} disabled={submitting} className="bg-red-600 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex-1">{submitting ? 'Submitting...' : 'Submit Exception'}</button>
             </div>
           </div>
         )}
 
         {/* Submit */}
-        {step === 5 && (
+        {false && step === 5 && (
           <div className="space-y-4">
             <Card className="p-6 text-center">
               <CheckCircle2 className="w-12 h-12 text-blue-500 mx-auto mb-3" />
@@ -1217,7 +1172,7 @@ function ApprovedSpecsCard({ items, photos, markings }: { items: WorkItem[]; pho
 
       {photos.length > 0 && (
         <>
-          <p className="text-xs text-slate-400 mb-1.5">Survey mein jaha mark kiya gaya waha hi lagana hai — photo par tap karke bada dekh sakte ho:</p>
+          <p className="text-xs text-slate-400 mb-1.5">Install at the approved marked survey position. Tap a photo to view it larger:</p>
           <MarkedPhotoGrid photos={photos} markings={markings} workItems={items} />
         </>
       )}

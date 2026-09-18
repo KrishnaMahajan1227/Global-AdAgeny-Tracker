@@ -319,7 +319,10 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   const [materialLoadedQty, setMaterialLoadedQty] = useState<Record<string, string>>({});
   const [materialCheckConfirmed, setMaterialCheckConfirmed] = useState(false);
   const [materialCheckSaving, setMaterialCheckSaving] = useState(false);
-  const [proofPhotos, setProofPhotos] = useState<{ url: string; type: string; angle: 'front' | 'side' | 'other'; workItemId?: string }[]>([]);
+  const [proofPhotos, setProofPhotos] = useState<{ id?: string; storagePath?: string; url: string; type: string; angle: 'front' | 'side' | 'other'; workItemId?: string }[]>([]);
+  const [bulkGalleryFiles, setBulkGalleryFiles] = useState<File[]>([]);
+  const [bulkGalleryMap, setBulkGalleryMap] = useState<Record<number, string>>({});
+  const [bulkUploading, setBulkUploading] = useState(false);
   // No manual measurement entry anymore — installed_* is auto-copied from
   // the Owner/Admin-approved work item specs at submit time. Only a free
   // text note is still collected, in case the installer wants to flag
@@ -334,6 +337,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   const [jobId, setJobId] = useState<string | null>(null);
   const [cameraFor, setCameraFor] = useState<string | null>(null);
   const [selectedProofWorkItemId, setSelectedProofWorkItemId] = useState('');
+  const [expandedInstallItemId, setExpandedInstallItemId] = useState<string | null>(null);
   const [jobBlockedReason, setJobBlockedReason] = useState<string | null>(null);
 
   // Live location sharing while this installation is in progress — pinged
@@ -469,6 +473,25 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     enabled: !!surveyPhotos,
   });
 
+
+  // Explicit Survey Photo -> Work Item links. Older deployments may not yet
+  // have this relation, so board_markings.work_item_id remains a compatible
+  // fallback for deciding which approved reference photo belongs to an item.
+  const { data: surveyPhotoItemLinks } = useQuery({
+    queryKey: ['install-survey-photo-items', shopId, (surveyPhotos || []).map((p) => p.id).join(',')],
+    queryFn: async () => {
+      const photoIds = (surveyPhotos || []).map((p) => p.id);
+      if (photoIds.length === 0) return [] as { survey_photo_id: string; work_item_id: string }[];
+      const { data, error } = await supabase.from('survey_photo_items').select('survey_photo_id,work_item_id').in('survey_photo_id', photoIds);
+      if (error) {
+        if (/survey_photo_items|schema cache|could not find the table/i.test(error.message || '')) return [];
+        throw error;
+      }
+      return (data || []) as { survey_photo_id: string; work_item_id: string }[];
+    },
+    enabled: !!surveyPhotos,
+  });
+
   // Create installation job on mount
   useEffect(() => {
     async function createJob() {
@@ -545,7 +568,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     }
   }
 
-  async function handlePhotoCaptured(dataUrl: string, fileName: string, forcedAngle?: 'front' | 'side' | 'other') {
+  async function handlePhotoCaptured(dataUrl: string, fileName: string, forcedAngle?: 'front' | 'side' | 'other', explicitWorkItemId?: string) {
     // cameraFor doubles as the angle here ('front' / 'side' / 'other') —
     // photo_type stays the constant 'installed' (matches the existing
     // check constraint); angle is the new, separate column that Section 7
@@ -624,7 +647,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       storage_path: path,
       photo_url: urlData.publicUrl,
       photo_type: 'installed',
-      work_item_id: selectedProofWorkItemId || (approvedItems.length === 1 ? approvedItems[0].id : null),
+      work_item_id: explicitWorkItemId || selectedProofWorkItemId || (approvedItems.length === 1 ? approvedItems[0].id : null),
       angle,
       phash,
       duplicate_flag: duplicateFlag,
@@ -653,13 +676,14 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       }
     }
 
-    setProofPhotos((current) => [...current, { url: urlData.publicUrl, type: 'installed', angle, workItemId: selectedProofWorkItemId || (approvedItems.length === 1 ? approvedItems[0].id : undefined) }]);
+    setProofPhotos((current) => [...current, { id: inserted?.id, storagePath: path, url: urlData.publicUrl, type: 'installed', angle, workItemId: explicitWorkItemId || selectedProofWorkItemId || (approvedItems.length === 1 ? approvedItems[0].id : undefined) }]);
   }
 
 
-  async function handleInstallationFileSelection(files: FileList | null) {
+  async function handleInstallationFileSelection(files: FileList | null, explicitWorkItemId?: string) {
     if (!files?.length) return;
-    if (approvedItems.length > 1 && !selectedProofWorkItemId) {
+    const targetWorkItemId = explicitWorkItemId || selectedProofWorkItemId;
+    if (approvedItems.length > 1 && !targetWorkItemId) {
       alert('Select the exact work item / measurement before uploading photos.');
       return;
     }
@@ -674,7 +698,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
           reader.onerror = () => reject(reader.error || new Error('Could not read file'));
           reader.readAsDataURL(file);
         });
-        await handlePhotoCaptured(dataUrl, file.name, 'other');
+        if (targetWorkItemId) setSelectedProofWorkItemId(targetWorkItemId);
+        await handlePhotoCaptured(dataUrl, file.name, 'other', targetWorkItemId);
         uploaded += 1;
       } catch (err: any) {
         failures.push(`${file.name}: ${err?.message || 'Upload failed'}`);
@@ -682,6 +707,44 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     }
     if (failures.length) alert(`${uploaded} of ${selected.length} photos uploaded.\n${failures.join('\n')}`);
   }
+
+  async function deleteInstallationPhoto(photo: { id?: string; storagePath?: string; url: string }) {
+    if (!window.confirm('Delete this installation photo? This will not delete the work item.')) return;
+    try {
+      if (photo.id) {
+        const { error } = await supabase.from('installation_proofs').delete().eq('id', photo.id);
+        if (error) throw error;
+      } else if (photo.storagePath) {
+        const { error } = await supabase.from('installation_proofs').delete().eq('storage_path', photo.storagePath);
+        if (error) throw error;
+      }
+      if (photo.storagePath) await supabase.storage.from('installation-proof').remove([photo.storagePath]);
+      setProofPhotos((current) => current.filter((p) => p !== photo));
+    } catch (err: any) {
+      alert(`Could not delete photo: ${err?.message || 'Unknown error'}`);
+    }
+  }
+
+  async function uploadMappedGallery() {
+    if (!bulkGalleryFiles.length) return;
+    const missing = bulkGalleryFiles.findIndex((_, i) => !bulkGalleryMap[i]);
+    if (missing >= 0) { alert(`Choose a work item for photo ${missing + 1}.`); return; }
+    setBulkUploading(true);
+    const failures: string[] = [];
+    let uploaded = 0;
+    for (let i = 0; i < bulkGalleryFiles.length; i++) {
+      const file = bulkGalleryFiles[i];
+      try {
+        const list = { 0: file, length: 1, item: () => file } as unknown as FileList;
+        await handleInstallationFileSelection(list, bulkGalleryMap[i]);
+        uploaded++;
+      } catch (err: any) { failures.push(`${file.name}: ${err?.message || 'Upload failed'}`); }
+    }
+    setBulkUploading(false);
+    if (uploaded === bulkGalleryFiles.length) { setBulkGalleryFiles([]); setBulkGalleryMap({}); }
+    if (failures.length) alert(`${uploaded} of ${bulkGalleryFiles.length} photos uploaded.\n${failures.join('\n')}`);
+  }
+
 
   async function completeInstallation() {
     if (!profile || !jobId || !shop) return;
@@ -862,7 +925,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       <CameraCapture
         open={!!cameraFor}
         onClose={() => setCameraFor(null)}
-        onCapture={handlePhotoCaptured}
+        onCapture={(dataUrl, fileName) => handlePhotoCaptured(dataUrl, fileName, undefined, selectedProofWorkItemId || undefined)}
         title={cameraFor ? `${cameraFor.charAt(0).toUpperCase()}${cameraFor.slice(1)} Photo` : 'Photo'}
       />
 
@@ -878,32 +941,69 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               </div>
             </Card>
 
-            <Card className="p-4">
-              <div className="flex items-center gap-2 mb-2">
-                <MapPin className="w-5 h-5 text-blue-600" />
-                <span className="font-medium text-slate-900">Location</span>
+            <ApprovedSpecsCard
+              items={approvedItems}
+              photos={surveyPhotos || []}
+              markings={boardMarkings || []}
+              photoItemLinks={surveyPhotoItemLinks || []}
+              expandedItemId={expandedInstallItemId}
+              onToggleItem={(itemId) => setExpandedInstallItemId((current) => current === itemId ? null : itemId)}
+              proofPhotos={proofPhotos}
+              onTakePhoto={(itemId) => { setSelectedProofWorkItemId(itemId); setCameraFor('installed'); }}
+              onUploadPhotos={(itemId, files) => { setSelectedProofWorkItemId(itemId); void handleInstallationFileSelection(files, itemId); }}
+              onDeletePhoto={(photo) => void deleteInstallationPhoto(photo)}
+            />
+
+            {proofPhotos.length > 0 && (
+              <Card className="p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-sm font-semibold text-slate-900">Installation photos</p>
+                  <span className="text-xs font-semibold text-blue-600">{proofPhotos.length} added</span>
+                </div>
+                <div className="grid grid-cols-4 gap-2">
+                  {proofPhotos.map((p, i) => (
+                    <div key={`${p.url}-${i}`} className="relative rounded-lg overflow-hidden bg-slate-100 aspect-[4/3]">
+                      <img src={p.url} alt="Installation proof" className="w-full h-full object-cover" />
+                      <button onClick={() => void deleteInstallationPhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5 shadow" aria-label="Delete photo"><Trash2 className="w-3 h-3" /></button>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+
+            <Card className="p-4 border-slate-200">
+              <div className="flex items-start gap-3 mb-3">
+                <ImagePlus className="w-5 h-5 text-blue-600 mt-0.5" />
+                <div><p className="font-semibold text-slate-900">Bulk Gallery Upload</p><p className="text-xs text-slate-500 mt-0.5">Select multiple photos, then map each photo to its exact work item before uploading.</p></div>
               </div>
-              {gpsStatus === 'captured' && gps ? (
-                <p className="text-sm text-green-600 flex items-center gap-1">
-                  <CheckCircle2 className="w-4 h-4" /> Location captured ({gps.accuracy.toFixed(0)}m)
-                </p>
-              ) : gpsStatus === 'capturing' ? (
-                <p className="text-sm text-blue-600 flex items-center gap-1"><Loader2 className="w-4 h-4 animate-spin" /> Capturing...</p>
-              ) : (
-                <p className="text-sm text-amber-600">Location unavailable</p>
-              )}
+              <label className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-blue-200 bg-blue-50/50 text-blue-700 text-sm font-semibold py-3 rounded-xl cursor-pointer">
+                <ImagePlus className="w-4 h-4" /> Choose multiple photos
+                <input type="file" accept="image/*" multiple className="hidden" onChange={(e) => { const fs = Array.from(e.target.files || []); setBulkGalleryFiles(fs); setBulkGalleryMap({}); e.currentTarget.value = ''; }} />
+              </label>
+              {bulkGalleryFiles.length > 0 && <div className="mt-3 space-y-2">
+                {bulkGalleryFiles.map((file, i) => <div key={`${file.name}-${i}`} className="rounded-xl border border-slate-200 p-3 bg-white">
+                  <p className="text-xs font-semibold text-slate-800 truncate mb-2">Photo {i + 1}: {file.name}</p>
+                  <select value={bulkGalleryMap[i] || ''} onChange={(e) => setBulkGalleryMap((m) => ({...m, [i]: e.target.value}))} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white">
+                    <option value="">Map to work item...</option>{approvedItems.map((it, idx) => <option key={it.id} value={it.id}>{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}</option>)}
+                  </select>
+                </div>)}
+                <button type="button" disabled={bulkUploading} onClick={() => void uploadMappedGallery()} className="w-full bg-blue-600 disabled:opacity-50 text-white font-semibold py-3 rounded-xl">{bulkUploading ? 'Uploading...' : `Upload ${bulkGalleryFiles.length} Mapped Photo${bulkGalleryFiles.length > 1 ? 's' : ''}`}</button>
+              </div>}
             </Card>
 
-            <ApprovedSpecsCard items={approvedItems} photos={surveyPhotos || []} markings={boardMarkings || []} />
-
             <button
-              onClick={() => navigateToShop(shop)}
-              className="w-full flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-lg text-sm transition"
+              onClick={() => {
+                if (proofPhotos.length === 0) { alert('Add at least one installation photo from an approved work item.'); return; }
+                setStep(4);
+              }}
+              className="w-full bg-slate-900 text-white font-semibold py-3.5 rounded-xl"
             >
-              <Navigation className="w-4 h-4" /> Navigate to Shop
+              Review Installation
             </button>
 
-            <button onClick={() => setStep(3)} className="w-full bg-slate-900 text-white font-medium py-3 rounded-lg">Start Installation</button>
+            <button onClick={() => navigateToShop(shop)} className="w-full flex items-center justify-center gap-1.5 text-blue-700 font-medium py-2.5 text-sm">
+              <Navigation className="w-4 h-4" /> Open Directions
+            </button>
           </div>
         )}
 
@@ -1063,13 +1163,17 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                 <p className="text-sm text-slate-400">No approved measurements found for this shop.</p>
               )}
               <p className="text-xs text-slate-400 mt-2">These are the measurements approved by your Admin/Owner during survey review — installed as-is, no need to re-enter them.</p>
+              <div className="mt-4 border-t border-slate-100 pt-4">
+                <div className="flex items-center justify-between mb-3"><p className="text-sm font-semibold text-slate-900">Installation Photo Review</p><span className="text-xs font-semibold text-blue-600">{proofPhotos.length} photos</span></div>
+                <div className="space-y-3">{approvedItems.map((it, idx) => { const ps = proofPhotos.filter((p) => p.workItemId === it.id); if (!ps.length) return null; return <div key={it.id}><p className="text-xs font-semibold text-slate-600 mb-1.5">{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {ps.length} photo{ps.length > 1 ? 's' : ''}</p><div className="grid grid-cols-3 gap-2">{ps.map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt="Installation proof" className="w-full h-full object-cover"/><button type="button" onClick={() => void deleteInstallationPhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5" aria-label="Delete photo"><Trash2 className="w-3 h-3"/></button></div>)}</div></div>; })}</div>
+              </div>
               <div className="mt-3">
                 <Textarea label="Note for reviewer (optional)" value={installNotes} onChange={setInstallNotes} rows={2} />
               </div>
             </Card>
 
             <div className="flex gap-2">
-              <button onClick={() => setStep(3)} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
+              <button onClick={() => setStep(1)} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
                 <ChevronLeft className="w-4 h-4" /> Back
               </button>
               <button onClick={completeInstallation} disabled={submitting} className="bg-blue-600 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex-1">{submitting ? 'Submitting...' : 'Final Submit'}</button>
@@ -1088,7 +1192,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               </div>
             </Card>
             <div className="flex gap-2">
-              <button onClick={() => { setException(null); setStep(3); }} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
+              <button onClick={() => { setException(null); setStep(1); }} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
                 <ChevronLeft className="w-4 h-4" /> Back
               </button>
               <button onClick={completeInstallation} disabled={submitting} className="bg-red-600 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex-1">{submitting ? 'Submitting...' : 'Submit Exception'}</button>
@@ -1146,36 +1250,97 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
 // as its own numbered polygon. Tapping a thumbnail opens a full-size view
 // so a small grid image never has to be squinted at to see exactly where
 // to install.
-function ApprovedSpecsCard({ items, photos, markings }: { items: WorkItem[]; photos: SurveyPhoto[]; markings: BoardMarking[] }) {
-  if (items.length === 0 && photos.length === 0) return null;
+function ApprovedSpecsCard({
+  items, photos, markings, photoItemLinks, expandedItemId, onToggleItem,
+  proofPhotos, onTakePhoto, onUploadPhotos, onDeletePhoto,
+}: {
+  items: WorkItem[];
+  photos: SurveyPhoto[];
+  markings: BoardMarking[];
+  photoItemLinks: { survey_photo_id: string; work_item_id: string }[];
+  expandedItemId: string | null;
+  onToggleItem: (itemId: string) => void;
+  proofPhotos: { id?: string; storagePath?: string; url: string; type: string; angle: 'front' | 'side' | 'other'; workItemId?: string }[];
+  onTakePhoto: (itemId: string) => void;
+  onUploadPhotos: (itemId: string, files: FileList | null) => void;
+  onDeletePhoto: (photo: { id?: string; storagePath?: string; url: string; type: string; angle: 'front' | 'side' | 'other'; workItemId?: string }) => void;
+}) {
+  if (items.length === 0) return null;
+
+  const photoIdsForItem = (itemId: string) => {
+    const ids = new Set<string>();
+    photoItemLinks.filter((l) => l.work_item_id === itemId).forEach((l) => ids.add(l.survey_photo_id));
+    markings.filter((m: any) => m.work_item_id === itemId).forEach((m) => ids.add(m.survey_photo_id));
+    return ids;
+  };
 
   return (
-    <Card className="p-4">
-      <div className="flex items-center gap-2 mb-3">
-        <Ruler className="w-5 h-5 text-blue-600" />
-        <span className="font-medium text-slate-900">Approved Installation Details</span>
+    <Card className="p-0 overflow-hidden border-slate-200">
+      <div className="px-4 pt-4 pb-3 border-b border-slate-100">
+        <div className="flex items-center gap-2">
+          <Ruler className="w-5 h-5 text-blue-600" />
+          <div>
+            <p className="font-semibold text-slate-900">Approved Installation Details</p>
+            <p className="text-xs text-slate-500 mt-0.5">Tap a work item to view the survey reference and add installation photos.</p>
+          </div>
+        </div>
       </div>
 
-      {items.length > 0 && (
-        <div className="space-y-2 mb-3">
-          {items.map((it) => (
-            <div key={it.id} className="flex items-center justify-between bg-blue-50 rounded-lg px-3 py-2 text-sm">
-              <div>
-                <p className="font-medium text-slate-900">{it.material || it.work_type_name || 'Item'}</p>
-                <p className="text-xs text-slate-500">{formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}{it.approved_notes ? ` · ${it.approved_notes}` : ''}</p>
-              </div>
-              <p className="text-sm font-bold text-blue-700 shrink-0 pl-2">×{it.approved_quantity || 1}</p>
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="divide-y divide-slate-100">
+        {items.map((it, idx) => {
+          const open = expandedItemId === it.id;
+          const linkedIds = photoIdsForItem(it.id);
+          const itemPhotos = photos.filter((p) => linkedIds.has(p.id));
+          const itemMarkings = markings.filter((m: any) => m.work_item_id === it.id || linkedIds.has(m.survey_photo_id));
+          const installedCount = proofPhotos.filter((p) => p.workItemId === it.id).length;
+          const label = it.work_type_name || it.material || `Work Item ${idx + 1}`;
+          return (
+            <div key={it.id} className={open ? 'bg-blue-50/40' : 'bg-white'}>
+              <button type="button" onClick={() => onToggleItem(it.id)} className="w-full px-4 py-3.5 flex items-center gap-3 text-left active:bg-slate-50">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <p className="font-semibold text-slate-900 truncate">{label}</p>
+                    {installedCount > 0 && <span className="shrink-0 text-[10px] font-bold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">{installedCount} PHOTO{installedCount > 1 ? 'S' : ''}</span>}
+                  </div>
+                  <p className="text-xs text-blue-600 mt-0.5">{open ? 'Installation details' : 'Tap to view details & add photos'}</p>
+                </div>
+                <span className={`text-blue-600 text-lg transition-transform ${open ? 'rotate-45' : ''}`}>+</span>
+              </button>
 
-      {photos.length > 0 && (
-        <>
-          <p className="text-xs text-slate-400 mb-1.5">Install at the approved marked survey position. Tap a photo to view it larger:</p>
-          <MarkedPhotoGrid photos={photos} markings={markings} workItems={items} />
-        </>
-      )}
+              {open && (
+                <div className="px-4 pb-4 space-y-3">
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="rounded-lg bg-white border border-slate-200 p-2.5"><p className="text-[10px] uppercase tracking-wide text-slate-400">Size</p><p className="text-xs font-semibold text-slate-800 mt-1">{formatDim(it.approved_width)} × {formatDim(it.approved_height)} {it.approved_unit}</p></div>
+                    <div className="rounded-lg bg-white border border-slate-200 p-2.5"><p className="text-[10px] uppercase tracking-wide text-slate-400">Quantity</p><p className="text-xs font-semibold text-slate-800 mt-1">{it.approved_quantity || 1}</p></div>
+                    <div className="rounded-lg bg-white border border-slate-200 p-2.5"><p className="text-[10px] uppercase tracking-wide text-slate-400">Area</p><p className="text-xs font-semibold text-slate-800 mt-1">{it.approved_area != null ? `${Math.round(it.approved_area * 100) / 100} sq.ft` : '—'}</p></div>
+                  </div>
+                  <div className="rounded-xl bg-white border border-slate-200 p-3">
+                    <p className="text-[11px] font-bold tracking-wide text-slate-500 uppercase mb-2">Survey reference</p>
+                    {itemPhotos.length > 0 ? (
+                      <MarkedPhotoGrid photos={itemPhotos} markings={itemMarkings} workItems={[it]} />
+                    ) : (
+                      <div className="rounded-lg bg-slate-50 px-3 py-4 text-center text-xs text-slate-500">No survey photo is mapped to this work item.</div>
+                    )}
+                  </div>
+
+                  {installedCount > 0 && <div className="rounded-xl bg-white border border-slate-200 p-3"><div className="flex items-center justify-between mb-2"><p className="text-[11px] font-bold tracking-wide text-slate-500 uppercase">Installation photos</p><span className="text-[10px] font-semibold text-emerald-700">{installedCount} added</span></div><div className="grid grid-cols-3 gap-2">{proofPhotos.filter((p) => p.workItemId === it.id).map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt={`${label} installation`} className="w-full h-full object-cover"/><button type="button" onClick={() => onDeletePhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5 shadow" aria-label="Delete installation photo"><Trash2 className="w-3 h-3"/></button></div>)}</div></div>}
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button type="button" onClick={() => onTakePhoto(it.id)} className="flex items-center justify-center gap-2 bg-blue-600 active:bg-blue-700 text-white font-semibold py-3 rounded-xl text-sm">
+                      <Camera className="w-4 h-4" /> Take Photo
+                    </button>
+                    <label className="flex items-center justify-center gap-2 bg-white border border-blue-200 text-blue-700 font-semibold py-3 rounded-xl text-sm cursor-pointer active:bg-blue-50">
+                      <ImagePlus className="w-4 h-4" /> Gallery
+                      <input type="file" accept="image/*" multiple className="hidden" onChange={(e) => { onUploadPhotos(it.id, e.target.files); e.currentTarget.value = ''; }} />
+                    </label>
+                  </div>
+                  <p className="text-[11px] text-slate-500 text-center">Photos added here are automatically linked to <span className="font-semibold text-slate-700">{label}</span>.</p>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </Card>
   );
 }

@@ -1051,7 +1051,8 @@ function buildInstallationPhotoRows(shops: any[], workItems: any[], src: ExcelPh
         'City': shop?.city || '',
         'Work Item': p.work_item_id ? (workItemById.get(p.work_item_id)?.work_type_name || 'Mapped item') : 'Unmapped / legacy',
         'Measurement': p.work_item_id ? (() => { const w:any = workItemById.get(p.work_item_id); return w ? `${w.approved_width ?? w.survey_width ?? ''} x ${w.approved_height ?? w.survey_height ?? ''} ${w.approved_unit ?? w.survey_unit ?? ''}`.trim() : '' })() : '',
-        'Approved Area (sq.ft)': p.work_item_id ? (workItemById.get(p.work_item_id)?.approved_area ?? workItemById.get(p.work_item_id)?.survey_area ?? '') : '',
+        'Approved Area (sq.ft)': p.work_item_id ? ((workItemById.get(p.work_item_id) as any)?.excluded_from_calculations ? '' : (workItemById.get(p.work_item_id)?.approved_area ?? workItemById.get(p.work_item_id)?.survey_area ?? '')) : '',
+        'Execution Status': p.work_item_id ? ((workItemById.get(p.work_item_id) as any)?.excluded_from_calculations ? 'Not installed / excluded' : 'Active') : 'Legacy / unmapped',
         'Photo Type': PHOTO_TYPE_LABELS[p.photo_type] || p.photo_type || '',
         'Angle': angleLabels[p.angle || ''] || p.angle || '',
         'GPS Latitude': p.gps_lat ?? '',
@@ -1134,7 +1135,7 @@ export function exportShopsToExcel(
 
   const shopRows = shops.map((shop) => {
     const items = workItems.filter((w) => w.shop_id === shop.id);
-    const totalArea = Math.round(items.reduce((sum, i) => sum + (i.survey_area || 0), 0));
+    const totalArea = Math.round(items.filter((i:any) => !i.excluded_from_calculations).reduce((sum, i) => sum + (i.survey_area || 0), 0));
     return {
       'Shop Name': shop.name,
       'Client': shopClientName(shop),
@@ -1192,7 +1193,7 @@ export function exportMultiSheetExcel(
         'City': shop.city || '',
         'Status': shop.status,
         'Work Items': items.length,
-        'Total Area': Math.round(items.reduce((s, i) => s + (i.survey_area || 0), 0)),
+        'Total Area': Math.round(items.filter((i:any) => !i.excluded_from_calculations).reduce((s, i) => s + (i.survey_area || 0), 0)),
       };
     });
     appendSheetWithLinks(wb, stage.name, rows);

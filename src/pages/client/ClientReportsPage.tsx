@@ -105,9 +105,9 @@ export default function ClientReportsPage() {
   const { data: workItems } = useQuery({
     queryKey: ['client-reports-work-items', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('work_items').select('id, shop_id, work_type_name, survey_area, survey_quantity, approved_area, approved_quantity, created_at');
+      const { data, error } = await supabase.from('work_items').select('id, shop_id, work_type_name, survey_area, survey_quantity, approved_area, approved_quantity, excluded_from_calculations, created_at');
       if (error) throw error;
-      return data as Pick<WorkItem, 'id' | 'shop_id' | 'work_type_name' | 'survey_area' | 'survey_quantity' | 'approved_area' | 'approved_quantity' | 'created_at'>[];
+      return data as Pick<WorkItem, 'id' | 'shop_id' | 'work_type_name' | 'survey_area' | 'survey_quantity' | 'approved_area' | 'approved_quantity' | 'excluded_from_calculations' | 'created_at'>[];
     },
     enabled: !!orgId,
   });
@@ -262,7 +262,7 @@ export default function ClientReportsPage() {
       const po = s.purchase_order_id ? poById.get(s.purchase_order_id) : null;
       const items = workItemsByShop.get(s.id) || [];
       const workTypes = Array.from(new Set(items.map((w) => w.work_type_name).filter(Boolean)));
-      const totalArea = items.reduce((sum, w) => sum + (w.approved_area ?? w.survey_area ?? 0), 0);
+      const totalArea = items.filter((w:any) => !w.excluded_from_calculations).reduce((sum, w) => sum + (w.approved_area ?? w.survey_area ?? 0), 0);
       const totalQty = items.reduce((sum, w) => sum + (w.approved_quantity ?? w.survey_quantity ?? 0), 0);
       const earliestAssigned = items.length > 0 ? items.map((w) => w.created_at).sort()[0] : null;
       return {

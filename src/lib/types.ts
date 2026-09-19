@@ -355,6 +355,12 @@ export interface WorkItem {
   installed_notes: string | null;
   installed_at: string | null;
   status: string;
+  execution_state: 'active' | 'site_unavailable' | 'removed_from_scope';
+  execution_reason: string | null;
+  execution_note: string | null;
+  excluded_from_calculations: boolean;
+  execution_marked_at: string | null;
+  execution_marked_by: string | null;
   po_line_item_id: string | null;
   po_variance_note: string | null;
   po_variance_acknowledged_by: string | null;

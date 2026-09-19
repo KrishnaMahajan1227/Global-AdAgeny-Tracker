@@ -3195,6 +3195,17 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     enabled: !!shopId,
   });
 
+  const { data: fieldReviewDecisions = [] } = useQuery({
+    queryKey: ['shop-field-review-decisions', shopId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('field_review_decisions').select('*').eq('shop_id', shopId).order('reviewed_at', { ascending: false });
+      if (error && /field_review_decisions|schema cache/i.test(error.message || '')) return [];
+      if (error) throw error;
+      return data || [];
+    },
+    enabled: !!shopId,
+  });
+
   const { data: installations } = useQuery({
     queryKey: ['shop-installations', shopId],
     queryFn: async () => {
@@ -3511,7 +3522,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     ['shops', 'surveys', 'work_items', 'design_tasks', 'design_versions', 'production_orders', 'installation_jobs', 'shop_assignments'],
     orgId,
     [
-      ['shop', shopId], ['shop-work-items', shopId], ['shop-survey-photos', shopId],
+      ['shop', shopId], ['shop-work-items', shopId], ['shop-field-review-decisions', shopId], ['shop-survey-photos', shopId],
       ['shop-surveys', shopId], ['shop-design-tasks', shopId], ['shop-production', shopId],
       ['shop-installations', shopId], ['shop-assignments', shopId],
     ]
@@ -3846,6 +3857,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                       {canCrudShop && <button title="Edit item" onClick={() => { setEditWorkItem(item); setWorkItemForm({ work_type_name: item.work_type_name || '', material: item.material || '', width: String(item.approved_width ?? item.survey_width ?? ''), height: String(item.approved_height ?? item.survey_height ?? ''), unit: item.approved_unit || item.survey_unit || 'ft', quantity: String(item.approved_quantity ?? item.survey_quantity ?? 1) }); }} className="text-slate-400 hover:text-blue-600"><Pencil className="w-4 h-4" /></button>}
                       {canCrudShop && <button title="Delete item" onClick={() => { if (window.confirm('Delete this work item and its dependent links?')) deleteWorkItemMutation.mutate(item.id); }} className="text-slate-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>}
                       <StatusBadge status={item.status} />
+                      {item.excluded_from_calculations && <span className="rounded-full bg-amber-100 text-amber-800 px-2 py-1 text-[10px] font-bold">NOT INSTALLED · EXCLUDED</span>}
                     </div>
                   </div>
                   <div className="space-y-1 text-xs">
@@ -3857,13 +3869,16 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                     </div>
                     <WorkItemStageRow label="Installed" width={item.installed_width} height={item.installed_height} unit={item.installed_unit} quantity={item.installed_quantity} area={item.installed_area} />
                   </div>
+                  {item.excluded_from_calculations && <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2"><p className="text-xs font-semibold text-amber-900">Site unavailable / not executed</p><p className="text-xs text-amber-800 mt-0.5">{item.execution_reason || 'Installation not possible'}{item.execution_note ? ` · ${item.execution_note}` : ''}</p><p className="text-[11px] text-amber-700 mt-1">This work item remains in project history but is excluded from installed quantities, installed sq.ft and billing calculations.</p></div>}
                   {(() => {
                     const surveyForItem = (surveyPhotos || []).filter((p) => (surveyPhotoItems || []).some((x) => x.survey_photo_id === p.id && x.work_item_id === item.id) || (boardMarkings || []).some((m) => m.survey_photo_id === p.id && m.work_item_id === item.id));
                     const designForItem = (designTasks || []).flatMap((d: any) => (d.design_versions || []).filter((v: any) => (v.design_version_items || []).some((x: any) => x.work_item_id === item.id)));
                     const installForItem = (installations || []).flatMap((inst: any) => (inst.installation_proofs || []).filter((proof: any) => proof.work_item_id === item.id));
+                    const measurementDecision:any = (fieldReviewDecisions as any[]).find((d:any) => d.stage === 'survey' && d.entity_type === 'measurement' && d.entity_id === item.id);
+                    const installDecision:any = (fieldReviewDecisions as any[]).find((d:any) => d.stage === 'installation' && d.entity_type === 'work_item' && d.entity_id === item.id);
                     const Thumb = ({ src, label, onDelete }: { src: string; label: string; onDelete?: () => void }) => <div className="relative shrink-0"><button type="button" onClick={() => setEvidencePreview({ src, label })} className="block rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" title="Click to preview"><img src={src} className="w-16 h-16 rounded-lg object-cover border border-slate-200 shadow-sm"/><span className="absolute bottom-1 left-1 bg-black/65 text-white text-[9px] px-1.5 py-0.5 rounded pointer-events-none">{label}</span></button>{canCrudShop && onDelete && <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete photo" className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-white border border-red-200 text-red-600 shadow flex items-center justify-center hover:bg-red-50"><Trash2 className="w-3.5 h-3.5"/></button>}</div>;
                     return <div className="mt-4 pt-4 border-t border-slate-200">
-                      <div className="flex items-center justify-between mb-3"><p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Complete evidence · this work item</p><div className="flex gap-2">{canCrudShop && <><button onClick={() => { setSurveyPhotoTargetItemId(item.id); setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700">+ Survey photos</button><button onClick={() => { setDesignUploadTargetItemId(item.id); setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set([item.id])); setDesignUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-violet-200 bg-violet-50 text-violet-700">+ Designs</button></>}</div></div>
+                      <div className="flex items-center justify-between mb-3"><div><p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Complete evidence · this work item</p><div className="flex gap-1.5 mt-1">{measurementDecision && <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${measurementDecision.decision==='approved'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-800'}`}>SURVEY {measurementDecision.decision==='approved'?'APPROVED':'REDO'}</span>}{installDecision && <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${installDecision.decision==='approved'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-800'}`}>INSTALL {installDecision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div><div className="flex gap-2">{canCrudShop && <><button onClick={() => { setSurveyPhotoTargetItemId(item.id); setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700">+ Survey photos</button><button onClick={() => { setDesignUploadTargetItemId(item.id); setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set([item.id])); setDesignUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-violet-200 bg-violet-50 text-violet-700">+ Designs</button></>}</div></div>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                         <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-blue-800">SURVEY / BEFORE</p><span className="text-[10px] text-blue-600">{surveyForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`S${i+1}`} onDelete={() => void deleteDetailPhoto(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped survey photo</span>}</div></div>
                         <div className="rounded-lg bg-violet-50/50 border border-violet-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-violet-800">DESIGN / ARTWORK</p><span className="text-[10px] text-violet-600">{designForItem.length} file(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{designForItem.length ? designForItem.map((v:any)=> v.file_url?.match(/\.(png|jpe?g|webp|gif)(\?|$)/i) ? <Thumb key={v.id} src={v.file_url} label={`v${v.version_number}`} /> : <a key={v.id} href={v.file_url} target="_blank" rel="noreferrer" className="w-16 h-16 rounded-lg border border-violet-200 bg-white text-violet-700 flex flex-col items-center justify-center text-[10px] font-semibold shrink-0"><Palette className="w-4 h-4 mb-1"/>v{v.version_number}</a>) : <span className="text-xs text-slate-400 py-5">No mapped design</span>}</div></div>

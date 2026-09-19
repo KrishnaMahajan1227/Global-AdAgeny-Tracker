@@ -523,12 +523,12 @@ async function drawInstallationSection(doc: jsPDF, entry: InstallationReportEntr
   }
   y += 4;
 
-  const installedItems = workItems.filter((w) => w.installed_width);
+  const installedItems = workItems.filter((w) => w.installed_width && !w.excluded_from_calculations && (w.execution_state || 'active') === 'active');
   const tableData = installedItems.map((item, i) => [
     `${i + 1}`,
     item.work_type_name || 'N/A',
     `${formatDim(item.installed_width) || 0} x ${formatDim(item.installed_height) || 0} ${item.installed_unit || 'ft'}`,
-    `${item.installed_quantity || 1}`,
+    `${item.installed_quantity ?? 0}`,
     `${item.installed_area ? Math.round(item.installed_area) : 0} sq ft`,
     item.installed_notes || '',
   ]);
@@ -1740,11 +1740,11 @@ export async function generateFinalInstallationPPT(
     }
 
     if (items.length > 0) {
-      const tableRows = items.map((item, i) => [
+      const tableRows = items.filter((item) => !item.excluded_from_calculations && (item.execution_state || 'active') === 'active').map((item, i) => [
         { text: `${i + 1}` },
         { text: item.work_type_name || 'N/A' },
         { text: `${formatDim(item.installed_width) || 0} x ${formatDim(item.installed_height) || 0} ${item.installed_unit || 'ft'}` },
-        { text: `${item.installed_quantity || 1}` },
+        { text: `${item.installed_quantity ?? 0}` },
         { text: `${item.installed_area ? Math.round(item.installed_area) : 0} sq ft` },
       ]);
 

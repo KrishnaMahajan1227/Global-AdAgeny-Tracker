@@ -3003,6 +3003,33 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }),
   });
 
+  const setExecutionAvailability = async (item: WorkItem) => {
+    if (!profile) return;
+    const unavailable = !(item.excluded_from_calculations || (item.execution_state && item.execution_state !== 'active'));
+    let reason: string | null = null;
+    let note: string | null = null;
+    if (unavailable) {
+      reason = window.prompt('Why is this work not available for installation? (Renovation / site blocked / permission / removed scope / other)', item.execution_reason || 'Site renovation')?.trim() || null;
+      if (!reason) return;
+      note = window.prompt('Optional internal note for installer / Owner / Admin', item.execution_note || '')?.trim() || null;
+    }
+    const { error } = await supabase.from('work_items').update({
+      execution_state: unavailable ? 'site_unavailable' : 'active',
+      execution_reason: unavailable ? reason : null,
+      execution_note: unavailable ? note : null,
+      excluded_from_calculations: unavailable,
+      execution_marked_at: new Date().toISOString(),
+      execution_marked_by: profile.id,
+      ...(unavailable ? { installed_width: null, installed_height: null, installed_unit: null, installed_quantity: null, installed_area: null, installed_at: null } : {}),
+    }).eq('id', item.id);
+    if (error) throw error;
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }),
+      queryClient.invalidateQueries({ queryKey: ['po-utilization'] }),
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] }),
+    ]);
+  };
+
   const saveWorkItemMutation = useMutation({
     mutationFn: async () => {
       if (!editWorkItem) return;
@@ -3879,6 +3906,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                       {canCrudShop && <button title="Edit item" onClick={() => { setEditWorkItem(item); setWorkItemForm({ work_type_name: item.work_type_name || '', material: item.material || '', width: String(item.approved_width ?? item.survey_width ?? ''), height: String(item.approved_height ?? item.survey_height ?? ''), unit: item.approved_unit || item.survey_unit || 'ft', quantity: String(item.approved_quantity ?? item.survey_quantity ?? 1) }); }} className="text-slate-400 hover:text-blue-600"><Pencil className="w-4 h-4" /></button>}
                       {canCrudShop && <button title="Delete item" onClick={() => { if (window.confirm('Delete this work item and its dependent links?')) deleteWorkItemMutation.mutate(item.id); }} className="text-slate-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>}
                       <StatusBadge status={item.status} />
+                      {canCrudShop && <button type="button" onClick={() => void setExecutionAvailability(item)} className={`rounded-full border px-2 py-1 text-[10px] font-bold ${item.excluded_from_calculations ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-amber-300 bg-amber-50 text-amber-800'}`}>{item.excluded_from_calculations ? 'MAKE INSTALLABLE' : 'MARK UNAVAILABLE'}</button>}
                       {item.excluded_from_calculations && <span className="rounded-full bg-amber-100 text-amber-800 px-2 py-1 text-[10px] font-bold">NOT INSTALLED · EXCLUDED</span>}
                     </div>
                   </div>
@@ -3893,9 +3921,18 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                   </div>
                   {item.excluded_from_calculations && <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2"><p className="text-xs font-semibold text-amber-900">Site unavailable / not executed</p><p className="text-xs text-amber-800 mt-0.5">{item.execution_reason || 'Installation not possible'}{item.execution_note ? ` · ${item.execution_note}` : ''}</p><p className="text-[11px] text-amber-700 mt-1">This work item remains in project history but is excluded from installed quantities, installed sq.ft and billing calculations.</p></div>}
                   {(() => {
-                    const surveyForItem = (surveyPhotos || []).filter((p) => (surveyPhotoItems || []).some((x) => x.survey_photo_id === p.id && x.work_item_id === item.id) || (boardMarkings || []).some((m) => m.survey_photo_id === p.id && m.work_item_id === item.id));
+                    // Prefer explicit evidence -> work-item links. For legacy single-item shops,
+                    // mapping is unambiguous, so show historical evidence on that sole item too.
+                    // Multi-item shops are never guessed: unlinked evidence remains in the
+                    // Legacy / unmapped section below instead of being attached incorrectly.
+                    const isOnlyWorkItem = (workItems || []).length === 1;
+                    const surveyForItem = (surveyPhotos || []).filter((p) =>
+                      (surveyPhotoItems || []).some((x) => x.survey_photo_id === p.id && x.work_item_id === item.id) ||
+                      (boardMarkings || []).some((m) => m.survey_photo_id === p.id && m.work_item_id === item.id) ||
+                      (isOnlyWorkItem && !(surveyPhotoItems || []).some((x) => x.survey_photo_id === p.id) && !(boardMarkings || []).some((m) => m.survey_photo_id === p.id && m.work_item_id))
+                    );
                     const designForItem = (designTasks || []).flatMap((d: any) => (d.design_versions || []).filter((v: any) => (v.design_version_items || []).some((x: any) => x.work_item_id === item.id)));
-                    const installForItem = (installations || []).flatMap((inst: any) => (inst.installation_proofs || []).filter((proof: any) => proof.work_item_id === item.id));
+                    const installForItem = (installations || []).flatMap((inst: any) => (inst.installation_proofs || []).filter((proof: any) => proof.work_item_id === item.id || (isOnlyWorkItem && !proof.work_item_id)));
                     const measurementDecision:any = (fieldReviewDecisions as any[]).find((d:any) => d.stage === 'survey' && d.entity_type === 'measurement' && d.entity_id === item.id);
                     const installDecision:any = (fieldReviewDecisions as any[]).find((d:any) => d.stage === 'installation' && d.entity_type === 'work_item' && d.entity_id === item.id);
                     const latestDecision = (stage: 'survey' | 'installation', entityType: string, entityId: string) => (fieldReviewDecisions as any[]).find((d:any) => d.stage === stage && d.entity_type === entityType && d.entity_id === entityId);
@@ -3903,9 +3940,9 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                     return <div className="mt-4 pt-4 border-t border-slate-200">
                       <div className="flex items-center justify-between mb-3"><div><p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Complete evidence · this work item</p><div className="flex gap-1.5 mt-1">{measurementDecision && <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${measurementDecision.decision==='approved'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-800'}`}>SURVEY {measurementDecision.decision==='approved'?'APPROVED':'REDO'}</span>}{installDecision && <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${installDecision.decision==='approved'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-800'}`}>INSTALL {installDecision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div><div className="flex gap-2">{canCrudShop && <><button onClick={() => { setSurveyPhotoTargetItemId(item.id); setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700">+ Survey photos</button><button onClick={() => { setDesignUploadTargetItemId(item.id); setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set([item.id])); setDesignUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-violet-200 bg-violet-50 text-violet-700">+ Designs</button></>}</div></div>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-blue-800">SURVEY / BEFORE</p><span className="text-[10px] text-blue-600">{surveyForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`S${i+1}`} decision={latestDecision('survey','photo',p.id)} onDelete={() => void deleteDetailPhoto(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped survey photo</span>}</div></div>
+                        <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-blue-800">SURVEY / BEFORE</p><span className="text-[10px] text-blue-600">{surveyForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`S${i+1}`} decision={latestDecision('survey','survey_photo',p.id)} onDelete={() => void deleteDetailPhoto(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped survey photo</span>}</div></div>
                         <div className="rounded-lg bg-violet-50/50 border border-violet-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-violet-800">DESIGN / ARTWORK</p><span className="text-[10px] text-violet-600">{designForItem.length} file(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{designForItem.length ? designForItem.map((v:any)=> v.file_url?.match(/\.(png|jpe?g|webp|gif)(\?|$)/i) ? <Thumb key={v.id} src={v.file_url} label={`v${v.version_number}`} /> : <a key={v.id} href={v.file_url} target="_blank" rel="noreferrer" className="w-16 h-16 rounded-lg border border-violet-200 bg-white text-violet-700 flex flex-col items-center justify-center text-[10px] font-semibold shrink-0"><Palette className="w-4 h-4 mb-1"/>v{v.version_number}</a>) : <span className="text-xs text-slate-400 py-5">No mapped design</span>}</div></div>
-                        <div className="rounded-lg bg-emerald-50/50 border border-emerald-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-emerald-800">INSTALLATION / AFTER</p><span className="text-[10px] text-emerald-600">{installForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{installForItem.length ? installForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`I${i+1}`} decision={latestDecision('installation','photo',p.id)} onDelete={() => void deleteInstallationProof(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped installation proof</span>}</div></div>
+                        <div className="rounded-lg bg-emerald-50/50 border border-emerald-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-emerald-800">INSTALLATION / AFTER</p><span className="text-[10px] text-emerald-600">{installForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{installForItem.length ? installForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`I${i+1}`} decision={latestDecision('installation','installation_photo',p.id)} onDelete={() => void deleteInstallationProof(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped installation proof</span>}</div></div>
                       </div>
                     </div>;
                   })()}

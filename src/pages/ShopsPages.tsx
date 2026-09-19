@@ -10,6 +10,7 @@ import {
 } from '@/components/ui';
 import { Client, Project, Campaign, Shop, WorkType, WorkItem, SurveyPhoto, BoardMarking, Zone, PurchaseOrder, POLineItem, WorkItemComponent } from '@/lib/types';
 import { logAudit, createNotification } from '@/lib/helpers';
+import { setAvailability, refreshReviewViews } from '@/lib/reviewApi';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { formatDim, LENGTH_UNIT_OPTIONS, toFeet } from '@/lib/units';
@@ -1076,7 +1077,7 @@ export function ShopsPage() {
         .order('name')
         .limit(2000);
       if (error) throw new Error(`Could not load shops: ${error.message}`);
-      return data as BulkBackfillShopRow[];
+      return data as unknown as BulkBackfillShopRow[];
     },
     enabled: !!orgId && bulkBackfillOpen,
   });
@@ -1629,7 +1630,7 @@ export function ShopsPage() {
           if (bulkRole === 'surveyor' && shop.status === 'pending') {
             await supabase.from('shops').update({ status: 'assigned' }).eq('id', shop.id);
           }
-          await createNotification(bulkUserId, 'New Assignment', `You've been assigned as ${bulkRole} for ${shop.name}`, 'info', bulkRole === 'surveyor' ? '/survey' : undefined);
+          await createNotification(bulkUserId, 'New Assignment', `You've been assigned as ${bulkRole} for ${shop.name}`, 'info', '/mobile');
         }
       }
 
@@ -3013,8 +3014,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       if (!reason) return;
       note = window.prompt('Optional internal note for installer / Owner / Admin', item.execution_note || '')?.trim() || null;
     }
-    const { error } = await supabase.rpc('set_work_item_execution_availability', { p_work_item_id: item.id, p_unavailable: unavailable, p_reason: reason, p_note: note });
-    if (error) throw error;
+    try { await setAvailability(item.id, unavailable, reason, note); } catch (e: any) { alert(e.message || 'Could not update availability'); return; }
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }),
       queryClient.invalidateQueries({ queryKey: ['po-utilization'] }),
@@ -3184,7 +3184,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     queryFn: async () => {
       const { data } = await supabase
         .from('surveys')
-        .select('*, profiles(full_name)')
+        .select('*, profiles:surveyor_id(full_name)')
         .eq('shop_id', shopId)
         .order('created_at', { ascending: false });
       return data;
@@ -3229,11 +3229,22 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   // relationship cache here: a stale relationship/schema cache used to make
   // approved installation photos silently disappear from Shop Details even
   // though the proof rows were present.
+  const { data: fieldCorrections = [] } = useQuery({
+    queryKey: ['shop-field-corrections', shopId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('field_corrections').select('*').eq('shop_id', shopId).order('created_at', { ascending: false });
+      if (error && /field_corrections|schema cache/i.test(error.message || '')) return [];
+      if (error) throw error;
+      return data || [];
+    },
+    enabled: !!shopId,
+  });
+
   const { data: installations } = useQuery({
     queryKey: ['shop-installations', shopId],
     queryFn: async () => {
       const [{ data: jobs, error: jobsError }, { data: proofs, error: proofsError }] = await Promise.all([
-        supabase.from('installation_jobs').select('*, profiles(full_name)').eq('shop_id', shopId).order('created_at', { ascending: false }),
+        supabase.from('installation_jobs').select('*, profiles:installer_id(full_name)').eq('shop_id', shopId).order('created_at', { ascending: false }),
         supabase.from('installation_proofs').select('*').eq('shop_id', shopId).order('captured_at', { ascending: false }),
       ]);
       if (jobsError) throw jobsError;
@@ -3482,7 +3493,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         ? `Reassigned ${assignModal} for ${shop.name} to ${worker?.full_name || 'user'}`
         : `Assigned ${worker?.full_name || 'user'} as ${assignModal} for ${shop.name}`;
       await logAudit('shop_assignments', null, action, 'role', null, assignModal, logMessage);
-      await createNotification(assignUserId, 'New Assignment', `You've been assigned as ${assignModal} for ${shop.name}`, 'info', assignModal === 'surveyor' ? '/survey' : undefined);
+      await createNotification(assignUserId, 'New Assignment', `You've been assigned as ${assignModal} for ${shop.name}`, 'info', '/mobile');
       for (const prev of previousHolders) {
         await createNotification(
           prev.user_id,
@@ -3560,12 +3571,12 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   // exact page while a designer approves or a production order completes
   // elsewhere would see a stale Timeline until they refreshed.
   useRealtimeInvalidate(
-    ['shops', 'surveys', 'survey_photos', 'survey_photo_items', 'board_markings', 'work_items', 'field_review_decisions', 'design_tasks', 'design_versions', 'design_version_items', 'production_orders', 'installation_jobs', 'installation_proofs', 'shop_assignments'],
+    ['shops', 'surveys', 'survey_photos', 'survey_photo_items', 'board_markings', 'work_items', 'field_review_decisions', 'field_corrections', 'design_tasks', 'design_versions', 'design_version_items', 'production_orders', 'installation_jobs', 'installation_proofs', 'shop_assignments'],
     orgId,
     [
       ['shop', shopId], ['shop-work-items', shopId], ['shop-field-review-decisions', shopId], ['shop-survey-photos', shopId],
       ['shop-surveys', shopId], ['shop-design-tasks', shopId], ['shop-production', shopId],
-      ['shop-installations', shopId], ['shop-survey-photo-items', shopId], ['shop-board-markings', shopId], ['shop-assignments', shopId],
+      ['shop-installations', shopId], ['shop-field-corrections', shopId], ['shop-survey-photo-items', shopId], ['shop-board-markings', shopId], ['shop-assignments', shopId],
     ]
   );
 

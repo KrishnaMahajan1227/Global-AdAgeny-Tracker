@@ -158,6 +158,16 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
         }
       }
 
+      // Always link the board to the photo it was measured on (even when no polygon was drawn),
+      // so the photo shows under the right work item everywhere (Shop Details, reviews, installer).
+      if (item.photoLocalId && workItemRow) {
+        const linkedPhotoId = uploadedPhotoIdByLocalId.get(item.photoLocalId);
+        if (linkedPhotoId) {
+          const { error: linkErr } = await supabase.from('survey_photo_items').insert({ organization_id: draft.organizationId, survey_photo_id: linkedPhotoId, work_item_id: workItemRow.id });
+          if (linkErr && !/duplicate|survey_photo_items|schema cache/i.test(linkErr.message || '')) console.error('[syncDraft] photo link failed:', linkErr.message);
+        }
+      }
+
       if (item.points && item.points.length >= 3 && item.photoLocalId) {
         const surveyPhotoId = uploadedPhotoIdByLocalId.get(item.photoLocalId);
         if (surveyPhotoId) {

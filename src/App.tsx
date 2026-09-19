@@ -20,6 +20,7 @@ import ReportsPage from '@/pages/ReportsPage';
 import BillingPage from '@/pages/BillingPage';
 import FieldMapPage from '@/pages/FieldMapPage';
 import RoutePlanningPage from '@/pages/RoutePlanningPage';
+import WorkProgressPage from '@/pages/WorkProgressPage';
 import SurveyorPage from '@/pages/SurveyorPage';
 import InstallerPage from '@/pages/InstallerPage';
 import ClientPortalPage from '@/pages/ClientPortalPage';
@@ -190,6 +191,9 @@ function AppRoutes() {
         } />
         <Route path="/shops/:shopId" element={
           <ProtectedRoute allowedRoles={FINANCIAL_ROLES}><ShopDetailPageWrapper /></ProtectedRoute>
+        } />
+        <Route path="/progress" element={
+          <ProtectedRoute allowedRoles={['agency_owner', 'admin', 'accounts', 'demo']}><WorkProgressPage /></ProtectedRoute>
         } />
         <Route path="/survey-review" element={<SurveyReviewPage />} />
         <Route path="/design" element={<DesignerPage />} />

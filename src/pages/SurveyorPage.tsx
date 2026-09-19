@@ -11,6 +11,7 @@ import {
   newLocalId, type SurveyDraft, type DraftPhoto, type DraftWorkItem,
 } from '@/lib/offlineDb';
 import { syncAllPendingDrafts, syncDraft } from '@/lib/syncManager';
+import { SurveyCorrectionFixer } from '@/components/SurveyCorrectionFixer';
 import { CameraCapture } from '@/components/CameraCapture';
 import { VoiceMicButton, VoiceSizeButton } from '@/components/VoiceMicButton';
 import { BoardMarkerCanvas } from '@/components/BoardMarkerCanvas';
@@ -89,6 +90,21 @@ export function navigateToShop(shop: {
   }
 }
 
+// If Owner/Admin sent specific items back, open the in-place "Fix Redo" screen instead of a fresh survey.
+function SurveyEntry({ shopId, onExit }: { shopId: string; onExit: (nextShopId?: string) => void }) {
+  const { profile } = useAuth();
+  const { data, isLoading } = useQuery({
+    queryKey: ['survey-entry-corrections', shopId, profile?.id],
+    queryFn: async () => {
+      const { count } = await supabase.from('field_corrections').select('id', { count: 'exact', head: true }).eq('shop_id', shopId).eq('stage', 'survey').eq('assigned_to', profile!.id).eq('status', 'open');
+      return count || 0;
+    }, enabled: !!profile?.id,
+  });
+  if (isLoading) return <div className="p-8 text-center text-slate-400 text-sm">Loading…</div>;
+  if ((data || 0) > 0) return <SurveyCorrectionFixer shopId={shopId} onExit={() => onExit()} />;
+  return <SurveyWizard shopId={shopId} onExit={onExit} />;
+}
+
 function isShopSurveyable(status: string | null | undefined): boolean {  return SURVEYABLE_SHOP_STATUSES.includes(status || '');
 }
 
@@ -122,10 +138,7 @@ export default function SurveyorPage() {
         </div>
       )}
       {activeSurvey ? (
-        <SurveyWizard
-          shopId={activeSurvey}
-          onExit={(nextShopId) => setActiveSurvey(nextShopId || null)}
-        />
+        <SurveyEntry shopId={activeSurvey} onExit={(nextShopId) => setActiveSurvey(nextShopId || null)} />
       ) : (
         <>
           {tab === 'home' && <SurveyorHome onStart={(shopId) => setActiveSurvey(shopId)} />}

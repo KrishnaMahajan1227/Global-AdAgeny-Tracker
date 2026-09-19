@@ -2,57 +2,74 @@ import { registerSW } from 'virtual:pwa-register';
 
 type VersionPayload = { buildId?: string; builtAt?: string };
 
-const CHECK_EVERY_MS = 60_000;
+const CHECK_EVERY_MS = 30_000;
+const IDLE_BEFORE_RELOAD_MS = 8_000;
 const VERSION_URL = '/version.json';
+const GUARD_KEY = 'adroute-reload-attempts';
 let reloading = false;
+let lastActivity = Date.now();
+
+async function wipeCachesAndWorkers() {
+  try {
+    const regs = await navigator.serviceWorker?.getRegistrations?.();
+    await Promise.all((regs || []).map((r) => r.unregister().catch(() => false)));
+  } catch { /* ignore */ }
+  try {
+    const keys = await caches.keys();
+    await Promise.all(keys.map((k) => caches.delete(k)));
+  } catch { /* ignore */ }
+}
 
 /**
- * Keeps already-open clients on the newest deployed bundle.
- * version.json is deliberately fetched with no-store and is not precached by Workbox.
- * A changed build id triggers one controlled reload; the sessionStorage guard prevents loops.
+ * Keeps every open client (browser tab or installed PWA) on the newest deployed build, with no manual refresh:
+ *  - the service worker skips waiting and claims clients immediately,
+ *  - /version.json (never cached) is polled every 30 s and on focus / reconnect,
+ *  - when a newer build exists: all caches + old workers are wiped and the page reloads with a cache-busting URL.
+ * The reload waits until the user has been idle for a few seconds so a form/photo in progress is not interrupted.
  */
 export function startAppVersionWatcher() {
   if (!import.meta.env.PROD) return () => undefined;
 
+  const bump = () => { lastActivity = Date.now(); };
+  ['pointerdown', 'keydown', 'touchstart', 'input', 'scroll'].forEach((e) => window.addEventListener(e, bump, { passive: true }));
+
   const updateSW = registerSW({
     immediate: true,
-    onOfflineReady() {
-      console.info('AdRoute is ready for offline use.');
-    },
     onRegisteredSW(_swUrl, registration) {
-      // Ask the browser for a fresh service worker periodically as well.
       window.setInterval(() => registration?.update().catch(() => undefined), CHECK_EVERY_MS);
     },
+    onNeedRefresh() { void reloadWhenIdle('sw'); },
   });
+
+  async function reloadWhenIdle(build: string) {
+    if (reloading) return;
+    const attempts = Number(sessionStorage.getItem(GUARD_KEY + build) || '0');
+    if (attempts >= 3) return; // never loop
+    const wait = () => new Promise<void>((resolve) => {
+      const t = window.setInterval(() => {
+        if (Date.now() - lastActivity >= IDLE_BEFORE_RELOAD_MS || document.visibilityState === 'hidden') { window.clearInterval(t); resolve(); }
+      }, 1000);
+    });
+    await wait();
+    reloading = true;
+    sessionStorage.setItem(GUARD_KEY + build, String(attempts + 1));
+    await updateSW(true).catch(() => undefined);
+    await wipeCachesAndWorkers();
+    const url = new URL(window.location.href);
+    url.searchParams.set('_v', build);
+    window.location.replace(url.toString());
+  }
 
   const check = async () => {
     if (reloading || !navigator.onLine) return;
     try {
-      const response = await fetch(`${VERSION_URL}?t=${Date.now()}`, {
-        cache: 'no-store',
-        headers: { 'cache-control': 'no-cache' },
-      });
+      const response = await fetch(`${VERSION_URL}?t=${Date.now()}`, { cache: 'no-store', headers: { 'cache-control': 'no-cache' } });
       if (!response.ok) return;
       const remote = (await response.json()) as VersionPayload;
-      if (!remote.buildId) return;
-
       const current = import.meta.env.VITE_APP_BUILD_ID as string | undefined;
-      if (!current || remote.buildId === current) {
-        sessionStorage.removeItem('adroute-reload-for-build');
-        return;
-      }
-
-      // Never reload twice for the same deployment, even if the old SW briefly serves again.
-      if (sessionStorage.getItem('adroute-reload-for-build') === remote.buildId) return;
-      sessionStorage.setItem('adroute-reload-for-build', remote.buildId);
-      reloading = true;
-
-      // Activate a waiting SW first, then load the new hashed JS/CSS bundle.
-      await updateSW(true).catch(() => undefined);
-      window.location.reload();
-    } catch {
-      // Offline / transient deployment window: keep current app and retry later.
-    }
+      if (!remote.buildId || !current || remote.buildId === current) return;
+      void reloadWhenIdle(remote.buildId);
+    } catch { /* offline / mid-deploy: retry next tick */ }
   };
 
   const interval = window.setInterval(check, CHECK_EVERY_MS);
@@ -60,11 +77,13 @@ export function startAppVersionWatcher() {
   const onOnline = () => void check();
   document.addEventListener('visibilitychange', onVisible);
   window.addEventListener('online', onOnline);
-  window.setTimeout(check, 4_000);
+  window.addEventListener('focus', onOnline);
+  window.setTimeout(check, 2_000);
 
   return () => {
     window.clearInterval(interval);
     document.removeEventListener('visibilitychange', onVisible);
     window.removeEventListener('online', onOnline);
+    window.removeEventListener('focus', onOnline);
   };
 }

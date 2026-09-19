@@ -4,6 +4,7 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { Card, StatusBadge, EmptyState, PageHeader, Modal, Textarea, Select } from '@/components/ui';
 import { logAudit, createNotification } from '@/lib/helpers';
+import { ItemLevelReviewPanel } from '@/components/ItemLevelReviewPanel';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { WorkItem, SurveyPhoto, BoardMarking, DesignVersion, DesignVersionItem, Shop, Organization } from '@/lib/types';
 import { numberMarkingsByPhoto } from '@/lib/markingUtils';
@@ -1782,7 +1783,7 @@ export default function DesignerPage() {
                           )}
                           {row.status === 'in_review' && canApprove && (
                             <>
-                              <button onClick={() => { setReviewTask(row); setRequestingChanges(true); setChangesNote(''); }} className="bg-amber-50 text-amber-700 border border-amber-200 px-3 py-1.5 rounded-lg text-sm font-medium">
+                              <button onClick={() => { setReviewTask(row as any); setRequestingChanges(true); setChangesNote(''); }} className="bg-amber-50 text-amber-700 border border-amber-200 px-3 py-1.5 rounded-lg text-sm font-medium">
                                 Redo / Changes
                               </button>
                               <button onClick={() => updateStatusMutation.mutate({ row, status: 'approved', versions: detail?.versions })} className="bg-green-50 text-green-700 border border-green-200 px-3 py-1.5 rounded-lg text-sm font-medium">
@@ -1937,6 +1938,11 @@ export default function DesignerPage() {
                 });
               })()}
             </div>
+
+            {reviewTask.status === 'in_review' && (
+              <ItemLevelReviewPanel stage="design" shopId={reviewTask.shop_id} refId={reviewTask.design_task_id} assignedTo={reviewTask.designer_id || undefined}
+                onDone={() => { setReviewTask(null); queryClient.invalidateQueries(); }} />
+            )}
 
             {requestingChanges ? (
               <div className="space-y-2">

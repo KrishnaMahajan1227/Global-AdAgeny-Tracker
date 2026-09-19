@@ -1840,10 +1840,20 @@ export function ShopsPage() {
       queryClient.invalidateQueries({ queryKey: ['shop'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats', orgId] });
       queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
+      // Stage is authoritative across the whole app. 0086 reconciles stale
+      // child/redo state in DB; invalidate every role queue immediately so the
+      // same change is visible without logout, tab switching or hard refresh.
       queryClient.invalidateQueries({ queryKey: ['installation-review'] });
-      queryClient.invalidateQueries({ queryKey: ['surveyor'] });
+      queryClient.invalidateQueries({ queryKey: ['installer-assignments'] });
+      queryClient.invalidateQueries({ queryKey: ['installer-work'] });
+      queryClient.invalidateQueries({ queryKey: ['installer-open-corrections'] });
+      queryClient.invalidateQueries({ queryKey: ['surveyor-assignments'] });
+      queryClient.invalidateQueries({ queryKey: ['surveyor-work'] });
+      queryClient.invalidateQueries({ queryKey: ['surveyor-open-corrections'] });
       queryClient.invalidateQueries({ queryKey: ['designer'] });
       queryClient.invalidateQueries({ queryKey: ['production'] });
+      queryClient.invalidateQueries({ queryKey: ['design'] });
+      queryClient.invalidateQueries({ queryKey: ['reports'] });
       setStatusChangeShops(null);
       setNextShopStatus('');
       setSelectedShopIds(new Set());

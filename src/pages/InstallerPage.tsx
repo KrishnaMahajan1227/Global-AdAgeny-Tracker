@@ -133,13 +133,13 @@ function InstallerHome({ onStart, onDirectInstall }: { onStart: (shopId: string)
   // button would not see the job appear here — or the shop's status flip
   // to production_done and unlock "Start Install" — until they happened
   // to switch tabs. Same live-refresh pattern as the office-side queues.
-  useRealtimeInvalidate(['shop_assignments', 'shops'], orgId, [['installer-assignments', profile?.id]]);
+  useRealtimeInvalidate(['shop_assignments', 'shops', 'installation_jobs', 'field_corrections'], orgId, [['installer-assignments', profile?.id], ['installer-open-corrections', profile?.id]]);
   useRealtimeInvalidate(['purchase_orders', 'po_assignments'], orgId, [['direct-install-pos', orgId, profile?.id]]);
 
   const assigned = (assignments || []).filter((a) => a.status !== 'completed').length;
   const completed = (assignments || []).filter((a) => a.status === 'completed').length;
   const pending = assigned;
-  const nextJob = (assignments || []).find((a) => a.shops?.status === 'production_done' || a.shops?.status === 'dispatched' || a.shops?.status === 'installation_pending');
+  const nextJob = (assignments || []).find((a) => READY_STATUSES.includes(a.shops?.status || ''));
   const directInstallAvailable = (directInstallPOs || []).length > 0;
 
   return (

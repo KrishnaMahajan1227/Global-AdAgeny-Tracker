@@ -352,18 +352,11 @@ export default function InstallationReviewPage() {
               Select all on this page
             </button>
             <button
-              onClick={() => openBulk('reject')}
+              onClick={() => { setBulkAction('approve'); setBulkModalOpen(true); }}
               disabled={selectedIds.size === 0}
-              className="flex items-center gap-1.5 bg-white text-red-600 border border-red-200 hover:bg-red-50 px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
+              className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
             >
-              <XCircle className="w-3.5 h-3.5" /> Bulk Reject / Redo
-            </button>
-            <button
-              onClick={() => openBulk('approve')}
-              disabled={selectedIds.size === 0}
-              className="flex items-center gap-1.5 bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5" /> Bulk Approve
+              <Eye className="w-3.5 h-3.5" /> Review Selected ({selectedIds.size})
             </button>
           </div>
         </div>
@@ -637,65 +630,39 @@ export default function InstallationReviewPage() {
         </div>
       </Modal>
 
-      {/* Bulk review — the actual "10,000 shops" flow: pick several rows,
-          look at their proof photos together, then finalize in one shot. */}
+      {/* Multi-shop review workspace: the selected shops stay separated so
+          evidence can never be accidentally approved against the wrong shop. */}
       <Modal
         open={bulkModalOpen}
         onClose={() => setBulkModalOpen(false)}
-        title={`Bulk ${bulkAction === 'approve' ? 'Approve' : 'Reject / Redo'} — ${selectedJobs.length} installation${selectedJobs.length === 1 ? '' : 's'}`}
-        size="lg"
+        title={`Review Selected Shops — ${selectedJobs.length}`}
+        size="xl"
       >
         <div className="space-y-4">
-          <div className="max-h-72 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
-            {selectedJobs.map((j) => {
-              const photos: any[] = j.installation_proofs || [];
-              return (
-                <div key={j.id} className="flex items-center gap-3 px-3 py-2">
-                  <div className="flex -space-x-2 shrink-0">
-                    {photos.length === 0 ? (
-                      <div className="w-9 h-9 rounded-md bg-slate-100 flex items-center justify-center"><Images className="w-4 h-4 text-slate-300" /></div>
-                    ) : (
-                      photos.slice(0, 3).map((p) => (
-                        <img
-                          key={p.id}
-                          src={p.photo_url}
-                          alt=""
-                          onClick={() => setLightbox(p.photo_url)}
-                          className="w-9 h-9 rounded-md object-cover border-2 border-white shadow-sm cursor-zoom-in hover:scale-105 transition"
-                        />
-                      ))
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-slate-900 truncate">{j.shops?.name}</p>
-                    <p className="text-xs text-slate-500 truncate">{j.profiles?.full_name} · {j.shops?.city}</p>
-                  </div>
-                  {(j.gps_distance_flag || photos.some((p) => p.duplicate_flag)) && (
-                    <span title="Has a flag — worth a closer look" className="shrink-0">
-                      <AlertTriangle className="w-4 h-4 text-amber-500" />
-                    </span>
-                  )}
+          <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 flex items-start gap-3">
+            <CheckSquare className="w-5 h-5 text-blue-600 mt-0.5 shrink-0" />
+            <div><p className="text-sm font-semibold text-slate-900">Multi-shop quality review</p><p className="text-xs text-slate-600 mt-0.5">Each shop has its own Survey → Measurement → Design → Installation evidence. Select evidence inside that shop and approve or mark only that selection for redo. A shop stays in Pending Review until every required item is complete and approved.</p></div>
+          </div>
+          <div className="space-y-3 max-h-[68vh] overflow-y-auto pr-1">
+            {selectedJobs.map((j, index) => {
+              const photos:any[] = j.installation_proofs || [];
+              return <details key={j.id} open={selectedJobs.length <= 3 || index === 0} className="group rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm">
+                <summary className="list-none cursor-pointer px-4 py-3 bg-slate-50/80 hover:bg-slate-50 flex items-center gap-3">
+                  <div className="w-7 h-7 rounded-lg bg-slate-900 text-white flex items-center justify-center text-xs font-bold shrink-0">{index+1}</div>
+                  <div className="min-w-0 flex-1"><p className="font-semibold text-slate-900 truncate">{j.shops?.name}</p><p className="text-xs text-slate-500 truncate">{j.shops?.city || 'Location not set'} · {j.profiles?.full_name || 'Installer'} · {photos.length} installation photo{photos.length===1?'':'s'}</p></div>
+                  {(j.gps_distance_flag || photos.some((p:any)=>p.duplicate_flag)) && <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-1"><AlertTriangle className="w-3 h-3"/> Check flag</span>}
+                  <ChevronRight className="w-4 h-4 text-slate-400 transition group-open:rotate-90"/>
+                </summary>
+                <div className="p-4 border-t border-slate-100">
+                  <WorkItemEvidenceReview shopId={j.shop_id} jobId={j.id} assignedTo={j.installer_id} onOpenPhoto={setLightbox}/>
                 </div>
-              );
+              </details>;
             })}
           </div>
-          <Textarea
-            label="Review Note (sent to each installer)"
-            value={bulkNote}
-            onChange={setBulkNote}
-            rows={3}
-            placeholder={bulkAction === 'approve' ? 'Optional note...' : 'Please explain what needs to be redone...'}
-          />
-          {bulkMutation.isError && (
-            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(bulkMutation.error as Error).message}</p>
-          )}
-          <button
-            onClick={() => bulkMutation.mutate()}
-            disabled={bulkMutation.isPending}
-            className={`w-full text-white font-medium py-2.5 rounded-lg disabled:opacity-50 ${bulkAction === 'approve' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}
-          >
-            {bulkMutation.isPending ? 'Processing...' : `Confirm ${bulkAction === 'approve' ? 'Approval' : 'Redo Request'} for ${selectedJobs.length}`}
-          </button>
+          <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
+            <p className="text-xs text-slate-500">Decisions are saved per shop and per selected evidence — never across the wrong shop.</p>
+            <button onClick={() => setBulkModalOpen(false)} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800">Done Reviewing</button>
+          </div>
         </div>
       </Modal>
 
@@ -853,10 +820,19 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
           const {error:ce}=await supabase.from('field_corrections').insert(correction); if(ce)throw ce;
         }
       }
-      // Keep the job-level state in sync automatically so the reviewer does not need a second confirmation step.
+      // IMPORTANT: a partial decision must NEVER remove the shop from Pending Review.
+      // Redo is scoped only to the selected Work Item/photo; the shop stays here until
+      // every Work Item has complete evidence and every required review is approved.
       if (decision === 'redo') {
-        await supabase.from('installation_jobs').update({ review_status:'rejected', reviewed_at:new Date().toISOString(), reviewed_by:profile.id, review_note:reviewNote||'Selected evidence sent for redo' }).eq('id',jobId);
+        await supabase.from('installation_jobs').update({ review_status:'pending', reviewed_at:null, reviewed_by:null, review_note:reviewNote||'Selected evidence sent for correction' }).eq('id',jobId);
       } else {
+        // Approving an entity also closes an open correction for that exact entity only.
+        for (const key of selected) {
+          const [kind,id]=key.split(':');
+          let resolve=supabase.from('field_corrections').update({status:'resolved',resolved_at:new Date().toISOString()}).eq('stage','installation').eq('status','open').eq('installation_job_id',jobId);
+          resolve=kind==='work_item'?resolve.eq('work_item_id',id):resolve.eq('installation_proof_id',id);
+          await resolve;
+        }
         const [{data:allItems},{data:allProofs},{data:allDecisions}] = await Promise.all([
           supabase.from('work_items').select('id').eq('shop_id',shopId),
           supabase.from('installation_proofs').select('id').eq('installation_job_id',jobId),
@@ -864,8 +840,21 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
         ]);
         const required=[...(allItems||[]).map((x:any)=>`work_item:${x.id}`),...(allProofs||[]).map((x:any)=>`installation_photo:${x.id}`)];
         const approved=new Set((allDecisions||[]).filter((x:any)=>x.decision==='approved').map((x:any)=>`${x.entity_type}:${x.entity_id}`));
-        if(required.length>0 && required.every((k:string)=>approved.has(k))){
+        const {count:openCorrections}=await supabase.from('field_corrections').select('id',{count:'exact',head:true}).eq('stage','installation').eq('installation_job_id',jobId).eq('status','open');
+
+        // A shop can leave Pending Review only when the full evidence chain exists for
+        // every Work Item: Survey/Measurement -> Approved Design -> Installation proof.
+        const evidenceComplete=(allItems||[]).every((it:any)=>{
+          const hasSurvey=(surveyPhotos||[]).some((p:any)=>(photoLinks||[]).some((x:any)=>x.work_item_id===it.id&&x.survey_photo_id===p.id)||(markings||[]).some((m:any)=>m.work_item_id===it.id&&m.survey_photo_id===p.id));
+          const hasDesign=(designTasks||[]).some((t:any)=>(t.design_versions||[]).some((v:any)=>(v.design_version_items||[]).some((x:any)=>x.work_item_id===it.id)));
+          const hasInstall=(allProofs||[]).some((p:any)=>p.work_item_id===it.id);
+          return hasSurvey&&hasDesign&&hasInstall;
+        });
+        if(required.length>0 && evidenceComplete && !openCorrections && required.every((k:string)=>approved.has(k))){
           await supabase.from('installation_jobs').update({ review_status:'approved', reviewed_at:new Date().toISOString(), reviewed_by:profile.id, review_note:reviewNote||null }).eq('id',jobId);
+        } else {
+          // Partial approvals never make the shop disappear from this queue.
+          await supabase.from('installation_jobs').update({ review_status:'pending', reviewed_at:null, reviewed_by:null }).eq('id',jobId);
         }
       }
       setSelected(new Set());setReviewNote(''); await qc.invalidateQueries({queryKey:['inline-install-review-decisions',jobId]}); await qc.invalidateQueries({queryKey:['item-review-decisions']}); await qc.invalidateQueries({queryKey:['field-corrections']}); await qc.invalidateQueries({queryKey:['installation-review']}); await qc.invalidateQueries({queryKey:['installation-review-counts']});
@@ -874,7 +863,7 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
   const reviewableKeys=items.flatMap((item:any)=>[`work_item:${item.id}`,...((proofs||[]).filter((p:any)=>p.work_item_id===item.id).map((p:any)=>`installation_photo:${p.id}`))]);
   const allSelected=reviewableKeys.length>0&&reviewableKeys.every(k=>selected.has(k));
   return <div className="space-y-3">
-    {!readOnly&&<div className="flex items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-3 py-2"><p className="text-xs text-slate-600"><b className="text-slate-900">Review directly here.</b> Select one or multiple Work Items/photos, then approve or redo below.</p><button onClick={()=>setSelected(allSelected?new Set():new Set(reviewableKeys))} className="shrink-0 text-xs font-semibold text-blue-700 flex items-center gap-1">{allSelected?<CheckSquare className="w-4 h-4"/>:<Square className="w-4 h-4"/>}{allSelected?'Clear all':'Select all'}</button></div>}
+    {!readOnly&&<div className="flex items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-3 py-2"><p className="text-xs text-slate-600"><b className="text-slate-900">One shop, one review workspace.</b> Select exactly the Work Item or installation photo you want to act on. Nothing else is changed.</p><button onClick={()=>setSelected(allSelected?new Set():new Set(reviewableKeys))} className="shrink-0 text-xs font-semibold text-blue-700 flex items-center gap-1">{allSelected?<CheckSquare className="w-4 h-4"/>:<Square className="w-4 h-4"/>}{allSelected?'Clear all':'Select all'}</button></div>}
     {items.map((item:any,index:number)=>{
       const linkedSurvey=(surveyPhotos||[]).filter(p=>(photoLinks||[]).some((x:any)=>x.work_item_id===item.id&&x.survey_photo_id===p.id)||(markings||[]).some(m=>m.work_item_id===item.id&&m.survey_photo_id===p.id));
       const designs=(designTasks||[]).flatMap((t:any)=>t.design_versions||[]).filter((v:any)=>(v.design_version_items||[]).some((x:any)=>x.work_item_id===item.id)).sort((a:any,b:any)=>(b.version_number||0)-(a.version_number||0));
@@ -884,7 +873,8 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
         <div className="p-4"><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><div><p className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-1.5">1 · Survey / Measurement</p><Photo url={linkedSurvey[0]?.photo_url} label="Survey"/>{linkedSurvey.length>1&&<p className="text-[10px] text-slate-400 mt-1">+{linkedSurvey.length-1} more survey photo(s)</p>}</div><div><p className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1.5">2 · Approved Design</p><Photo url={designs[0]?.file_url} label={designs[0]?`Design v${designs[0].version_number}`:'Design'}/></div><div><p className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 mb-1.5">3 · Installed Proof</p>{itemProofs.length?<div className="grid grid-cols-2 gap-2">{itemProofs.map((p:any)=><Photo key={p.id} url={p.photo_url} label={p.angle||'Installed'} reviewKey={`installation_photo:${p.id}`} decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div>:<Photo label="Installation proof"/>}</div></div></div>
       </div>;
     })}
-    {!readOnly&&<div className="sticky bottom-0 z-10 rounded-2xl border border-slate-200 bg-white/95 backdrop-blur shadow-lg p-3"><div className="flex flex-col md:flex-row gap-2"><input value={reviewNote} onChange={e=>setReviewNote(e.target.value)} placeholder="Note only if needed — especially for redo" className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-xs"/><button disabled={!selected.size||busy} onClick={()=>applyInline('approved')} className="rounded-lg bg-emerald-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><CheckCircle2 className="w-4 h-4"/>Approve ({selected.size})</button><button disabled={!selected.size||busy} onClick={()=>applyInline('redo')} className="rounded-lg bg-amber-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><Wrench className="w-4 h-4"/>Redo ({selected.size})</button></div>{reviewError&&<p className="text-xs text-red-600 mt-2">{reviewError}</p>}</div>}
+    {!readOnly&&<div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><div className="flex items-start gap-3"><div className="mt-0.5 rounded-full bg-blue-100 p-1.5"><CheckCircle2 className="w-4 h-4 text-blue-700"/></div><div><p className="text-xs font-semibold text-slate-900">Shop remains in Pending Review until everything is complete</p><p className="text-[11px] text-slate-500 mt-0.5">Partial approval or redo will not remove this shop. It moves out only after every Work Item has Survey/Measurement, Approved Design, Installation Proof, no open correction, and all required evidence is approved.</p></div></div></div>}
+    {!readOnly&&<div className="sticky bottom-0 z-10 rounded-2xl border border-slate-200 bg-white/95 backdrop-blur shadow-lg p-3"><div className="mb-2 flex items-center justify-between gap-2"><div><p className="text-xs font-semibold text-slate-900">{selected.size ? `${selected.size} selected` : 'Select evidence above'}</p><p className="text-[10px] text-slate-500">Action applies only to selected evidence in this shop.</p></div>{selected.size>0&&<button onClick={()=>setSelected(new Set())} className="text-[11px] font-semibold text-slate-500 hover:text-slate-800">Clear selection</button>}</div><div className="flex flex-col md:flex-row gap-2"><input value={reviewNote} onChange={e=>setReviewNote(e.target.value)} placeholder="Note only if needed — especially for redo" className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-xs"/><button disabled={!selected.size||busy} onClick={()=>applyInline('approved')} className="rounded-lg bg-emerald-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><CheckCircle2 className="w-4 h-4"/>Approve ({selected.size})</button><button disabled={!selected.size||busy} onClick={()=>applyInline('redo')} className="rounded-lg bg-amber-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><Wrench className="w-4 h-4"/>Redo ({selected.size})</button></div>{reviewError&&<p className="text-xs text-red-600 mt-2">{reviewError}</p>}</div>}
     {(proofs||[]).some((p:any)=>!p.work_item_id)&&<div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold text-amber-800">Legacy/unmapped installation photos</p><p className="text-[11px] text-amber-700 mt-0.5">These older proofs are not automatically assigned to a measurement.</p><div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">{(proofs||[]).filter((p:any)=>!p.work_item_id).map((p:any)=><Photo key={p.id} url={p.photo_url} label="Unmapped proof" reviewKey={`installation_photo:${p.id}`} decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div></div>}
   </div>;
 }

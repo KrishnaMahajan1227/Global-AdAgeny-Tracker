@@ -874,6 +874,8 @@ export function ShopsPage() {
   const canBulkAssign = profile?.role === 'agency_owner' || profile?.role === 'admin' || profile?.role === 'demo';
   const canBulkRemove = profile?.role === 'agency_owner' || profile?.role === 'admin' || profile?.role === 'demo';
   const [bulkRemoveConfirmOpen, setBulkRemoveConfirmOpen] = useState(false);
+  const [statusChangeShops, setStatusChangeShops] = useState<Shop[] | null>(null);
+  const [nextShopStatus, setNextShopStatus] = useState('');
 
   // Bulk Upload (Excel) — every client hands over their shop list in a
   // different layout (different column order/names, a title row above
@@ -1822,6 +1824,39 @@ export function ShopsPage() {
     });
   }
 
+  const shopStageMutation = useMutation({
+    mutationFn: async ({ targets, status }: { targets: Shop[]; status: string }) => {
+      if (!targets.length || !status) throw new Error('Select shop(s) and a stage.');
+      const ids = targets.map((s) => s.id);
+      const { error } = await supabase.from('shops').update({ status }).in('id', ids).select('id');
+      if (error) throw new Error(error.message);
+      for (const shop of targets) {
+        await logAudit('shops', shop.id, 'update', 'status', shop.status, status, `Shop stage manually changed from ${shop.status} to ${status}`);
+      }
+      return ids.length;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shops'] });
+      queryClient.invalidateQueries({ queryKey: ['shop'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['installation-review'] });
+      queryClient.invalidateQueries({ queryKey: ['surveyor'] });
+      queryClient.invalidateQueries({ queryKey: ['designer'] });
+      queryClient.invalidateQueries({ queryKey: ['production'] });
+      setStatusChangeShops(null);
+      setNextShopStatus('');
+      setSelectedShopIds(new Set());
+      setSelectMode(false);
+    },
+  });
+
+  function openStatusChange(targets: Shop[]) {
+    if (!targets.length) return;
+    setStatusChangeShops(targets);
+    setNextShopStatus(targets.length === 1 ? targets[0].status : '');
+  }
+
   function openBulkAssign() {
     setBulkRole('surveyor');
     setBulkUserId('');
@@ -1846,7 +1881,7 @@ export function ShopsPage() {
     { value: 'city_asc', label: 'City (A–Z)' },
     { value: 'status_asc', label: 'Status' },
   ];
-  const SHOP_STATUS_OPTIONS: Record<string, string> = { pending: 'Pending', assigned: 'Assigned', surveyed: 'Surveyed', approval_pending: 'Approval Pending', approved: 'Approved', design_approved: 'Design Approved', production_done: 'Production Done', installed: 'Installed', billed: 'Billed', cancelled: 'Cancelled' };
+  const SHOP_STATUS_OPTIONS: Record<string, string> = { pending:'Pending', assigned:'Assigned', survey_started:'Survey Started', surveyed:'Surveyed', approval_pending:'Survey Approval Pending', approved:'Survey Approved', design_pending:'Design Pending', designing:'Designing', design_ready:'Design Ready', in_review:'Design Review', design_approved:'Design Approved', production_pending:'Production Pending', in_production:'In Production', production_ready:'Production Ready', production_hold:'Production Hold', production_done:'Production Done', dispatched:'Dispatched', installation_pending:'Installation Pending', installing:'Installing', installation_review:'Installation Review', installed:'Installed', billed:'Billed', cancelled:'Cancelled' };
 
   return (
     <div>
@@ -1919,6 +1954,13 @@ export function ShopsPage() {
               className="text-xs font-medium text-blue-700 hover:underline"
             >
               Select all on this page
+            </button>
+            <button
+              onClick={() => openStatusChange(filteredShops.filter((s) => selectedShopIds.has(s.id)))}
+              disabled={selectedShopIds.size === 0}
+              className="flex items-center gap-1.5 bg-white text-violet-700 border border-violet-200 hover:bg-violet-50 px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
+            >
+              <Layers className="w-3.5 h-3.5" /> Change Stage
             </button>
             <button
               onClick={openBulkAssign}
@@ -2125,7 +2167,11 @@ export function ShopsPage() {
                       ) : <span className="text-xs text-slate-300">Unassigned</span>}
                     </td>
                     <td className="px-3 py-3 align-top">
-                      <StatusBadge status={shop.status} />
+                      {canBulkAssign && !selectMode ? (
+                        <button onClick={(e) => { e.stopPropagation(); openStatusChange([shop]); }} className="rounded-md hover:ring-2 hover:ring-violet-100 transition" title="Change shop stage">
+                          <StatusBadge status={shop.status} />
+                        </button>
+                      ) : <StatusBadge status={shop.status} />}
                     </td>
                     <td className="px-3 py-3 align-top">
                       <div className="flex items-center justify-end gap-3">
@@ -2319,6 +2365,29 @@ export function ShopsPage() {
         confirmLabel={profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Delete' : 'Cancel'}
         danger
       />
+
+      <Modal open={!!statusChangeShops} onClose={() => { setStatusChangeShops(null); setNextShopStatus(''); }} title={statusChangeShops?.length === 1 ? 'Change Shop Stage' : `Change Stage — ${statusChangeShops?.length || 0} Shops`} size="md">
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">Selected shops</p>
+            <div className="max-h-36 overflow-y-auto space-y-1.5">
+              {(statusChangeShops || []).map((shop) => <div key={shop.id} className="flex items-center justify-between gap-3 text-sm"><span className="font-medium text-slate-800 truncate">{shop.name}</span><StatusBadge status={shop.status} /></div>)}
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1.5">Move selected shop{(statusChangeShops?.length || 0) === 1 ? '' : 's'} to</label>
+            <select value={nextShopStatus} onChange={(e) => setNextShopStatus(e.target.value)} className="w-full px-3 py-2.5 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-violet-500">
+              <option value="">Choose stage…</option>
+              {Object.entries(SHOP_STATUS_OPTIONS).map(([value,label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+            <p className="mt-2 text-xs text-slate-500">This is an Owner/Admin stage override. Existing approval gates still apply — for example, a shop cannot be forced to Installed until its installation review is actually approved.</p>
+          </div>
+          {shopStageMutation.isError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(shopStageMutation.error as Error).message}</p>}
+          <button onClick={() => statusChangeShops && shopStageMutation.mutate({ targets: statusChangeShops, status: nextShopStatus })} disabled={!nextShopStatus || shopStageMutation.isPending} className="w-full rounded-lg bg-violet-600 hover:bg-violet-700 text-white font-medium py-2.5 disabled:opacity-50">
+            {shopStageMutation.isPending ? 'Updating…' : `Update ${(statusChangeShops?.length || 0)} Shop${(statusChangeShops?.length || 0) === 1 ? '' : 's'}`}
+          </button>
+        </div>
+      </Modal>
 
       <Modal open={bulkAssignOpen} onClose={() => setBulkAssignOpen(false)} title="Bulk Assign">
         <div className="space-y-4">

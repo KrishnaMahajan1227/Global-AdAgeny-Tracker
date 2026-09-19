@@ -1,14 +1,33 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { fileURLToPath, URL } from 'node:url';
 
+const buildId = `${Date.now()}`;
+
+function deploymentVersionPlugin(): Plugin {
+  return {
+    name: 'adroute-deployment-version',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: JSON.stringify({ buildId, builtAt: new Date().toISOString() }),
+      });
+    },
+  };
+}
+
 // https://vitejs.dev/config/
 export default defineConfig({
+  define: {
+    'import.meta.env.VITE_APP_BUILD_ID': JSON.stringify(buildId),
+  },
   plugins: [
+    deploymentVersionPlugin(),
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       injectRegister: 'auto',
       includeAssets: ['favicon-16x16.png', 'favicon-32x32.png', 'apple-touch-icon.png'],
       manifest: {
@@ -42,10 +61,11 @@ export default defineConfig({
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.origin.includes('supabase.co') && url.pathname.includes('/storage/'),
-            handler: 'CacheFirst',
+            handler: 'NetworkFirst',
             options: {
               cacheName: 'supabase-storage-cache',
-              expiration: { maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 * 30 },
+              networkTimeoutSeconds: 4,
+              expiration: { maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 },
               cacheableResponse: { statuses: [0, 200] },
             },
           },
@@ -57,10 +77,8 @@ export default defineConfig({
         ],
       },
       devOptions: {
-        // Enable the service worker during `npm run dev` too, so offline survey mode
-        // can be tested locally without a production build.
-        enabled: true,
-        type: 'module',
+        // Do not register a SW in dev: stale dev caches are a common source of false update issues.
+        enabled: false,
       }, 
     }),
   ],

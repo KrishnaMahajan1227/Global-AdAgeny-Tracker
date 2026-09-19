@@ -1,0 +1,11 @@
+# Redo visibility + review UX fix — 2026-09-19
+- Installation proof thumbnails are display-only again; no Select checkbox/badge overlays on photos.
+- Installation review selection is Work Item level, keeping Survey → Measurement → Design → Installed Proof together.
+- Installer My Installations now reads open field_corrections directly. A returned item shows `Fix Redo (N)` even while shop status is installation_review.
+- Surveyor My Work now reads open field_corrections directly. Returned measurements/photos reopen immediately and show exact correction notes.
+- Realtime invalidation includes field_corrections for both field-worker queues.
+- Granular survey redo now reopens the assigned surveyor assignment, updates survey to correction_requested and sends a notification.
+- Granular installation redo sends the assigned installer a direct notification.
+- Design in-review cards expose Redo / Changes beside Approve Design using the existing designer change-request flow.
+- Installation final approval now requires Work Item decisions (not separate photo checkbox decisions); proof existence is still mandatory in the evidence-completeness gate.
+- Reviewer action label is `Reject / Redo`; rejection of a Work Item intentionally routes into the same scoped correction workflow instead of deleting/redoing the whole shop.

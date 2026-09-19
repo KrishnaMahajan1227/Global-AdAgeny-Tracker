@@ -523,9 +523,22 @@ function SurveyorWork({ onStart }: { onStart: (shopId: string) => void }) {
   // Same live-refresh gap fixed on SurveyorHome — without this, a shop
   // sent back for correction/rejection only ever reappears here after the
   // surveyor force-closes and reopens the app.
-  useRealtimeInvalidate(['shop_assignments', 'shops', 'surveys'], orgId, [['surveyor-work', profile?.id]]);
+  useRealtimeInvalidate(['shop_assignments', 'shops', 'surveys', 'field_corrections'], orgId, [['surveyor-work', profile?.id], ['surveyor-open-corrections', profile?.id]]);
 
-  const surveyableShopIds = (assignments || []).filter((a) => isShopSurveyable(a.shops?.status)).map((a) => a.shop_id);
+  const { data: openCorrections = [] } = useQuery({
+    queryKey: ['surveyor-open-corrections', profile?.id],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('field_corrections')
+        .select('id,shop_id,work_item_id,survey_photo_id,issue_type,note,created_at')
+        .eq('stage','survey').eq('assigned_to',profile!.id).eq('status','open')
+        .order('created_at',{ascending:false});
+      if (error && /field_corrections|schema cache/i.test(error.message||'')) return [];
+      if (error) throw error; return data || [];
+    }, enabled: !!profile?.id,
+  });
+  const correctionsByShop = new Map<string, any[]>();
+  for (const c of openCorrections as any[]) correctionsByShop.set(c.shop_id,[...(correctionsByShop.get(c.shop_id)||[]),c]);
+  const surveyableShopIds = (assignments || []).filter((a) => isShopSurveyable(a.shops?.status) || correctionsByShop.has(a.shop_id)).map((a) => a.shop_id);
   const { data: sentBackReviews } = useQuery({
     queryKey: ['surveyor-sent-back-work', profile?.id, surveyableShopIds.join(',')],
     queryFn: async () => {
@@ -555,12 +568,16 @@ function SurveyorWork({ onStart }: { onStart: (shopId: string) => void }) {
       <AssignedShopList
         assignments={assignments || []}
         getButtonState={(a) => {
+          const redo=correctionsByShop.get(a.shop_id)||[];
+          if(redo.length) return { label: `Fix Redo (${redo.length})`, disabled:false };
           const done = !isShopSurveyable(a.shops?.status);
           return done ? { label: 'Job Done', disabled: true, done: true } : { label: 'Start Survey', disabled: false };
         }}
         onStart={onStart}
         emptyLabel="No work assigned yet"
         renderExtra={(a) => {
+          const exactRedo=correctionsByShop.get(a.shop_id)||[];
+          if(exactRedo.length) return <div className="mt-2 rounded-xl border border-amber-300 bg-amber-50 p-2.5"><p className="text-xs font-bold text-amber-900">Redo requested · {exactRedo.length} item{exactRedo.length===1?'':'s'}</p><p className="text-[11px] text-amber-700 mt-0.5">Fix only the returned measurement/photo. Approved survey work stays unchanged.</p>{exactRedo.slice(0,2).map((c:any)=><p key={c.id} className="text-[11px] text-amber-800 mt-1">• {c.issue_type==='measurement'?'Measurement':'Survey photo'} — {c.note||'Correction requested'}</p>)}</div>;
           if (!isShopSurveyable(a.shops?.status)) {
             return (
               <p className="flex items-center gap-1.5 text-[11px] font-medium text-green-700 mt-1.5">

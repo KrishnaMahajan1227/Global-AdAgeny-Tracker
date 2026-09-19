@@ -1781,9 +1781,14 @@ export default function DesignerPage() {
                             </button>
                           )}
                           {row.status === 'in_review' && canApprove && (
-                            <button onClick={() => updateStatusMutation.mutate({ row, status: 'approved', versions: detail?.versions })} className="bg-green-50 text-green-700 border border-green-200 px-3 py-1.5 rounded-lg text-sm font-medium">
-                              Approve Design
-                            </button>
+                            <>
+                              <button onClick={() => { setReviewTask(row); setRequestingChanges(true); setChangesNote(''); }} className="bg-amber-50 text-amber-700 border border-amber-200 px-3 py-1.5 rounded-lg text-sm font-medium">
+                                Redo / Changes
+                              </button>
+                              <button onClick={() => updateStatusMutation.mutate({ row, status: 'approved', versions: detail?.versions })} className="bg-green-50 text-green-700 border border-green-200 px-3 py-1.5 rounded-lg text-sm font-medium">
+                                Approve Design
+                              </button>
+                            </>
                           )}
                           {row.status === 'approved' && canApprove && (
                             <button onClick={() => { setProductionTask(row); setProductionUserId(''); }} className="bg-teal-50 text-teal-700 border border-teal-200 px-3 py-1.5 rounded-lg text-sm font-medium">

@@ -226,9 +226,26 @@ function InstallerWork({ onStart }: { onStart: (shopId: string) => void }) {
     enabled: !!profile?.id,
   });
 
-  useRealtimeInvalidate(['shop_assignments', 'shops'], orgId, [['installer-work', profile?.id]]);
+  useRealtimeInvalidate(['shop_assignments', 'shops', 'installation_jobs', 'field_corrections'], orgId, [['installer-work', profile?.id], ['installer-open-corrections', profile?.id]]);
 
   const shopIds = (assignments || []).map((a) => a.shop_id);
+
+  // Open redo tasks are authoritative. A shop can be in installation_review and
+  // still must immediately re-open for this installer when Owner/Admin sends a
+  // specific Work Item back. Do not rely on shop status alone.
+  const { data: openCorrections = [] } = useQuery({
+    queryKey: ['installer-open-corrections', profile?.id],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('field_corrections')
+        .select('id,shop_id,work_item_id,installation_proof_id,issue_type,note,created_at')
+        .eq('stage','installation').eq('assigned_to',profile!.id).eq('status','open')
+        .order('created_at',{ascending:false});
+      if (error && /field_corrections|schema cache/i.test(error.message||'')) return [];
+      if (error) throw error; return data || [];
+    }, enabled: !!profile?.id,
+  });
+  const correctionsByShop = new Map<string, any[]>();
+  for (const c of openCorrections as any[]) correctionsByShop.set(c.shop_id,[...(correctionsByShop.get(c.shop_id)||[]),c]);
 
   // What to bring, per shop — pulled straight from the Owner/Admin-approved
   // work items (approved_* columns, set when the survey was approved), so
@@ -260,9 +277,11 @@ function InstallerWork({ onStart }: { onStart: (shopId: string) => void }) {
         assignments={assignments || []}
         getButtonState={(a) => {
           const shopStatus = a.shops?.status || 'pending';
+          const redo = correctionsByShop.get(a.shop_id) || [];
           const isInstalled = shopStatus === 'installed';
           const isAwaitingApproval = shopStatus === 'installation_review';
           const isReady = READY_STATUSES.includes(shopStatus);
+          if (redo.length) return { label: `Fix Redo (${redo.length})`, disabled: false };
           if (isInstalled) return { label: 'Installed', disabled: true, done: true };
           if (isAwaitingApproval) return { label: 'Awaiting Approval', disabled: true };
           if (!isReady) return { label: 'Not Ready Yet', disabled: true };
@@ -270,7 +289,7 @@ function InstallerWork({ onStart }: { onStart: (shopId: string) => void }) {
         }}
         onStart={onStart}
         emptyLabel="No installations assigned"
-        renderExtra={() => null}
+        renderExtra={(a) => { const redo=correctionsByShop.get(a.shop_id)||[]; if(!redo.length)return null; return <div className="mt-2 rounded-xl border border-amber-300 bg-amber-50 p-2.5"><p className="text-xs font-bold text-amber-900">Redo requested · {redo.length} item{redo.length===1?'':'s'}</p><p className="text-[11px] text-amber-700 mt-0.5">Open this shop to fix only the Work Item(s) returned by Owner/Admin.</p>{redo.slice(0,2).map((c:any)=><p key={c.id} className="text-[11px] text-amber-800 mt-1">• {c.note||'Installation evidence needs correction'}</p>)}</div> }}
       />
     </div>
   );
@@ -376,7 +395,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     },
     enabled: !!profile?.id,
   });
-  const pendingJobQueue = (pendingJobAssignments || []).filter((a) => READY_STATUSES.includes(a.shops?.status || ''));
+  const correctionShopIds = new Set((correctionTasks || []).map((c:any)=>shopId));
+  const pendingJobQueue = (pendingJobAssignments || []).filter((a) => READY_STATUSES.includes(a.shops?.status || '') || correctionShopIds.has(a.shop_id));
   const jobQueuePosition = pendingJobQueue.findIndex((a) => a.shop_id === shopId);
   const jobQueueTotal = pendingJobQueue.length;
   const nextJobShopId = jobQueuePosition >= 0 ? pendingJobQueue.find((a, i) => i !== jobQueuePosition)?.shop_id : undefined;

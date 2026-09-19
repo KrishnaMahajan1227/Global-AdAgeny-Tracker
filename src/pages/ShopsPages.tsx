@@ -3206,15 +3206,25 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     enabled: !!shopId,
   });
 
+  // Fetch jobs and proofs independently.  Do not depend on PostgREST's nested
+  // relationship cache here: a stale relationship/schema cache used to make
+  // approved installation photos silently disappear from Shop Details even
+  // though the proof rows were present.
   const { data: installations } = useQuery({
     queryKey: ['shop-installations', shopId],
     queryFn: async () => {
-      const { data } = await supabase
-        .from('installation_jobs')
-        .select('*, profiles(full_name), installation_proofs(*)')
-        .eq('shop_id', shopId)
-        .order('created_at', { ascending: false });
-      return data;
+      const [{ data: jobs, error: jobsError }, { data: proofs, error: proofsError }] = await Promise.all([
+        supabase.from('installation_jobs').select('*, profiles(full_name)').eq('shop_id', shopId).order('created_at', { ascending: false }),
+        supabase.from('installation_proofs').select('*').eq('shop_id', shopId).order('captured_at', { ascending: false }),
+      ]);
+      if (jobsError) throw jobsError;
+      if (proofsError) throw proofsError;
+      const byJob = new Map<string, any[]>();
+      for (const proof of proofs || []) {
+        const list = byJob.get(proof.installation_job_id) || [];
+        list.push(proof); byJob.set(proof.installation_job_id, list);
+      }
+      return (jobs || []).map((job: any) => ({ ...job, installation_proofs: byJob.get(job.id) || [] }));
     },
     enabled: !!shopId,
   });
@@ -3519,12 +3529,12 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   // exact page while a designer approves or a production order completes
   // elsewhere would see a stale Timeline until they refreshed.
   useRealtimeInvalidate(
-    ['shops', 'surveys', 'work_items', 'design_tasks', 'design_versions', 'production_orders', 'installation_jobs', 'shop_assignments'],
+    ['shops', 'surveys', 'survey_photos', 'survey_photo_items', 'board_markings', 'work_items', 'field_review_decisions', 'design_tasks', 'design_versions', 'design_version_items', 'production_orders', 'installation_jobs', 'installation_proofs', 'shop_assignments'],
     orgId,
     [
       ['shop', shopId], ['shop-work-items', shopId], ['shop-field-review-decisions', shopId], ['shop-survey-photos', shopId],
       ['shop-surveys', shopId], ['shop-design-tasks', shopId], ['shop-production', shopId],
-      ['shop-installations', shopId], ['shop-assignments', shopId],
+      ['shop-installations', shopId], ['shop-survey-photo-items', shopId], ['shop-board-markings', shopId], ['shop-assignments', shopId],
     ]
   );
 
@@ -3876,13 +3886,14 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                     const installForItem = (installations || []).flatMap((inst: any) => (inst.installation_proofs || []).filter((proof: any) => proof.work_item_id === item.id));
                     const measurementDecision:any = (fieldReviewDecisions as any[]).find((d:any) => d.stage === 'survey' && d.entity_type === 'measurement' && d.entity_id === item.id);
                     const installDecision:any = (fieldReviewDecisions as any[]).find((d:any) => d.stage === 'installation' && d.entity_type === 'work_item' && d.entity_id === item.id);
-                    const Thumb = ({ src, label, onDelete }: { src: string; label: string; onDelete?: () => void }) => <div className="relative shrink-0"><button type="button" onClick={() => setEvidencePreview({ src, label })} className="block rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" title="Click to preview"><img src={src} className="w-16 h-16 rounded-lg object-cover border border-slate-200 shadow-sm"/><span className="absolute bottom-1 left-1 bg-black/65 text-white text-[9px] px-1.5 py-0.5 rounded pointer-events-none">{label}</span></button>{canCrudShop && onDelete && <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete photo" className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-white border border-red-200 text-red-600 shadow flex items-center justify-center hover:bg-red-50"><Trash2 className="w-3.5 h-3.5"/></button>}</div>;
+                    const latestDecision = (stage: 'survey' | 'installation', entityType: string, entityId: string) => (fieldReviewDecisions as any[]).find((d:any) => d.stage === stage && d.entity_type === entityType && d.entity_id === entityId);
+                    const Thumb = ({ src, label, onDelete, decision }: { src: string; label: string; onDelete?: () => void; decision?: any }) => <div className="relative shrink-0"><button type="button" onClick={() => setEvidencePreview({ src, label })} className="block rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" title="Click to preview"><img src={src} onError={(e) => { (e.currentTarget as HTMLImageElement).style.opacity='0.25'; }} className="w-20 h-16 rounded-lg object-contain bg-slate-100 border border-slate-200 shadow-sm"/><span className="absolute bottom-1 left-1 bg-black/65 text-white text-[9px] px-1.5 py-0.5 rounded pointer-events-none">{label}</span>{decision && <span className={`absolute top-1 left-1 text-[8px] font-bold px-1.5 py-0.5 rounded ${decision.decision==='approved'?'bg-emerald-600 text-white':'bg-amber-500 text-white'}`}>{decision.decision==='approved'?'APPROVED':'REDO'}</span>}</button>{canCrudShop && onDelete && <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete photo" className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-white border border-red-200 text-red-600 shadow flex items-center justify-center hover:bg-red-50"><Trash2 className="w-3.5 h-3.5"/></button>}</div>;
                     return <div className="mt-4 pt-4 border-t border-slate-200">
                       <div className="flex items-center justify-between mb-3"><div><p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Complete evidence · this work item</p><div className="flex gap-1.5 mt-1">{measurementDecision && <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${measurementDecision.decision==='approved'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-800'}`}>SURVEY {measurementDecision.decision==='approved'?'APPROVED':'REDO'}</span>}{installDecision && <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${installDecision.decision==='approved'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-800'}`}>INSTALL {installDecision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div><div className="flex gap-2">{canCrudShop && <><button onClick={() => { setSurveyPhotoTargetItemId(item.id); setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700">+ Survey photos</button><button onClick={() => { setDesignUploadTargetItemId(item.id); setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set([item.id])); setDesignUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-violet-200 bg-violet-50 text-violet-700">+ Designs</button></>}</div></div>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-blue-800">SURVEY / BEFORE</p><span className="text-[10px] text-blue-600">{surveyForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`S${i+1}`} onDelete={() => void deleteDetailPhoto(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped survey photo</span>}</div></div>
+                        <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-blue-800">SURVEY / BEFORE</p><span className="text-[10px] text-blue-600">{surveyForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`S${i+1}`} decision={latestDecision('survey','photo',p.id)} onDelete={() => void deleteDetailPhoto(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped survey photo</span>}</div></div>
                         <div className="rounded-lg bg-violet-50/50 border border-violet-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-violet-800">DESIGN / ARTWORK</p><span className="text-[10px] text-violet-600">{designForItem.length} file(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{designForItem.length ? designForItem.map((v:any)=> v.file_url?.match(/\.(png|jpe?g|webp|gif)(\?|$)/i) ? <Thumb key={v.id} src={v.file_url} label={`v${v.version_number}`} /> : <a key={v.id} href={v.file_url} target="_blank" rel="noreferrer" className="w-16 h-16 rounded-lg border border-violet-200 bg-white text-violet-700 flex flex-col items-center justify-center text-[10px] font-semibold shrink-0"><Palette className="w-4 h-4 mb-1"/>v{v.version_number}</a>) : <span className="text-xs text-slate-400 py-5">No mapped design</span>}</div></div>
-                        <div className="rounded-lg bg-emerald-50/50 border border-emerald-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-emerald-800">INSTALLATION / AFTER</p><span className="text-[10px] text-emerald-600">{installForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{installForItem.length ? installForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`I${i+1}`} onDelete={() => void deleteInstallationProof(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped installation proof</span>}</div></div>
+                        <div className="rounded-lg bg-emerald-50/50 border border-emerald-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-emerald-800">INSTALLATION / AFTER</p><span className="text-[10px] text-emerald-600">{installForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{installForItem.length ? installForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`I${i+1}`} decision={latestDecision('installation','photo',p.id)} onDelete={() => void deleteInstallationProof(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped installation proof</span>}</div></div>
                       </div>
                     </div>;
                   })()}
@@ -3931,6 +3942,14 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                   )}
                 </div>
               ))}
+              {(() => {
+                const mappedSurveyIds = new Set([...(surveyPhotoItems || []).map((x:any)=>x.survey_photo_id), ...(boardMarkings || []).filter((x:any)=>x.work_item_id).map((x:any)=>x.survey_photo_id)]);
+                const unmappedSurvey = (surveyPhotos || []).filter((p:any)=>!mappedSurveyIds.has(p.id));
+                const allProofs = (installations || []).flatMap((j:any)=>j.installation_proofs || []);
+                const unmappedInstall = allProofs.filter((p:any)=>!p.work_item_id);
+                if (!unmappedSurvey.length && !unmappedInstall.length) return null;
+                return <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-3"><p className="text-xs font-bold text-amber-900">Legacy / unmapped evidence</p><p className="text-[11px] text-amber-700 mt-0.5">These photos exist in the shop and are shown here so evidence never disappears. They are not guessed onto a measurement.</p><div className="mt-2 flex flex-wrap gap-2">{unmappedSurvey.map((p:any,i:number)=><button key={`us-${p.id}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped survey ${i+1}`})} className="relative"><img src={p.photo_url} className="w-20 h-16 object-contain bg-white rounded-lg border border-amber-200"/><span className="absolute bottom-1 left-1 text-[8px] bg-blue-700 text-white px-1 rounded">SURVEY</span></button>)}{unmappedInstall.map((p:any,i:number)=><button key={`ui-${p.id}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped installation ${i+1}`})} className="relative"><img src={p.photo_url} className="w-20 h-16 object-contain bg-white rounded-lg border border-amber-200"/><span className="absolute bottom-1 left-1 text-[8px] bg-emerald-700 text-white px-1 rounded">INSTALL</span></button>)}</div></div>;
+              })()}
             </div>
           ) : <p className="text-sm text-slate-400">No work items yet</p>}
         </Card>

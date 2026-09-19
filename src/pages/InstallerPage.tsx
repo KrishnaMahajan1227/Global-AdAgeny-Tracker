@@ -434,6 +434,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       ...(unavailable ? { installed_width:null, installed_height:null, installed_unit:null, installed_quantity:null, installed_area:null, installed_at:null } : {}),
     }).eq('id', item.id);
     if (error) { alert(error.message); return; }
+    if (unavailable && selectedProofWorkItemId === item.id) setSelectedProofWorkItemId('');
     await queryClient.invalidateQueries({ queryKey: ['shop-work-items-install', shopId] });
     await queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
   }
@@ -1197,7 +1198,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
 
             {approvedItems.length > 0 && <Card className="p-3"><div className="flex items-start justify-between gap-2 mb-2"><div><p className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Installation work items</p><p className="text-[11px] text-slate-500 mt-0.5">Install available items. If a surveyed location is unavailable today, mark only that item — it stays in history but is excluded from installed/billing calculations.</p></div></div><div className="space-y-2">{approvedItems.map((it, idx) => { const unavailable = it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active'); return <div key={it.id} className={`rounded-xl border p-3 ${unavailable?'border-amber-300 bg-amber-50':'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-2"><button disabled={!!unavailable} onClick={() => { setSelectedProofWorkItemId(it.id); setCameraFor('installed'); }} className="min-w-0 flex-1 text-left disabled:cursor-default"><p className="font-semibold text-slate-900 text-sm">{it.work_type_name || it.material || `Work Item ${idx + 1}`}</p><p className="text-xs text-slate-500 mt-0.5">{formatDim(it.approved_width)} × {formatDim(it.approved_height)} {it.approved_unit} · {Math.round((it.approved_area || 0) * 100) / 100} sq.ft · Qty {it.approved_quantity || 1}</p>{unavailable?<><p className="text-xs font-semibold text-amber-800 mt-1">Not available for installation · excluded from calculation</p><p className="text-[11px] text-amber-700">{it.execution_reason}{it.execution_note?` · ${it.execution_note}`:''}</p></>:<p className="text-xs text-blue-600 font-medium mt-1">Tap to take photo</p>}</button><button type="button" onClick={() => void markItemAvailability(it, !unavailable)} className={`shrink-0 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border ${unavailable?'border-emerald-300 bg-white text-emerald-700':'border-amber-300 bg-amber-50 text-amber-800'}`}>{unavailable?'Make available':'Not available'}</button></div></div>})}</div></Card>}
 
-            <Card className="p-3 border-slate-200"><label className="block text-xs font-semibold text-slate-700 mb-1">Gallery upload: choose work item</label><select value={selectedProofWorkItemId} onChange={(e) => setSelectedProofWorkItemId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="">Select work item...</option>{approvedItems.map((it, idx) => <option key={it.id} value={it.id}>{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}</option>)}</select></Card>
+            <Card className="p-3 border-slate-200"><label className="block text-xs font-semibold text-slate-700 mb-1">Gallery upload: choose work item</label><select value={selectedProofWorkItemId} onChange={(e) => setSelectedProofWorkItemId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="">Select work item...</option>{installableItems.map((it, idx) => <option key={it.id} value={it.id}>{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}</option>)}</select></Card>
 
             <label className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-blue-200 bg-blue-50/50 text-blue-700 text-sm font-semibold py-3 rounded-xl cursor-pointer hover:bg-blue-50">
               <ImagePlus className="w-4 h-4" /> Upload one or multiple installation photos
@@ -1224,7 +1225,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
 
             <button
               onClick={() => {
-                if (proofPhotos.length === 0) { alert('Add at least one installation photo before continuing.'); return; }
+                const missingProof = installableItems.find((it) => !proofPhotos.some((p) => p.workItemId === it.id));
+                if (missingProof) { alert(`Add at least one installation photo for ${missingProof.work_type_name || missingProof.material || 'each available work item'}, or mark that work item Not available.`); return; }
                 setStep(4);
               }}
               className="w-full bg-slate-900 text-white font-medium py-3 rounded-lg"
@@ -1250,15 +1252,12 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <h2 className="font-semibold text-slate-900 mb-3">Review Before Submitting</h2>
               {approvedItems.length > 0 ? (
                 <div className="space-y-2">
-                  {approvedItems.map((it) => (
-                    <div key={it.id} className="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2 text-sm">
-                      <div>
-                        <p className="font-medium text-slate-900">{it.material || it.work_type_name || 'Item'}</p>
-                        <p className="text-xs text-slate-500">{formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit} · Qty {it.approved_quantity || 1}</p>
-                      </div>
-                      <p className="text-xs font-semibold text-blue-600">{it.approved_area != null ? Math.round(it.approved_area) : ''} sq.ft</p>
+                  {approvedItems.map((it) => { const unavailable = it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active'); return (
+                    <div key={it.id} className={`rounded-lg px-3 py-2 text-sm border ${unavailable?'bg-amber-50 border-amber-200':'bg-slate-50 border-transparent'}`}>
+                      <div className="flex items-center justify-between gap-2"><div><p className="font-medium text-slate-900">{it.material || it.work_type_name || 'Item'}</p><p className="text-xs text-slate-500">{formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit} · Qty {it.approved_quantity || 1}</p></div>{unavailable?<span className="text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-1 rounded-full">NOT INSTALLED · EXCLUDED</span>:<p className="text-xs font-semibold text-blue-600">{it.approved_area != null ? Math.round(it.approved_area) : ''} sq.ft</p>}</div>
+                      {unavailable && <p className="text-[11px] text-amber-700 mt-1">{it.execution_reason || 'Site unavailable'}{it.execution_note?` · ${it.execution_note}`:''} · 0 installed sq.ft / qty for billing</p>}
                     </div>
-                  ))}
+                  );})}
                 </div>
               ) : (
                 <p className="text-sm text-slate-400">No approved measurements found for this shop.</p>

@@ -263,7 +263,7 @@ export default function ClientReportsPage() {
       const items = workItemsByShop.get(s.id) || [];
       const workTypes = Array.from(new Set(items.map((w) => w.work_type_name).filter(Boolean)));
       const totalArea = items.filter((w:any) => !w.excluded_from_calculations).reduce((sum, w) => sum + (w.approved_area ?? w.survey_area ?? 0), 0);
-      const totalQty = items.reduce((sum, w) => sum + (w.approved_quantity ?? w.survey_quantity ?? 0), 0);
+      const totalQty = items.filter((w:any) => !w.excluded_from_calculations).reduce((sum, w) => sum + (w.approved_quantity ?? w.survey_quantity ?? 0), 0);
       const earliestAssigned = items.length > 0 ? items.map((w) => w.created_at).sort()[0] : null;
       return {
         shop_id: s.id,

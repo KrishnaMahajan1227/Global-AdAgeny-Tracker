@@ -3013,15 +3013,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       if (!reason) return;
       note = window.prompt('Optional internal note for installer / Owner / Admin', item.execution_note || '')?.trim() || null;
     }
-    const { error } = await supabase.from('work_items').update({
-      execution_state: unavailable ? 'site_unavailable' : 'active',
-      execution_reason: unavailable ? reason : null,
-      execution_note: unavailable ? note : null,
-      excluded_from_calculations: unavailable,
-      execution_marked_at: new Date().toISOString(),
-      execution_marked_by: profile.id,
-      ...(unavailable ? { installed_width: null, installed_height: null, installed_unit: null, installed_quantity: null, installed_area: null, installed_at: null } : {}),
-    }).eq('id', item.id);
+    const { error } = await supabase.rpc('set_work_item_execution_availability', { p_work_item_id: item.id, p_unavailable: unavailable, p_reason: reason, p_note: note });
     if (error) throw error;
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }),

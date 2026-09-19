@@ -811,14 +811,8 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
     try{
       for(const key of selected){
         const [kind,id]=key.split(':'); const isItem=kind==='work_item';
-        const payload:any={organization_id:profile.organization_id,shop_id:shopId,stage:'installation',survey_id:null,installation_job_id:jobId,entity_type:isItem?'work_item':'installation_photo',entity_id:id,decision,note:reviewNote||null,reviewed_by:profile.id,reviewed_at:new Date().toISOString()};
-        const {error}=await supabase.from('field_review_decisions').upsert(payload,{onConflict:'stage,entity_type,entity_id'}); if(error)throw error;
-        if(decision==='redo'){
-          const proof=!isItem?(proofs||[]).find((p:any)=>p.id===id):null;
-          const correction:any={organization_id:profile.organization_id,shop_id:shopId,stage:'installation',assigned_to:assignedTo||null,requested_by:profile.id,note:reviewNote||'Correction requested during installation evidence review',status:'open',survey_id:null,installation_job_id:jobId,work_item_id:isItem?id:(proof?.work_item_id||null),issue_type:isItem?'work_item':'installation_photo',installation_proof_id:isItem?null:id};
-          let cancel=supabase.from('field_corrections').update({status:'cancelled'}).eq('stage','installation').eq('status','open'); cancel=isItem?cancel.eq('work_item_id',id):cancel.eq('installation_proof_id',id); await cancel;
-          const {error:ce}=await supabase.from('field_corrections').insert(correction); if(ce)throw ce;
-        }
+        const {error}=await supabase.rpc('set_field_review_decision',{p_stage:'installation',p_shop_id:shopId,p_survey_id:null,p_installation_job_id:jobId,p_entity_type:isItem?'work_item':'installation_photo',p_entity_id:id,p_decision:decision,p_note:reviewNote||null});
+        if(error)throw error;
       }
       // IMPORTANT: a partial decision must NEVER remove the shop from Pending Review.
       // Redo is scoped only to the selected Work Item/photo; the shop stays here until

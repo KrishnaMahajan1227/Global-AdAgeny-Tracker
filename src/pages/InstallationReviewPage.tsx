@@ -13,6 +13,7 @@ import {
   Palette, Camera,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { ItemLevelReviewPanel } from '@/components/ItemLevelReviewPanel';
 
 // Debounce a fast-changing value (typing in the search box) so we don't
 // fire a network request on every keystroke — this list is meant to hold
@@ -62,6 +63,7 @@ export default function InstallationReviewPage() {
   const [action, setAction] = useState<'approve' | 'reject'>('approve');
   const [note, setNote] = useState('');
   const [reopenForRedo, setReopenForRedo] = useState(false);
+  const [correctionTargets, setCorrectionTargets] = useState<Record<string, { issue_type: 'work_item' | 'installation_photo'; work_item_id?: string; installation_proof_id?: string; note: string }>>({});
 
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [bulkAction, setBulkAction] = useState<'approve' | 'reject'>('approve');
@@ -120,7 +122,7 @@ export default function InstallationReviewPage() {
       let query = supabase
         .from('installation_jobs')
         .select(
-          '*, shops!inner(name, city, clients(name)), profiles:installer_id(id, full_name), confirmed_by_profile:material_check_confirmed_by(full_name), installation_proofs(id, photo_url, storage_path, photo_type, angle, duplicate_flag)',
+          '*, shops!inner(name, city, clients(name)), profiles:installer_id(id, full_name), confirmed_by_profile:material_check_confirmed_by(full_name), installation_proofs(id, photo_url, storage_path, photo_type, angle, duplicate_flag, work_item_id)',
           { count: 'exact' }
         )
         .eq('organization_id', orgId)
@@ -179,22 +181,51 @@ export default function InstallationReviewPage() {
     if (jobError) throw new Error(`${job.shops?.name}: ${jobError.message}`);
 
     if (decision === 'approve') {
+      // Do not let a whole shop bypass the item-by-item review. Every
+      // approved Work Item and every installation proof must have its own
+      // explicit APPROVED decision; any REDO keeps final approval blocked.
+      const [{ data: reviewItems }, { data: reviewProofs }, { data: itemDecisions, error: decisionError }] = await Promise.all([
+        supabase.from('work_items').select('id').eq('shop_id', job.shop_id),
+        supabase.from('installation_proofs').select('id').eq('installation_job_id', job.id),
+        supabase.from('field_review_decisions').select('entity_type,entity_id,decision').eq('stage','installation').eq('installation_job_id',job.id),
+      ]);
+      if (decisionError) throw new Error(`Item-level review migration is required before final approval: ${decisionError.message}`);
+      const approved = new Set((itemDecisions || []).filter((d:any)=>d.decision==='approved').map((d:any)=>`${d.entity_type}:${d.entity_id}`));
+      const required = [...(reviewItems||[]).map((r:any)=>`work_item:${r.id}`), ...(reviewProofs||[]).map((r:any)=>`installation_photo:${r.id}`)];
+      const pending = required.filter(k=>!approved.has(k));
+      if (pending.length) throw new Error(`Review every Work Item/photo first. ${pending.length} item(s) are still unapproved or marked for redo.`);
+      await supabase.from('field_corrections').update({ status: 'resolved', resolved_at: new Date().toISOString() }).eq('installation_job_id', job.id).in('status', ['open','resubmitted']);
       // The write that finally makes the shop billable — gated in the
       // database to only be reachable from here, by Owner/Admin/Demo.
       const { error: shopError } = await supabase.from('shops').update({ status: 'installed' }).eq('id', job.shop_id).select('id');
       if (shopError) throw new Error(`${job.shops?.name}: ${shopError.message}`);
     } else {
-      // A rejected installation attempt is NOT historical evidence. Remove
-      // that attempt's proof rows and storage objects before reopening the
-      // shop, so the installer starts the redo with a clean photo set and
-      // Owner/Admin never sees old rejected proofs appended to the new ones.
-      const rejectedProofs = (job.installation_proofs || []) as { id: string; storage_path?: string | null }[];
-      const rejectedPaths = rejectedProofs.map((p) => p.storage_path).filter(Boolean) as string[];
+      // Granular redo: return ONLY the failed measurement/photo to the same installer.
+      // Good evidence remains approved/preserved and is not re-uploaded.
+      const selectedCorrections = Object.values(correctionTargets);
+      if (!selectedCorrections.length) throw new Error('Select at least one exact Work Item or installation photo that needs correction.');
+      await supabase.from('field_corrections').update({ status: 'cancelled' }).eq('installation_job_id', job.id).eq('status', 'open');
+      const correctionRows = selectedCorrections.map((c) => ({
+        organization_id: job.organization_id, shop_id: job.shop_id, stage: 'installation', installation_job_id: job.id,
+        work_item_id: c.work_item_id || null, installation_proof_id: c.installation_proof_id || null,
+        assigned_to: job.installer_id, requested_by: profile!.id, issue_type: c.issue_type, note: c.note || decisionNote || null, status: 'open',
+      }));
+      const { error: correctionError } = await supabase.from('field_corrections').insert(correctionRows);
+      if (correctionError) throw new Error(`Could not create correction tasks: ${correctionError.message}`);
+
+      // Delete ONLY proofs explicitly marked bad (or proofs belonging to a Work Item
+      // marked for redo). Everything else stays as valid evidence.
+      const rejectedProofs = (job.installation_proofs || []) as { id: string; storage_path?: string | null; work_item_id?: string | null }[];
+      const badProofIds = new Set(selectedCorrections.flatMap(c => c.installation_proof_id ? [c.installation_proof_id] : []));
+      const badWorkItemIds = new Set(selectedCorrections.flatMap(c => c.issue_type === 'work_item' && c.work_item_id ? [c.work_item_id] : []));
+      const proofsToRemove = rejectedProofs.filter(p => badProofIds.has(p.id) || (!!p.work_item_id && badWorkItemIds.has(p.work_item_id)));
+      const rejectedPaths = proofsToRemove.map((p) => p.storage_path).filter(Boolean) as string[];
       if (rejectedPaths.length) {
         const { error: storageError } = await supabase.storage.from('installation-proof').remove(rejectedPaths);
         if (storageError) console.error('[InstallationReview] rejected proof storage cleanup:', storageError.message);
       }
-      const { error: proofDeleteError } = await supabase.from('installation_proofs').delete().eq('installation_job_id', job.id);
+      const removeIds = proofsToRemove.map(p => p.id);
+      const { error: proofDeleteError } = removeIds.length ? await supabase.from('installation_proofs').delete().in('id', removeIds) : { error: null };
       if (proofDeleteError) throw new Error(`${job.shops?.name}: could not clear rejected photos: ${proofDeleteError.message}`);
 
       // Redo: send the shop back to the installer's own list, and reset
@@ -260,6 +291,7 @@ export default function InstallationReviewPage() {
     setAction(act);
     setNote('');
     setReopenForRedo(false);
+    setCorrectionTargets({});
   }
 
   function openBulk(act: 'approve' | 'reject') {
@@ -583,6 +615,7 @@ export default function InstallationReviewPage() {
             <div>
               <p className="text-xs font-medium text-slate-700 flex items-center gap-1.5 mb-2"><Palette className="w-3.5 h-3.5" /> Work Item Evidence — Survey → Measurement → Design → Installation</p>
               <WorkItemEvidenceReview shopId={reviewModal.shop_id} jobId={reviewModal.id} onOpenPhoto={setLightbox} />
+              <ItemLevelReviewPanel stage="installation" shopId={reviewModal.shop_id} jobId={reviewModal.id} assignedTo={reviewModal.installer_id} readOnly={reviewModal.review_status !== 'pending'} />
             </div>
           )}
 
@@ -600,7 +633,8 @@ export default function InstallationReviewPage() {
             </div>
           ) : (
             <>
-              <Textarea label="Review Note (sent to installer)" value={note} onChange={setNote} rows={3} placeholder={action === 'approve' ? 'Optional note...' : 'Please explain what needs to be redone...'} />
+              {action === 'reject' && reviewModal && <InstallationCorrectionPicker job={reviewModal} value={correctionTargets} onChange={setCorrectionTargets} />}
+              <Textarea label="Review Note (sent to installer)" value={note} onChange={setNote} rows={3} placeholder={action === 'approve' ? 'Optional note...' : 'Overall note (optional when each selected issue has its own note)...'} />
               {reviewMutation.isError && (
                 <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(reviewMutation.error as Error).message}</p>
               )}
@@ -932,4 +966,20 @@ function DesignReferencePhotos({ shopId }: { shopId: string }) {
   }
 
   return <MarkedPhotoGrid photos={surveyPhotos} markings={boardMarkings || []} workItems={workItems || []} />;
+}
+
+
+function InstallationCorrectionPicker({ job, value, onChange }: { job:any; value:Record<string, any>; onChange:(v:Record<string, any>)=>void }) {
+  const { data: items } = useQuery({ queryKey:['install-correction-items',job.shop_id], queryFn:async()=>{ const {data}=await supabase.from('work_items').select('id,work_type_name,approved_width,approved_height,approved_unit,approved_quantity').eq('shop_id',job.shop_id).order('created_at'); return data||[]; }});
+  const { data: proofs } = useQuery({ queryKey:['install-correction-proofs',job.id], queryFn:async()=>{ const {data}=await supabase.from('installation_proofs').select('id,photo_url,work_item_id,angle').eq('installation_job_id',job.id).order('captured_at'); return data||[]; }});
+  const toggle=(key:string,row:any)=>{ const n={...value}; if(n[key]) delete n[key]; else n[key]={...row,note:''}; onChange(n); };
+  const note=(key:string,v:string)=>onChange({...value,[key]:{...value[key],note:v}});
+  return <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3 space-y-3">
+    <div><p className="text-sm font-semibold text-slate-900">Select only what needs correction</p><p className="text-xs text-slate-500">The same installer receives only these Work Items/photos. Correct evidence is preserved.</p></div>
+    {(items||[]).map((it:any)=>{ const k=`wi:${it.id}`, checked=!!value[k], ps=(proofs||[]).filter((p:any)=>p.work_item_id===it.id); return <div key={it.id} className="rounded-lg border border-slate-200 bg-white p-3">
+      <label className="flex items-start gap-2 cursor-pointer"><input type="checkbox" checked={checked} onChange={()=>toggle(k,{issue_type:'work_item',work_item_id:it.id})} className="mt-1"/><span><b className="text-sm">{it.work_type_name||'Work item'}</b><span className="block text-xs text-slate-500">{it.approved_width??'—'} × {it.approved_height??'—'} {it.approved_unit||''} · Qty {it.approved_quantity??1}</span></span></label>
+      {checked&&<input value={value[k]?.note||''} onChange={e=>note(k,e.target.value)} placeholder="What exactly must be corrected?" className="mt-2 w-full rounded-lg border border-slate-300 px-2.5 py-2 text-xs"/>}
+      {ps.length>0&&<div className="grid grid-cols-3 gap-2 mt-2">{ps.map((p:any)=>{const pk=`proof:${p.id}`, pc=!!value[pk]; return <div key={p.id}><button type="button" onClick={()=>toggle(pk,{issue_type:'installation_photo',work_item_id:it.id,installation_proof_id:p.id})} className={`w-full rounded-lg border-2 overflow-hidden ${pc?'border-red-500 ring-2 ring-red-100':'border-slate-200'}`}><img src={p.photo_url} className="w-full aspect-[4/3] object-contain bg-slate-100"/><span className={`block text-[10px] py-1 ${pc?'bg-red-50 text-red-700':'bg-white text-slate-500'}`}>{pc?'Marked for correction':(p.angle||'Photo')}</span></button>{pc&&<input value={value[pk]?.note||''} onChange={e=>note(pk,e.target.value)} placeholder="Photo issue" className="mt-1 w-full rounded border px-2 py-1 text-[10px]"/>}</div>})}</div>}
+    </div>})}
+  </div>;
 }

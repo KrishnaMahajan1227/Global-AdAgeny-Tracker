@@ -345,6 +345,12 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   // installer moving in real time, same as the surveyor flow.
   useLiveLocationTracking(true, profile?.id, profile?.organization_id);
 
+  const { data: correctionTasks } = useQuery({
+    queryKey: ['installation-field-corrections', shopId, profile?.id],
+    queryFn: async () => { const { data, error } = await supabase.from('field_corrections').select('id, issue_type, note, work_item_id, installation_proof_id, created_at').eq('shop_id', shopId).eq('stage', 'installation').eq('assigned_to', profile!.id).eq('status', 'open').order('created_at'); if (error && /field_corrections|schema cache/i.test(error.message||'')) return []; if (error) throw error; return data || []; },
+    enabled: !!shopId && !!profile?.id,
+  });
+
   const { data: shop } = useQuery({
     queryKey: ['shop', shopId],
     queryFn: async () => {
@@ -900,6 +906,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
         }
       }
 
+      if ((correctionTasks || []).length) await supabase.from('field_corrections').update({ status: 'resubmitted', resubmitted_at: new Date().toISOString() }).in('id', correctionTasks!.map((c:any)=>c.id));
       queryClient.invalidateQueries();
       try { localStorage.removeItem(`adroute-install-draft:${shopId}`); } catch { /* ignore */ }
       setCompleted(true);
@@ -988,8 +995,10 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               </div>
             </Card>
 
+            {correctionTasks && correctionTasks.length > 0 && <Card className="p-4 border border-amber-300 bg-amber-50"><p className="font-semibold text-sm text-amber-900">Correction-only installation · {correctionTasks.length} item{correctionTasks.length===1?'':'s'}</p><p className="text-xs text-amber-700 mt-1">Only the affected Work Item(s) are shown below. Previously accepted evidence is preserved.</p><div className="mt-2 space-y-1">{correctionTasks.map((c:any)=><div key={c.id} className="text-xs bg-white/80 border border-amber-200 rounded px-2 py-1.5"><b>{c.issue_type==='installation_photo'?'Replace installation photo':'Redo work item'}</b>{c.note?` — ${c.note}`:''}</div>)}</div></Card>}
+
             <ApprovedSpecsCard
-              items={approvedItems}
+              items={correctionTasks && correctionTasks.length > 0 ? approvedItems.filter((it:any) => correctionTasks.some((c:any) => c.work_item_id === it.id)) : approvedItems}
               photos={surveyPhotos || []}
               markings={boardMarkings || []}
               photoItemLinks={surveyPhotoItemLinks || []}

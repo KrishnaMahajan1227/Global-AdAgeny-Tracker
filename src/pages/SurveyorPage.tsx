@@ -638,6 +638,12 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   // (Reject or Request Correction on Survey Review), show exactly why
   // right at the top of the wizard — not just "assigned again" with the
   // surveyor left to guess what to fix.
+  const { data: correctionTasks } = useQuery({
+    queryKey: ['survey-field-corrections', shopId, profile?.id],
+    queryFn: async () => { const { data, error } = await supabase.from('field_corrections').select('id, issue_type, note, work_item_id, survey_photo_id, created_at').eq('shop_id', shopId).eq('stage', 'survey').eq('assigned_to', profile!.id).eq('status', 'open').order('created_at'); if (error && /field_corrections|schema cache/i.test(error.message||'')) return []; if (error) throw error; return data || []; },
+    enabled: !!shopId && !!profile?.id,
+  });
+
   const { data: lastReview } = useQuery({
     queryKey: ['shop-last-review', shopId],
     queryFn: async () => {
@@ -984,6 +990,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       if (!result.ok) throw new Error(result.error);
 
       await deleteDraft(profile.id, shopId);
+      if ((correctionTasks || []).length) await supabase.from('field_corrections').update({ status: 'resubmitted', resubmitted_at: new Date().toISOString() }).in('id', correctionTasks!.map((c:any)=>c.id));
       queryClient.invalidateQueries();
       setSubmittedOffline(false);
       setSubmitted(true);
@@ -1123,7 +1130,9 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
         {/* Step 1: Shop */}
         {step === 1 && shop && (
           <div className="space-y-4">
-            {lastReview && (
+            {correctionTasks && correctionTasks.length > 0 && <Card className="p-4 border border-amber-300 bg-amber-50"><p className="font-semibold text-sm text-amber-900">Correction-only visit · {correctionTasks.length} item{correctionTasks.length===1?'':'s'}</p><p className="text-xs text-amber-700 mt-1">Fix only the items listed below. Other approved survey evidence does not need to be repeated.</p><div className="mt-2 space-y-1">{correctionTasks.map((c:any)=><div key={c.id} className="text-xs bg-white/80 border border-amber-200 rounded px-2 py-1.5"><b>{c.issue_type==='measurement'?'Measurement':'Survey photo'}</b>{c.note?` — ${c.note}`:''}</div>)}</div></Card>}
+
+          {lastReview && (
               <Card className={`p-4 border ${lastReview.status === 'rejected' ? 'border-red-300 bg-red-50' : 'border-amber-300 bg-amber-50'}`}>
                 <div className="flex items-center gap-2 mb-1">
                   <AlertCircle className={`w-4 h-4 ${lastReview.status === 'rejected' ? 'text-red-600' : 'text-amber-600'}`} />

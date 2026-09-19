@@ -15,6 +15,7 @@ import {
   MapPin, StickyNote, Search, SlidersHorizontal, CheckSquare, Square, X, Loader2, Clock, Eye,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { ItemLevelReviewPanel } from '@/components/ItemLevelReviewPanel';
 
 type ReviewAction = 'approve' | 'reject' | 'correction';
 
@@ -67,8 +68,9 @@ async function applySurveyDecision(params: {
   reviewerId: string;
   designerId?: string;
   varianceNotes?: Record<string, string>;
+  correctionTargets?: Record<string, { issue_type: 'measurement' | 'survey_photo'; work_item_id?: string; survey_photo_id?: string; note: string }>;
 }) {
-  const { survey, decision, note, reviewerId, designerId, varianceNotes } = params;
+  const { survey, decision, note, reviewerId, designerId, varianceNotes, correctionTargets } = params;
   const newStatus = decision === 'approve' ? 'approved' : decision === 'reject' ? 'rejected' : 'correction_requested';
 
   const { error: surveyError } = await supabase.from('surveys').update({
@@ -81,6 +83,19 @@ async function applySurveyDecision(params: {
 
   if (decision === 'approve') {
     if (!designerId) throw new Error(`${survey.shops?.name || 'Survey'}: pick a designer before approving.`);
+    // Final shop-level approval is only allowed after every measurement and
+    // survey photo inside this SAME shop has been explicitly approved.
+    const [{ data: reviewItems }, { data: reviewPhotos }, { data: itemDecisions, error: decisionError }] = await Promise.all([
+      supabase.from('work_items').select('id').eq('survey_id', survey.id),
+      supabase.from('survey_photos').select('id').eq('survey_id', survey.id),
+      supabase.from('field_review_decisions').select('entity_type,entity_id,decision').eq('stage','survey').eq('survey_id',survey.id),
+    ]);
+    if (decisionError) throw new Error(`Item-level review migration is required before final approval: ${decisionError.message}`);
+    const approved = new Set((itemDecisions || []).filter((d:any)=>d.decision==='approved').map((d:any)=>`${d.entity_type}:${d.entity_id}`));
+    const required = [...(reviewItems||[]).map((r:any)=>`measurement:${r.id}`), ...(reviewPhotos||[]).map((r:any)=>`survey_photo:${r.id}`)];
+    const pending = required.filter(k=>!approved.has(k));
+    if (pending.length) throw new Error(`Review every measurement/photo first. ${pending.length} item(s) are still unapproved or marked for redo.`);
+    await supabase.from('field_corrections').update({ status: 'resolved', resolved_at: new Date().toISOString() }).eq('survey_id', survey.id).in('status', ['open','resubmitted']);
 
     const { error: shopError } = await supabase.from('shops').update({ status: 'design_pending' }).eq('id', survey.shop_id).select('id');
     if (shopError) throw new Error(`${survey.shops?.name}: could not move shop to design_pending — ${shopError.message}`);
@@ -119,6 +134,17 @@ async function applySurveyDecision(params: {
       await createNotification(designerId, 'Design Task Assigned', `You've been assigned to design ${survey.shops?.name}`, 'info', '/design');
     }
   } else {
+    if (decision === 'correction') {
+      const selected = Object.values(correctionTargets || {});
+      if (!selected.length) throw new Error('Select at least one exact measurement or survey photo that needs correction.');
+      await supabase.from('field_corrections').update({ status: 'cancelled' }).eq('survey_id', survey.id).eq('status', 'open');
+      const { error: correctionError } = await supabase.from('field_corrections').insert(selected.map((c) => ({
+        organization_id: survey.organization_id, shop_id: survey.shop_id, stage: 'survey', survey_id: survey.id,
+        work_item_id: c.work_item_id || null, survey_photo_id: c.survey_photo_id || null,
+        assigned_to: survey.surveyor_id, requested_by: reviewerId, issue_type: c.issue_type, note: c.note || note || null, status: 'open',
+      })));
+      if (correctionError) throw new Error(`Could not create correction tasks: ${correctionError.message}`);
+    }
     const { error: shopError } = await supabase.from('shops').update({ status: 'assigned' }).eq('id', survey.shop_id).select('id');
     if (shopError) throw new Error(`${survey.shops?.name}: could not reset shop status — ${shopError.message}`);
     const { error: assignError } = await supabase.from('shop_assignments').update({ status: 'assigned', completed_at: null })
@@ -163,6 +189,7 @@ export default function SurveyReviewPage() {
   // filled in when Admin/Owner chooses to explain a variance (never
   // required — exceeding budget is allowed, just never silent).
   const [varianceNotes, setVarianceNotes] = useState<Record<string, string>>({});
+  const [correctionTargets, setCorrectionTargets] = useState<Record<string, { issue_type: 'measurement' | 'survey_photo'; work_item_id?: string; survey_photo_id?: string; note: string }>>({});
 
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
   const [bulkAction, setBulkAction] = useState<ReviewAction>('approve');
@@ -180,6 +207,7 @@ export default function SurveyReviewPage() {
     setNote('');
     setDesignerId('');
     setVarianceNotes({});
+    setCorrectionTargets({});
   };
 
   const openReview = (survey: any) => {
@@ -188,6 +216,7 @@ export default function SurveyReviewPage() {
     setNote('');
     setDesignerId('');
     setVarianceNotes({});
+    setCorrectionTargets({});
   };
 
   // Who to hand the design task to on approval — fetched once at page
@@ -308,7 +337,7 @@ export default function SurveyReviewPage() {
   const reviewMutation = useMutation({
     mutationFn: async () => {
       if (!selectedSurvey || !action) return;
-      await applySurveyDecision({ survey: selectedSurvey, decision: action, note, reviewerId: profile!.id, designerId, varianceNotes });
+      await applySurveyDecision({ survey: selectedSurvey, decision: action, note, reviewerId: profile!.id, designerId, varianceNotes, correctionTargets });
     },
     onSuccess: () => { invalidateAll(); closeDrawer(); },
   });
@@ -646,6 +675,8 @@ export default function SurveyReviewPage() {
             <ReviewMarkedPhotos surveyId={selectedSurvey.id} />
 
             <SurveyMeasurementsTable surveyId={selectedSurvey.id} />
+
+            <ItemLevelReviewPanel stage="survey" shopId={selectedSurvey.shop_id} surveyId={selectedSurvey.id} assignedTo={selectedSurvey.surveyor_id} readOnly={!isPendingSurvey} />
 
             <POBudgetReviewPanel
               surveyId={selectedSurvey.id}
@@ -1075,4 +1106,15 @@ function ReviewMarkedPhotos({ surveyId }: { surveyId: string }) {
       <MarkedPhotoGrid photos={photos || []} markings={markings || []} workItems={workItems || []} />
     </div>
   );
+}
+
+
+function SurveyCorrectionPicker({ survey, value, onChange }: { survey:any; value:Record<string,any>; onChange:(v:Record<string,any>)=>void }) {
+  const { data: items } = useQuery({ queryKey:['survey-correction-items',survey.id], queryFn:async()=>{const {data}=await supabase.from('work_items').select('id,work_type_name,survey_width,survey_height,survey_unit,survey_quantity,survey_area').eq('survey_id',survey.id).order('created_at');return data||[];}});
+  const { data: photos } = useQuery({ queryKey:['survey-correction-photos',survey.id], queryFn:async()=>{const {data}=await supabase.from('survey_photos').select('id,photo_url,caption').eq('survey_id',survey.id).order('created_at');return data||[];}});
+  const toggle=(k:string,row:any)=>{const n={...value};if(n[k])delete n[k];else n[k]={...row,note:''};onChange(n)}; const note=(k:string,v:string)=>onChange({...value,[k]:{...value[k],note:v}});
+  return <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3 space-y-3"><div><p className="text-sm font-semibold text-slate-900">Select only the incorrect survey evidence</p><p className="text-xs text-slate-500">Only these measurements/photos are returned to the same assigned surveyor.</p></div>
+    <div className="space-y-2">{(items||[]).map((it:any)=>{const k=`m:${it.id}`,c=!!value[k];return <div key={it.id} className="rounded-lg border bg-white p-2.5"><label className="flex gap-2 cursor-pointer"><input type="checkbox" checked={c} onChange={()=>toggle(k,{issue_type:'measurement',work_item_id:it.id})}/><span className="text-xs"><b>{it.work_type_name||'Measurement'}</b> · {it.survey_width??'—'} × {it.survey_height??'—'} {it.survey_unit||''} · Qty {it.survey_quantity??1} · {it.survey_area??'—'} sq.ft</span></label>{c&&<input value={value[k]?.note||''} onChange={e=>note(k,e.target.value)} placeholder="Exact measurement correction" className="mt-2 w-full rounded border px-2 py-1.5 text-xs"/>}</div>})}</div>
+    <div><p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">Photos</p><div className="grid grid-cols-3 gap-2">{(photos||[]).map((ph:any)=>{const k=`p:${ph.id}`,c=!!value[k];return <div key={ph.id}><button type="button" onClick={()=>toggle(k,{issue_type:'survey_photo',survey_photo_id:ph.id})} className={`w-full rounded-lg border-2 overflow-hidden ${c?'border-red-500 ring-2 ring-red-100':'border-slate-200'}`}><img src={ph.photo_url} className="w-full aspect-[4/3] object-contain bg-slate-100"/><span className={`block text-[10px] py-1 ${c?'bg-red-50 text-red-700':'bg-white text-slate-500'}`}>{c?'Marked for correction':'Survey photo'}</span></button>{c&&<input value={value[k]?.note||''} onChange={e=>note(k,e.target.value)} placeholder="Photo issue" className="mt-1 w-full rounded border px-2 py-1 text-[10px]"/>}</div>})}</div></div>
+  </div>;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
@@ -13,7 +13,6 @@ import {
   Palette, Camera,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { ItemLevelReviewPanel } from '@/components/ItemLevelReviewPanel';
 
 // Debounce a fast-changing value (typing in the search box) so we don't
 // fire a network request on every keystroke — this list is meant to hold
@@ -614,8 +613,7 @@ export default function InstallationReviewPage() {
           {reviewModal && (
             <div>
               <p className="text-xs font-medium text-slate-700 flex items-center gap-1.5 mb-2"><Palette className="w-3.5 h-3.5" /> Work Item Evidence — Survey → Measurement → Design → Installation</p>
-              <WorkItemEvidenceReview shopId={reviewModal.shop_id} jobId={reviewModal.id} onOpenPhoto={setLightbox} />
-              <ItemLevelReviewPanel stage="installation" shopId={reviewModal.shop_id} jobId={reviewModal.id} assignedTo={reviewModal.installer_id} readOnly={reviewModal.review_status !== 'pending'} />
+              <WorkItemEvidenceReview shopId={reviewModal.shop_id} jobId={reviewModal.id} assignedTo={reviewModal.installer_id} readOnly={reviewModal.review_status !== 'pending' && !reopenForRedo} onOpenPhoto={setLightbox} />
             </div>
           )}
 
@@ -632,20 +630,9 @@ export default function InstallationReviewPage() {
               )}
             </div>
           ) : (
-            <>
-              {action === 'reject' && reviewModal && <InstallationCorrectionPicker job={reviewModal} value={correctionTargets} onChange={setCorrectionTargets} />}
-              <Textarea label="Review Note (sent to installer)" value={note} onChange={setNote} rows={3} placeholder={action === 'approve' ? 'Optional note...' : 'Overall note (optional when each selected issue has its own note)...'} />
-              {reviewMutation.isError && (
-                <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(reviewMutation.error as Error).message}</p>
-              )}
-              <button
-                onClick={() => reviewMutation.mutate()}
-                disabled={reviewMutation.isPending}
-                className={`w-full text-white font-medium py-2.5 rounded-lg disabled:opacity-50 ${action === 'approve' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}`}
-              >
-                {reviewMutation.isPending ? 'Processing...' : `Confirm ${action === 'approve' ? 'Approval' : 'Redo Request'}`}
-              </button>
-            </>
+            <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs text-slate-600">
+              Review actions are built directly into each Work Item above. Approving the last required item automatically completes the installation review; marking any selected item/photo for redo sends only that correction back to the assigned installer.
+            </div>
           )}
         </div>
       </Modal>
@@ -811,87 +798,94 @@ function MaterialLoadedSummary({ job, onOpenPhoto }: { job: any; onOpenPhoto: (u
 // Shows before/after/installed proof photos plus GPS, so Admin/Owner can
 // actually see the completed work before approving it. Click any photo to
 // open it full-size.
-function WorkItemEvidenceReview({ shopId, jobId, onOpenPhoto }: { shopId: string; jobId: string; onOpenPhoto: (url: string) => void }) {
+function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, onOpenPhoto }: { shopId: string; jobId: string; assignedTo?: string; readOnly?: boolean; onOpenPhoto: (url: string) => void }) {
+  const { profile } = useAuth();
+  const qc = useQueryClient();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [reviewNote, setReviewNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [reviewError, setReviewError] = useState('');
   const { data: workItems } = useQuery({
     queryKey: ['review-evidence-work-items', shopId],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('work_items').select('*').eq('shop_id', shopId).order('created_at');
-      if (error) throw new Error(error.message);
-      return (data || []) as WorkItem[];
-    }, enabled: !!shopId,
+    queryFn: async () => { const { data, error } = await supabase.from('work_items').select('*').eq('shop_id', shopId).order('created_at'); if (error) throw new Error(error.message); return (data || []) as WorkItem[]; }, enabled: !!shopId,
   });
   const { data: surveyPhotos } = useQuery({
     queryKey: ['review-evidence-survey-photos', shopId],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('survey_photos').select('*').eq('shop_id', shopId).order('created_at');
-      if (error) throw new Error(error.message);
-      return (data || []) as SurveyPhoto[];
-    }, enabled: !!shopId,
+    queryFn: async () => { const { data, error } = await supabase.from('survey_photos').select('*').eq('shop_id', shopId).order('created_at'); if (error) throw new Error(error.message); return (data || []) as SurveyPhoto[]; }, enabled: !!shopId,
   });
   const { data: markings } = useQuery({
     queryKey: ['review-evidence-markings', shopId, surveyPhotos?.length],
-    queryFn: async () => {
-      const ids = (surveyPhotos || []).map(p => p.id); if (!ids.length) return [] as BoardMarking[];
-      const { data, error } = await supabase.from('board_markings').select('*').in('survey_photo_id', ids);
-      if (error) throw new Error(error.message); return (data || []) as BoardMarking[];
-    }, enabled: !!surveyPhotos,
+    queryFn: async () => { const ids=(surveyPhotos||[]).map(p=>p.id); if(!ids.length)return [] as BoardMarking[]; const {data,error}=await supabase.from('board_markings').select('*').in('survey_photo_id',ids); if(error)throw new Error(error.message); return (data||[]) as BoardMarking[]; }, enabled: !!surveyPhotos,
   });
   const { data: photoLinks } = useQuery({
     queryKey: ['review-evidence-photo-links', shopId, surveyPhotos?.length],
-    queryFn: async () => {
-      const ids = (surveyPhotos || []).map(p => p.id); if (!ids.length) return [] as any[];
-      const { data, error } = await supabase.from('survey_photo_items').select('survey_photo_id, work_item_id').in('survey_photo_id', ids);
-      if (error && /survey_photo_items|schema cache|could not find the table/i.test(error.message || '')) return [];
-      if (error) throw new Error(error.message); return data || [];
-    }, enabled: !!surveyPhotos,
+    queryFn: async () => { const ids=(surveyPhotos||[]).map(p=>p.id); if(!ids.length)return [] as any[]; const {data,error}=await supabase.from('survey_photo_items').select('survey_photo_id, work_item_id').in('survey_photo_id',ids); if(error&&/survey_photo_items|schema cache|could not find the table/i.test(error.message||''))return []; if(error)throw new Error(error.message); return data||[]; }, enabled: !!surveyPhotos,
   });
   const { data: designTasks } = useQuery({
     queryKey: ['review-evidence-designs', shopId],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('design_tasks').select('id, design_versions(*, design_version_items(work_item_id))').eq('shop_id', shopId);
-      if (error) throw new Error(error.message); return data || [];
-    }, enabled: !!shopId,
+    queryFn: async () => { const {data,error}=await supabase.from('design_tasks').select('id, design_versions(*, design_version_items(work_item_id))').eq('shop_id',shopId); if(error)throw new Error(error.message); return data||[]; }, enabled: !!shopId,
   });
   const { data: proofs } = useQuery({
     queryKey: ['review-evidence-proofs', jobId],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('installation_proofs').select('*').eq('installation_job_id', jobId).order('captured_at');
-      if (error) throw new Error(error.message); return (data || []) as any[];
-    }, enabled: !!jobId,
+    queryFn: async () => { const {data,error}=await supabase.from('installation_proofs').select('*').eq('installation_job_id',jobId).order('captured_at'); if(error)throw new Error(error.message); return (data||[]) as any[]; }, enabled: !!jobId,
   });
-  const items = workItems || [];
-  if (!items.length) return <p className="text-xs text-slate-400">No approved work items found for this shop.</p>;
-  const dim = (it:any) => {
-    const w=it.approved_width ?? it.survey_width, h=it.approved_height ?? it.survey_height, u=it.approved_unit ?? it.survey_unit ?? 'ft';
-    const q=it.approved_quantity ?? it.survey_quantity ?? 1, a=it.approved_area ?? it.survey_area;
-    return `${w ?? '—'} × ${h ?? '—'} ${u} · Qty ${q}${a != null ? ` · ${Number(a).toFixed(2)} sq.ft` : ''}`;
-  };
-  const Photo = ({url,label}:{url?:string|null;label:string}) => url ? (
-    <button onClick={()=>onOpenPhoto(url)} className="group relative overflow-hidden rounded-xl border border-slate-200 bg-slate-50 text-left">
-      <img src={url} alt={label} className="w-full aspect-[4/3] object-contain bg-slate-100" />
-      <span className="absolute left-2 bottom-2 rounded-md bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-white">{label}</span>
-    </button>
-  ) : <div className="aspect-[4/3] rounded-xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center text-[11px] text-slate-400">No {label.toLowerCase()}</div>;
+  const { data: decisions=[] } = useQuery({
+    queryKey: ['inline-install-review-decisions', jobId],
+    queryFn: async () => { const {data,error}=await supabase.from('field_review_decisions').select('*').eq('stage','installation').eq('installation_job_id',jobId); if(error&&/field_review_decisions|schema cache/i.test(error.message||''))return []; if(error)throw new Error(error.message); return data||[]; }, enabled: !!jobId,
+  });
+  const dmap = useMemo(() => new Map((decisions as any[]).map((d:any)=>[`${d.entity_type}:${d.entity_id}`,d])), [decisions]);
+  const items=workItems||[];
+  if(!items.length)return <p className="text-xs text-slate-400">No approved work items found for this shop.</p>;
+  const dim=(it:any)=>{const w=it.approved_width??it.survey_width,h=it.approved_height??it.survey_height,u=it.approved_unit??it.survey_unit??'ft',q=it.approved_quantity??it.survey_quantity??1,a=it.approved_area??it.survey_area;return `${w??'—'} × ${h??'—'} ${u} · Qty ${q}${a!=null?` · ${Number(a).toFixed(2)} sq.ft`:''}`};
+  const toggle=(key:string)=>setSelected(prev=>{const n=new Set(prev);n.has(key)?n.delete(key):n.add(key);return n});
+  const Photo=({url,label,reviewKey,decision}:{url?:string|null;label:string;reviewKey?:string;decision?:any})=>url?(<div className={`relative rounded-xl border-2 overflow-hidden ${reviewKey&&selected.has(reviewKey)?'border-blue-500 ring-2 ring-blue-100':decision?.decision==='redo'?'border-amber-300':'border-slate-200'}`}><button onClick={()=>onOpenPhoto(url)} className="block w-full bg-slate-50"><img src={url} alt={label} className="w-full aspect-[4/3] object-contain bg-slate-100"/></button>{reviewKey&&!readOnly&&<button onClick={()=>toggle(reviewKey)} className="absolute top-2 left-2 rounded-md bg-white/95 shadow px-2 py-1 text-[10px] font-semibold flex items-center gap-1">{selected.has(reviewKey)?<CheckSquare className="w-3.5 h-3.5 text-blue-600"/>:<Square className="w-3.5 h-3.5 text-slate-500"/>} Select</button>}<div className="absolute left-2 bottom-2 flex gap-1"><span className="rounded-md bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-white">{label}</span>{decision&&<span className={`rounded-md px-2 py-1 text-[10px] font-bold ${decision.decision==='approved'?'bg-emerald-600 text-white':'bg-amber-500 text-white'}`}>{decision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div>):<div className="aspect-[4/3] rounded-xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center text-[11px] text-slate-400">No {label.toLowerCase()}</div>;
+  async function applyInline(decision:'approved'|'redo'){
+    if(!selected.size||!profile)return; setBusy(true);setReviewError('');
+    try{
+      for(const key of selected){
+        const [kind,id]=key.split(':'); const isItem=kind==='work_item';
+        const payload:any={organization_id:profile.organization_id,shop_id:shopId,stage:'installation',survey_id:null,installation_job_id:jobId,entity_type:isItem?'work_item':'installation_photo',entity_id:id,decision,note:reviewNote||null,reviewed_by:profile.id,reviewed_at:new Date().toISOString()};
+        const {error}=await supabase.from('field_review_decisions').upsert(payload,{onConflict:'stage,entity_type,entity_id'}); if(error)throw error;
+        if(decision==='redo'){
+          const proof=!isItem?(proofs||[]).find((p:any)=>p.id===id):null;
+          const correction:any={organization_id:profile.organization_id,shop_id:shopId,stage:'installation',assigned_to:assignedTo||null,requested_by:profile.id,note:reviewNote||'Correction requested during installation evidence review',status:'open',survey_id:null,installation_job_id:jobId,work_item_id:isItem?id:(proof?.work_item_id||null),issue_type:isItem?'work_item':'installation_photo',installation_proof_id:isItem?null:id};
+          let cancel=supabase.from('field_corrections').update({status:'cancelled'}).eq('stage','installation').eq('status','open'); cancel=isItem?cancel.eq('work_item_id',id):cancel.eq('installation_proof_id',id); await cancel;
+          const {error:ce}=await supabase.from('field_corrections').insert(correction); if(ce)throw ce;
+        }
+      }
+      // Keep the job-level state in sync automatically so the reviewer does not need a second confirmation step.
+      if (decision === 'redo') {
+        await supabase.from('installation_jobs').update({ review_status:'rejected', reviewed_at:new Date().toISOString(), reviewed_by:profile.id, review_note:reviewNote||'Selected evidence sent for redo' }).eq('id',jobId);
+      } else {
+        const [{data:allItems},{data:allProofs},{data:allDecisions}] = await Promise.all([
+          supabase.from('work_items').select('id').eq('shop_id',shopId),
+          supabase.from('installation_proofs').select('id').eq('installation_job_id',jobId),
+          supabase.from('field_review_decisions').select('entity_type,entity_id,decision').eq('stage','installation').eq('installation_job_id',jobId),
+        ]);
+        const required=[...(allItems||[]).map((x:any)=>`work_item:${x.id}`),...(allProofs||[]).map((x:any)=>`installation_photo:${x.id}`)];
+        const approved=new Set((allDecisions||[]).filter((x:any)=>x.decision==='approved').map((x:any)=>`${x.entity_type}:${x.entity_id}`));
+        if(required.length>0 && required.every((k:string)=>approved.has(k))){
+          await supabase.from('installation_jobs').update({ review_status:'approved', reviewed_at:new Date().toISOString(), reviewed_by:profile.id, review_note:reviewNote||null }).eq('id',jobId);
+        }
+      }
+      setSelected(new Set());setReviewNote(''); await qc.invalidateQueries({queryKey:['inline-install-review-decisions',jobId]}); await qc.invalidateQueries({queryKey:['item-review-decisions']}); await qc.invalidateQueries({queryKey:['field-corrections']}); await qc.invalidateQueries({queryKey:['installation-review']}); await qc.invalidateQueries({queryKey:['installation-review-counts']});
+    }catch(e:any){setReviewError(e.message||String(e));}finally{setBusy(false)}
+  }
+  const reviewableKeys=items.flatMap((item:any)=>[`work_item:${item.id}`,...((proofs||[]).filter((p:any)=>p.work_item_id===item.id).map((p:any)=>`installation_photo:${p.id}`))]);
+  const allSelected=reviewableKeys.length>0&&reviewableKeys.every(k=>selected.has(k));
   return <div className="space-y-3">
-    {items.map((item:any, index:number)=>{
-      const linkedSurvey=(surveyPhotos||[]).filter(p => (photoLinks||[]).some((x:any)=>x.work_item_id===item.id && x.survey_photo_id===p.id) || (markings||[]).some(m=>m.work_item_id===item.id && m.survey_photo_id===p.id));
+    {!readOnly&&<div className="flex items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-3 py-2"><p className="text-xs text-slate-600"><b className="text-slate-900">Review directly here.</b> Select one or multiple Work Items/photos, then approve or redo below.</p><button onClick={()=>setSelected(allSelected?new Set():new Set(reviewableKeys))} className="shrink-0 text-xs font-semibold text-blue-700 flex items-center gap-1">{allSelected?<CheckSquare className="w-4 h-4"/>:<Square className="w-4 h-4"/>}{allSelected?'Clear all':'Select all'}</button></div>}
+    {items.map((item:any,index:number)=>{
+      const linkedSurvey=(surveyPhotos||[]).filter(p=>(photoLinks||[]).some((x:any)=>x.work_item_id===item.id&&x.survey_photo_id===p.id)||(markings||[]).some(m=>m.work_item_id===item.id&&m.survey_photo_id===p.id));
       const designs=(designTasks||[]).flatMap((t:any)=>t.design_versions||[]).filter((v:any)=>(v.design_version_items||[]).some((x:any)=>x.work_item_id===item.id)).sort((a:any,b:any)=>(b.version_number||0)-(a.version_number||0));
-      const itemProofs=(proofs||[]).filter((p:any)=>p.work_item_id===item.id);
-      return <div key={item.id} className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
-        <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 bg-slate-50 border-b border-slate-200">
-          <div><p className="text-[10px] font-bold tracking-[.16em] text-slate-400 uppercase">Work Item {index+1}</p><h4 className="text-sm font-semibold text-slate-900 mt-0.5">{item.work_type_name || 'Work item'}</h4><p className="text-xs text-slate-500 mt-1">{dim(item)}</p></div>
-          <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${itemProofs.length?'bg-emerald-50 text-emerald-700 border border-emerald-200':'bg-amber-50 text-amber-700 border border-amber-200'}`}>{itemProofs.length} installation photo{itemProofs.length===1?'':'s'}</span>
-        </div>
-        <div className="p-4">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div><p className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-1.5">1 · Survey / Measurement</p><Photo url={linkedSurvey[0]?.photo_url} label="Survey" />{linkedSurvey.length>1&&<p className="text-[10px] text-slate-400 mt-1">+{linkedSurvey.length-1} more survey photo(s)</p>}</div>
-            <div><p className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1.5">2 · Approved Design</p><Photo url={designs[0]?.file_url} label={designs[0] ? `Design v${designs[0].version_number}` : 'Design'} /></div>
-            <div><p className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 mb-1.5">3 · Installed Proof</p>{itemProofs.length?<div className="grid grid-cols-2 gap-2">{itemProofs.map((p:any)=><Photo key={p.id} url={p.photo_url} label={p.angle || 'Installed'} />)}</div>:<Photo label="Installation proof" />}</div>
-          </div>
-        </div>
+      const itemProofs=(proofs||[]).filter((p:any)=>p.work_item_id===item.id); const itemKey=`work_item:${item.id}`; const itemDecision:any=dmap.get(itemKey);
+      return <div key={item.id} className={`rounded-2xl border bg-white overflow-hidden shadow-sm ${selected.has(itemKey)?'border-blue-400 ring-2 ring-blue-100':'border-slate-200'}`}>
+        <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 bg-slate-50 border-b border-slate-200"><div className="flex gap-2.5 items-start">{!readOnly&&<button onClick={()=>toggle(itemKey)} className="mt-0.5">{selected.has(itemKey)?<CheckSquare className="w-5 h-5 text-blue-600"/>:<Square className="w-5 h-5 text-slate-400"/>}</button>}<div><p className="text-[10px] font-bold tracking-[.16em] text-slate-400 uppercase">Work Item {index+1}</p><h4 className="text-sm font-semibold text-slate-900 mt-0.5">{item.work_type_name||'Work item'}</h4><p className="text-xs text-slate-500 mt-1">{dim(item)}</p></div></div><div className="flex items-center gap-2">{itemDecision&&<span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${itemDecision.decision==='approved'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'}`}>{itemDecision.decision==='approved'?'APPROVED':'REDO'}</span>}<span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${itemProofs.length?'bg-emerald-50 text-emerald-700 border border-emerald-200':'bg-amber-50 text-amber-700 border border-amber-200'}`}>{itemProofs.length} installation photo{itemProofs.length===1?'':'s'}</span></div></div>
+        <div className="p-4"><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><div><p className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-1.5">1 · Survey / Measurement</p><Photo url={linkedSurvey[0]?.photo_url} label="Survey"/>{linkedSurvey.length>1&&<p className="text-[10px] text-slate-400 mt-1">+{linkedSurvey.length-1} more survey photo(s)</p>}</div><div><p className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1.5">2 · Approved Design</p><Photo url={designs[0]?.file_url} label={designs[0]?`Design v${designs[0].version_number}`:'Design'}/></div><div><p className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 mb-1.5">3 · Installed Proof</p>{itemProofs.length?<div className="grid grid-cols-2 gap-2">{itemProofs.map((p:any)=><Photo key={p.id} url={p.photo_url} label={p.angle||'Installed'} reviewKey={`installation_photo:${p.id}`} decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div>:<Photo label="Installation proof"/>}</div></div></div>
       </div>;
     })}
-    {(proofs||[]).some((p:any)=>!p.work_item_id) && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold text-amber-800">Legacy/unmapped installation photos</p><p className="text-[11px] text-amber-700 mt-0.5">These proofs predate Work Item mapping. They are shown separately and are not silently assigned to a measurement.</p><div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">{(proofs||[]).filter((p:any)=>!p.work_item_id).map((p:any)=><Photo key={p.id} url={p.photo_url} label="Unmapped proof" />)}</div></div>}
+    {!readOnly&&<div className="sticky bottom-0 z-10 rounded-2xl border border-slate-200 bg-white/95 backdrop-blur shadow-lg p-3"><div className="flex flex-col md:flex-row gap-2"><input value={reviewNote} onChange={e=>setReviewNote(e.target.value)} placeholder="Note only if needed — especially for redo" className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-xs"/><button disabled={!selected.size||busy} onClick={()=>applyInline('approved')} className="rounded-lg bg-emerald-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><CheckCircle2 className="w-4 h-4"/>Approve ({selected.size})</button><button disabled={!selected.size||busy} onClick={()=>applyInline('redo')} className="rounded-lg bg-amber-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><Wrench className="w-4 h-4"/>Redo ({selected.size})</button></div>{reviewError&&<p className="text-xs text-red-600 mt-2">{reviewError}</p>}</div>}
+    {(proofs||[]).some((p:any)=>!p.work_item_id)&&<div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold text-amber-800">Legacy/unmapped installation photos</p><p className="text-[11px] text-amber-700 mt-0.5">These older proofs are not automatically assigned to a measurement.</p><div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">{(proofs||[]).filter((p:any)=>!p.work_item_id).map((p:any)=><Photo key={p.id} url={p.photo_url} label="Unmapped proof" reviewKey={`installation_photo:${p.id}`} decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div></div>}
   </div>;
 }
 

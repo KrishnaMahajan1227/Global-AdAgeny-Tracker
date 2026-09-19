@@ -3224,7 +3224,19 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         const list = byJob.get(proof.installation_job_id) || [];
         list.push(proof); byJob.set(proof.installation_job_id, list);
       }
-      return (jobs || []).map((job: any) => ({ ...job, installation_proofs: byJob.get(job.id) || [] }));
+      const hydratedJobs = (jobs || []).map((job: any) => ({ ...job, installation_proofs: byJob.get(job.id) || [] }));
+      // Never let evidence disappear just because its historical installation job
+      // was superseded/deleted/reset after approval or a manual stage change.
+      // Shop Details is an evidence/audit screen: every proof row for this shop
+      // must remain visible. Put proofs whose job is no longer in the current job
+      // result into a synthetic history group so the rendering layer can still
+      // map them by work_item_id (or show them as legacy evidence).
+      const visibleJobIds = new Set((jobs || []).map((j: any) => j.id));
+      const historicalProofs = (proofs || []).filter((p: any) => !visibleJobIds.has(p.installation_job_id));
+      if (historicalProofs.length) {
+        hydratedJobs.push({ id: `history-${shopId}`, shop_id: shopId, review_status: 'history', installation_proofs: historicalProofs });
+      }
+      return hydratedJobs;
     },
     enabled: !!shopId,
   });
@@ -3943,10 +3955,20 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                 </div>
               ))}
               {(() => {
-                const mappedSurveyIds = new Set([...(surveyPhotoItems || []).map((x:any)=>x.survey_photo_id), ...(boardMarkings || []).filter((x:any)=>x.work_item_id).map((x:any)=>x.survey_photo_id)]);
+                const currentItemIds = new Set((workItems || []).map((w:any) => w.id));
+                const mappedSurveyIds = new Set([
+                  ...(surveyPhotoItems || []).filter((x:any)=>currentItemIds.has(x.work_item_id)).map((x:any)=>x.survey_photo_id),
+                  ...(boardMarkings || []).filter((x:any)=>x.work_item_id && currentItemIds.has(x.work_item_id)).map((x:any)=>x.survey_photo_id)
+                ]);
                 const unmappedSurvey = (surveyPhotos || []).filter((p:any)=>!mappedSurveyIds.has(p.id));
                 const allProofs = (installations || []).flatMap((j:any)=>j.installation_proofs || []);
-                const unmappedInstall = allProofs.filter((p:any)=>!p.work_item_id);
+                const currentWorkItemIds = new Set((workItems || []).map((w:any) => w.id));
+                // A proof can have a work_item_id that points at a superseded/deleted
+                // measurement after stage reset/re-import. Previously that made it
+                // vanish: it was neither in a current Work Item card nor considered
+                // "unmapped". Treat any non-current mapping as legacy evidence so
+                // approved photos are always visible on Shop Details.
+                const unmappedInstall = allProofs.filter((p:any)=>!p.work_item_id || !currentWorkItemIds.has(p.work_item_id));
                 if (!unmappedSurvey.length && !unmappedInstall.length) return null;
                 return <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-3"><p className="text-xs font-bold text-amber-900">Legacy / unmapped evidence</p><p className="text-[11px] text-amber-700 mt-0.5">These photos exist in the shop and are shown here so evidence never disappears. They are not guessed onto a measurement.</p><div className="mt-2 flex flex-wrap gap-2">{unmappedSurvey.map((p:any,i:number)=><button key={`us-${p.id}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped survey ${i+1}`})} className="relative"><img src={p.photo_url} className="w-20 h-16 object-contain bg-white rounded-lg border border-amber-200"/><span className="absolute bottom-1 left-1 text-[8px] bg-blue-700 text-white px-1 rounded">SURVEY</span></button>)}{unmappedInstall.map((p:any,i:number)=><button key={`ui-${p.id}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped installation ${i+1}`})} className="relative"><img src={p.photo_url} className="w-20 h-16 object-contain bg-white rounded-lg border border-amber-200"/><span className="absolute bottom-1 left-1 text-[8px] bg-emerald-700 text-white px-1 rounded">INSTALL</span></button>)}</div></div>;
               })()}

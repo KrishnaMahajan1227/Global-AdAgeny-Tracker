@@ -43,10 +43,12 @@ WHERE excluded_from_calculations IS TRUE OR COALESCE(execution_state,'active') <
 UPDATE public.installation_proofs ip
 SET work_item_id = only_item.work_item_id
 FROM (
-  SELECT shop_id, min(id) AS work_item_id
-  FROM public.work_items
-  GROUP BY shop_id
-  HAVING count(*) = 1
+  SELECT shop_id, id AS work_item_id
+  FROM (
+    SELECT shop_id, id, count(*) OVER (PARTITION BY shop_id) AS item_count
+    FROM public.work_items
+  ) ranked_items
+  WHERE item_count = 1
 ) only_item
 WHERE ip.shop_id = only_item.shop_id AND ip.work_item_id IS NULL;
 

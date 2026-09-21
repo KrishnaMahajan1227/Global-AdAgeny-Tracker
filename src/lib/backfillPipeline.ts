@@ -29,6 +29,8 @@ export interface BackfillItemInput {
   width: string;
   height: string;
   unit: string;
+  heightUnit?: string;
+  poLineItemId?: string;
   quantity: string;
 }
 
@@ -119,10 +121,12 @@ export async function runBackfillPipeline(params: BackfillParams): Promise<void>
       work_type_id: it.workTypeId || null,
       work_type_name: it.workTypeName.trim() || workTypes.find((w) => w.id === it.workTypeId)?.name || null,
       material: it.material.trim() || null,
+      entered_width: width, entered_height: height, entered_width_unit: it.unit || 'ft', entered_height_unit: (it as any).heightUnit || it.unit || 'ft',
       survey_width: widthFt, survey_height: heightFt, survey_unit: 'ft', survey_quantity: quantity, survey_area: area,
       approved_width: widthFt, approved_height: heightFt, approved_unit: 'ft', approved_quantity: quantity, approved_area: area,
       status: itemStatus,
     };
+    if ((it as any).poLineItemId) payload.po_line_item_id = (it as any).poLineItemId;
     if (itemStatus === 'production_done') {
       payload.produced_quantity = quantity;
       payload.produced_notes = note;

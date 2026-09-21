@@ -56,3 +56,38 @@ export function toFeet(value: number, unit: string): number {
 export function areaSqFt(width: number, widthUnit: string, height: number, heightUnit: string): number {
   return Math.round(toFeet(width, widthUnit) * toFeet(height, heightUnit) * 10000) / 10000;
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIZE DISPLAY vs CALCULATION
+//  • Calculation base is ALWAYS feet / sq.ft (survey_*, approved_*, installed_*).
+//  • People see the size exactly as the surveyor entered it (inch / ft / m / cm) — stored in entered_*.
+//  • Totals (dashboard, progress, reports, billing) are shown in the WORK ORDER unit (sqft / piece / lot).
+// ─────────────────────────────────────────────────────────────────────────────
+const UNIT_SHORT: Record<string, string> = { ft: 'ft', feet: 'ft', foot: 'ft', in: 'in', inch: 'in', inches: 'in', m: 'm', meter: 'm', metre: 'm', cm: 'cm', mm: 'mm' };
+export function unitShort(unit?: string | null): string { return UNIT_SHORT[String(unit || 'ft').trim().toLowerCase()] || String(unit || 'ft'); }
+/** 10 -> "10", 4.5 -> "4.5", 4.1666 -> "4.17" (never a long decimal, never rounded to a whole number). */
+export function trimNum(value: number | string | null | undefined, max = 2): string {
+  if (value == null || value === '') return '—';
+  const n = typeof value === 'string' ? parseFloat(value) : value;
+  if (!Number.isFinite(n)) return '—';
+  return String(Math.round(n * 10 ** max) / 10 ** max);
+}
+type SizeBasis = 'survey' | 'approved' | 'installed';
+/** "10 ft × 6 in" — the size as it was surveyed. Falls back to feet when the original entry is unknown or was edited later. */
+export function itemSizeLabel(it: any, basis: SizeBasis = 'approved'): string {
+  if (!it) return '—';
+  const pick = (k: 'width' | 'height') => (it[`${basis}_${k}`] ?? it[`approved_${k}`] ?? it[`survey_${k}`]) as number | null | undefined;
+  const w = pick('width'), h = pick('height');
+  if (w == null || h == null) return '—';
+  const ew = it.entered_width, eh = it.entered_height, wu = it.entered_width_unit, hu = it.entered_height_unit;
+  if (ew != null && eh != null && wu && hu && Math.abs(toFeet(Number(ew), wu) - Number(w)) < 0.05 && Math.abs(toFeet(Number(eh), hu) - Number(h)) < 0.05) {
+    return unitShort(wu) === unitShort(hu) ? `${trimNum(ew)} × ${trimNum(eh)} ${unitShort(wu)}` : `${trimNum(ew)} ${unitShort(wu)} × ${trimNum(eh)} ${unitShort(hu)}`;
+  }
+  return `${trimNum(w)} × ${trimNum(h)} ft`;
+}
+/** Total area in the work-order unit. Area-based work orders (sqft) show sq.ft; piece / lot orders count quantity. */
+export function totalInWorkOrderUnit(uom: string | null | undefined, areaSqFtValue: number | null | undefined, qty: number | null | undefined): { value: number; label: string } {
+  if (!uom || uom === 'sqft') return { value: Math.round((Number(areaSqFtValue) || 0) * 100) / 100, label: 'sq.ft' };
+  return { value: Number(qty) || 0, label: uom === 'piece' ? 'pcs' : uom };
+}

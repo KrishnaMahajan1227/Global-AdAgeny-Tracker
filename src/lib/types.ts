@@ -980,3 +980,5 @@ export const ROLE_LABELS: Record<string, string> = {
 
 export const OFFICE_ROLES: Role[] = ['agency_owner', 'admin', 'client_manager', 'designer', 'printing', 'accounts', 'demo'];
 export const FIELD_ROLES: Role[] = ['surveyor', 'installer'];
+
+export type SharedShopView = Record<string, any>;

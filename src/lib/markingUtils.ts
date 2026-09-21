@@ -176,10 +176,11 @@ export function buildBoardLabel(opts: {
   width?: number | string | null;
   height?: number | string | null;
   unit?: string | null;
+  sizeLabel?: string | null;
 }): string | null {
   const w = formatDim(opts.width);
   const h = formatDim(opts.height);
-  const dims = w && h ? `${w}×${h} ${opts.unit || 'ft'}` : '';
+  const dims = opts.sizeLabel && opts.sizeLabel !== '—' ? opts.sizeLabel : (w && h ? `${w}×${h} ${opts.unit || 'ft'}` : '');
   const name = (opts.workTypeName || '').trim();
   if (!name && !dims) return null;
   return [name, dims].filter(Boolean).join(' — ');

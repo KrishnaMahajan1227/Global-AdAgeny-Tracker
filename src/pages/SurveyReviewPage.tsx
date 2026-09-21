@@ -7,7 +7,7 @@ import { Drawer, Modal, Card, StatusBadge, EmptyState, PageHeader, Textarea, Sel
 import { logAudit, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
-import { formatDim } from '@/lib/units';
+import { formatDim, itemSizeLabel } from '@/lib/units';
 import type { SurveyPhoto, BoardMarking, WorkItem, POLineItemWorkContext } from '@/lib/types';
 import { computePOVariance } from '@/lib/poVariance';
 import {
@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { ItemLevelReviewPanel } from '@/components/ItemLevelReviewPanel';
+import { reviewApply, refreshReviewViews, type ReviewEntity } from '@/lib/reviewApi';
 
 type ReviewAction = 'approve' | 'reject' | 'correction';
 
@@ -70,95 +71,28 @@ async function applySurveyDecision(params: {
   varianceNotes?: Record<string, string>;
   correctionTargets?: Record<string, { issue_type: 'measurement' | 'survey_photo'; work_item_id?: string; survey_photo_id?: string; note: string }>;
 }) {
-  const { survey, decision, note, reviewerId, designerId, varianceNotes, correctionTargets } = params;
-  const newStatus = decision === 'approve' ? 'approved' : decision === 'reject' ? 'rejected' : 'correction_requested';
-
-  const { error: surveyError } = await supabase.from('surveys').update({
-    status: newStatus,
-    reviewed_at: new Date().toISOString(),
-    reviewed_by: reviewerId,
-    review_note: note || null,
-  }).eq('id', survey.id).select('id');
-  if (surveyError) throw new Error(`${survey.shops?.name || 'Survey'}: could not update survey — ${surveyError.message}`);
-
+  const { survey, decision, note, designerId, varianceNotes, correctionTargets } = params;
+  const name = survey.shops?.name || 'Survey';
+  // Every decision is ONE atomic server call (migration 0090) — nothing is ever half-applied.
   if (decision === 'approve') {
-    if (!designerId) throw new Error(`${survey.shops?.name || 'Survey'}: pick a designer before approving.`);
-    // Final shop-level approval is only allowed after every measurement and
-    // survey photo inside this SAME shop has been explicitly approved.
-    const [{ data: reviewItems }, { data: reviewPhotos }, { data: itemDecisions, error: decisionError }] = await Promise.all([
-      supabase.from('work_items').select('id').eq('survey_id', survey.id),
-      supabase.from('survey_photos').select('id').eq('survey_id', survey.id),
-      supabase.from('field_review_decisions').select('entity_type,entity_id,decision').eq('stage','survey').eq('survey_id',survey.id),
-    ]);
-    if (decisionError) throw new Error(`Item-level review migration is required before final approval: ${decisionError.message}`);
-    const approved = new Set((itemDecisions || []).filter((d:any)=>d.decision==='approved').map((d:any)=>`${d.entity_type}:${d.entity_id}`));
-    const required = [...(reviewItems||[]).map((r:any)=>`measurement:${r.id}`), ...(reviewPhotos||[]).map((r:any)=>`survey_photo:${r.id}`)];
-    const pending = required.filter(k=>!approved.has(k));
-    if (pending.length) throw new Error(`Review every measurement/photo first. ${pending.length} item(s) are still unapproved or marked for redo.`);
-    await supabase.from('field_corrections').update({ status: 'resolved', resolved_at: new Date().toISOString() }).eq('survey_id', survey.id).in('status', ['open','resubmitted']);
-
-    const { error: shopError } = await supabase.from('shops').update({ status: 'design_pending' }).eq('id', survey.shop_id).select('id');
-    if (shopError) throw new Error(`${survey.shops?.name}: could not move shop to design_pending — ${shopError.message}`);
-
-    const { data: items, error: itemsFetchError } = await supabase.from('work_items').select('*').eq('survey_id', survey.id);
-    if (itemsFetchError) throw new Error(`${survey.shops?.name}: could not load work items — ${itemsFetchError.message}`);
-    for (const item of items || []) {
-      const adjustmentNote = varianceNotes?.[item.id]?.trim();
-      const { error: itemError } = await supabase.from('work_items').update({
-        approved_width: item.survey_width,
-        approved_height: item.survey_height,
-        approved_unit: item.survey_unit,
-        approved_quantity: item.survey_quantity,
-        approved_area: item.survey_area,
-        approved_notes: item.survey_notes,
-        status: 'approved',
-        ...(adjustmentNote
-          ? { po_variance_note: adjustmentNote, po_variance_acknowledged_by: reviewerId, po_variance_acknowledged_at: new Date().toISOString() }
-          : {}),
-      }).eq('id', item.id).select('id');
-      if (itemError) throw new Error(`${survey.shops?.name}: could not approve work item — ${itemError.message}`);
+    if (!designerId) throw new Error(`${name}: pick a designer before approving.`);
+    const res = await reviewApply({ stage: 'survey', shopId: survey.shop_id, refId: survey.id, decision: 'approved', note, designerId, variance: varianceNotes });
+    if (!res.finalized) {
+      throw new Error(res.redo > 0
+        ? `${name}: ${res.redo} item(s) are still marked for redo — they must be corrected first.`
+        : `${name}: could not finalize the approval (${res.pending} item(s) pending).`);
     }
-
-    const { data: existingTask, error: existingTaskError } = await supabase
-      .from('design_tasks').select('id').eq('shop_id', survey.shop_id).maybeSingle();
-    if (existingTaskError) throw new Error(`${survey.shops?.name}: could not check for existing design task — ${existingTaskError.message}`);
-    if (!existingTask) {
-      const { error: taskInsertError } = await supabase.from('design_tasks').insert({
-        organization_id: survey.organization_id, shop_id: survey.shop_id, status: 'assigned', designer_id: designerId,
-      });
-      if (taskInsertError) throw new Error(`${survey.shops?.name}: could not create design task — ${taskInsertError.message}`);
-      await createNotification(designerId, 'New Design Task', `You've been assigned to design ${survey.shops?.name}`, 'info', '/design');
-    } else {
-      const { error: taskUpdateError } = await supabase.from('design_tasks').update({ designer_id: designerId }).eq('id', existingTask.id).select('id');
-      if (taskUpdateError) throw new Error(`${survey.shops?.name}: could not assign designer — ${taskUpdateError.message}`);
-      await createNotification(designerId, 'Design Task Assigned', `You've been assigned to design ${survey.shops?.name}`, 'info', '/design');
-    }
-  } else {
-    if (decision === 'correction') {
-      const selected = Object.values(correctionTargets || {});
-      if (!selected.length) throw new Error('Select at least one exact measurement or survey photo that needs correction.');
-      await supabase.from('field_corrections').update({ status: 'cancelled' }).eq('survey_id', survey.id).eq('status', 'open');
-      const { error: correctionError } = await supabase.from('field_corrections').insert(selected.map((c) => ({
-        organization_id: survey.organization_id, shop_id: survey.shop_id, stage: 'survey', survey_id: survey.id,
-        work_item_id: c.work_item_id || null, survey_photo_id: c.survey_photo_id || null,
-        assigned_to: survey.surveyor_id, requested_by: reviewerId, issue_type: c.issue_type, note: c.note || note || null, status: 'open',
-      })));
-      if (correctionError) throw new Error(`Could not create correction tasks: ${correctionError.message}`);
-    }
-    const { error: shopError } = await supabase.from('shops').update({ status: 'assigned' }).eq('id', survey.shop_id).select('id');
-    if (shopError) throw new Error(`${survey.shops?.name}: could not reset shop status — ${shopError.message}`);
-    const { error: assignError } = await supabase.from('shop_assignments').update({ status: 'assigned', completed_at: null })
-      .eq('shop_id', survey.shop_id).eq('user_id', survey.surveyor_id).eq('role', 'surveyor').select('id');
-    if (assignError) throw new Error(`${survey.shops?.name}: could not reset surveyor assignment — ${assignError.message}`);
+    return;
   }
-
-  await logAudit('surveys', survey.id, decision, 'status', survey.status, newStatus, `Survey ${decision} for ${survey.shops?.name}`);
-  await createNotification(
-    survey.surveyor_id,
-    `Survey ${decision}`,
-    `Your survey for ${survey.shops?.name} was ${decision === 'correction' ? 'requested for correction' : decision + 'd'}. ${note || ''}`,
-    'info'
-  );
+  if (decision === 'reject') {
+    await reviewApply({ stage: 'survey', shopId: survey.shop_id, refId: survey.id, decision: 'redo', note });
+    return;
+  }
+  const selected = Object.values(correctionTargets || {});
+  if (!selected.length) throw new Error('Select at least one exact measurement or survey photo that needs correction.');
+  const entities: ReviewEntity[] = selected.map((c) => c.issue_type === 'survey_photo'
+    ? { type: 'survey_photo', id: c.survey_photo_id! } : { type: 'measurement', id: c.work_item_id! });
+  await reviewApply({ stage: 'survey', shopId: survey.shop_id, refId: survey.id, entities, decision: 'redo', note: note || selected.map((c) => c.note).filter(Boolean).join(' | ') });
 }
 
 export default function SurveyReviewPage() {
@@ -282,9 +216,11 @@ export default function SurveyReviewPage() {
         // `surveys` has TWO foreign keys into `profiles` (surveyor_id AND
         // reviewed_by) — naming the FK column (`profiles:surveyor_id`)
         // resolves the otherwise-ambiguous embed.
-        .select('*, shops(name, city, purchase_order_id, clients(name)), profiles:surveyor_id(full_name)', { count: 'exact' })
+        .select('*, shops!inner(name, city, status, purchase_order_id, clients(name)), profiles:surveyor_id(full_name)', { count: 'exact' })
         .eq('organization_id', orgId)
         .in('status', statusesForTab(tab));
+      // A shop already past survey (design/production/installation/done) can never sit in Pending Survey Review.
+      if (tab === 'pending') query = query.not('shops.status', 'in', '(design_pending,designing,design_ready,in_review,design_approved,production_pending,in_production,production_ready,production_hold,production_done,dispatched,installation_pending,installing,installation_review,installed,billed,cancelled)');
 
       if (surveyorFilter) query = query.eq('surveyor_id', surveyorFilter);
       if (debouncedSearch) {
@@ -322,6 +258,7 @@ export default function SurveyReviewPage() {
   useRealtimeInvalidate(['surveys'], orgId, [surveysQueryKey, countsQueryKey, ['dashboard-stats', orgId]]);
 
   function invalidateAll() {
+    void refreshReviewViews(queryClient);
     queryClient.invalidateQueries({ queryKey: ['surveys-review'] });
     queryClient.invalidateQueries({ queryKey: countsQueryKey });
     queryClient.invalidateQueries({ queryKey: ['design-task-list'] });
@@ -676,7 +613,7 @@ export default function SurveyReviewPage() {
 
             <SurveyMeasurementsTable surveyId={selectedSurvey.id} />
 
-            <ItemLevelReviewPanel stage="survey" shopId={selectedSurvey.shop_id} surveyId={selectedSurvey.id} assignedTo={selectedSurvey.surveyor_id} readOnly={!isPendingSurvey} />
+            <ItemLevelReviewPanel stage="survey" shopId={selectedSurvey.shop_id} surveyId={selectedSurvey.id} variance={varianceNotes} onDone={() => { invalidateAll(); closeDrawer(); }} assignedTo={selectedSurvey.surveyor_id} readOnly={!isPendingSurvey} />
 
             <POBudgetReviewPanel
               surveyId={selectedSurvey.id}
@@ -933,7 +870,7 @@ function SurveyMeasurementsTable({ surveyId }: { surveyId: string }) {
                   <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{item.material || '—'}</td>
                   <td className="px-3 py-2 text-slate-600 text-right whitespace-nowrap">
                     {item.survey_width != null && item.survey_height != null
-                      ? `${formatDim(item.survey_width)} × ${formatDim(item.survey_height)} ${item.survey_unit || ''}`
+                      ? itemSizeLabel(item, 'survey')
                       : '—'}
                   </td>
                   <td className="px-3 py-2 text-slate-600 text-right whitespace-nowrap">{item.survey_quantity ?? '—'}</td>

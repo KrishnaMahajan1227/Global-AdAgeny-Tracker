@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { itemSizeLabel } from '@/lib/units';
 import { renderMarkedImage, buildBoardLabel } from '@/lib/markingUtils';
 import type { SurveyPhoto, BoardMarking, WorkItem } from '@/lib/types';
 import { ImageOff, Loader2 } from 'lucide-react';
@@ -108,7 +109,7 @@ export function MarkedPhotoGrid({ photos, markings, workItems }: { photos: Surve
     if (!workItemId) return null;
     const item = workItems.find((w) => w.id === workItemId);
     if (!item) return null;
-    return buildBoardLabel({ workTypeName: item.work_type_name, width: item.survey_width, height: item.survey_height, unit: item.survey_unit });
+    return buildBoardLabel({ workTypeName: item.work_type_name, width: item.survey_width, height: item.survey_height, unit: item.survey_unit, sizeLabel: itemSizeLabel(item, 'survey') });
   }
 
   if (photos.length === 0) return <p className="text-xs text-slate-400">None uploaded yet.</p>;

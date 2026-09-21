@@ -109,6 +109,10 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
           survey_width: w,
           survey_height: h,
           survey_unit: 'ft',
+          entered_width: wRaw,
+          entered_height: hRaw,
+          entered_width_unit: item.unit || 'ft',
+          entered_height_unit: item.heightUnit || item.unit || 'ft',
           survey_quantity: qty,
           // w and h are already rounded (toFeet does it), but their
           // product can still land on more than 2 decimals (e.g.
@@ -155,6 +159,16 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
             source: 'consumable' as const,
           }));
           await supabase.from('work_item_components').insert(consumableRows);
+        }
+      }
+
+      // Always link the board to the photo it was measured on (even when no polygon was drawn),
+      // so the photo shows under the right work item everywhere (Shop Details, reviews, installer).
+      if (item.photoLocalId && workItemRow) {
+        const linkedPhotoId = uploadedPhotoIdByLocalId.get(item.photoLocalId);
+        if (linkedPhotoId) {
+          const { error: linkErr } = await supabase.from('survey_photo_items').insert({ organization_id: draft.organizationId, survey_photo_id: linkedPhotoId, work_item_id: workItemRow.id });
+          if (linkErr && !/duplicate|survey_photo_items|schema cache/i.test(linkErr.message || '')) console.error('[syncDraft] photo link failed:', linkErr.message);
         }
       }
 

@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
+import { itemSizeLabel } from '@/lib/units';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { Card, EmptyState, PageHeader, Modal, Textarea } from '@/components/ui';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { logAudit, createNotification } from '@/lib/helpers';
+import { reviewApply, refreshReviewViews, setAvailability, type ReviewEntity } from '@/lib/reviewApi';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import type { InstallationProof, SurveyPhoto, BoardMarking, WorkItem } from '@/lib/types';
 import {
@@ -126,6 +128,8 @@ export default function InstallationReviewPage() {
         )
         .eq('organization_id', orgId)
         .eq('review_status', tab);
+      // A finished shop can never sit in Pending Review.
+      if (tab === 'pending') query = query.not('shops.status', 'in', '(installed,billed,cancelled)');
 
       if (installerFilter) query = query.eq('installer_id', installerFilter);
       if (flagFilter === 'gps') query = query.eq('gps_distance_flag', true);
@@ -161,6 +165,7 @@ export default function InstallationReviewPage() {
   useRealtimeInvalidate(['installation_jobs'], orgId, [jobsQueryKey, countsQueryKey, ['dashboard-stats', orgId]]);
 
   function invalidateAll() {
+    void refreshReviewViews(queryClient);
     queryClient.invalidateQueries({ queryKey: ['installation-review'] });
     queryClient.invalidateQueries({ queryKey: countsQueryKey });
     queryClient.invalidateQueries({ queryKey: ['shops'] });
@@ -169,82 +174,17 @@ export default function InstallationReviewPage() {
   }
 
   async function applyDecision(job: any, decision: 'approve' | 'reject', decisionNote: string) {
-    const newReviewStatus = decision === 'approve' ? 'approved' : 'rejected';
-
-    const { error: jobError } = await supabase.from('installation_jobs').update({
-      review_status: newReviewStatus,
-      reviewed_at: new Date().toISOString(),
-      reviewed_by: profile!.id,
-      review_note: decisionNote || null,
-    }).eq('id', job.id).select('id');
-    if (jobError) throw new Error(`${job.shops?.name}: ${jobError.message}`);
-
+    // One atomic server call (migration 0090): decisions, corrections, shop status, notifications.
     if (decision === 'approve') {
-      // Do not let a whole shop bypass the item-by-item review. Every
-      // approved Work Item and every installation proof must have its own
-      // explicit APPROVED decision; any REDO keeps final approval blocked.
-      const [{ data: reviewItems }, { data: reviewProofs }, { data: itemDecisions, error: decisionError }] = await Promise.all([
-        supabase.from('work_items').select('id').eq('shop_id', job.shop_id),
-        supabase.from('installation_proofs').select('id').eq('installation_job_id', job.id),
-        supabase.from('field_review_decisions').select('entity_type,entity_id,decision').eq('stage','installation').eq('installation_job_id',job.id),
-      ]);
-      if (decisionError) throw new Error(`Item-level review migration is required before final approval: ${decisionError.message}`);
-      const approved = new Set((itemDecisions || []).filter((d:any)=>d.decision==='approved').map((d:any)=>`${d.entity_type}:${d.entity_id}`));
-      const required = [...(reviewItems||[]).map((r:any)=>`work_item:${r.id}`), ...(reviewProofs||[]).map((r:any)=>`installation_photo:${r.id}`)];
-      const pending = required.filter(k=>!approved.has(k));
-      if (pending.length) throw new Error(`Review every Work Item/photo first. ${pending.length} item(s) are still unapproved or marked for redo.`);
-      await supabase.from('field_corrections').update({ status: 'resolved', resolved_at: new Date().toISOString() }).eq('installation_job_id', job.id).in('status', ['open','resubmitted']);
-      // The write that finally makes the shop billable — gated in the
-      // database to only be reachable from here, by Owner/Admin/Demo.
-      const { error: shopError } = await supabase.from('shops').update({ status: 'installed' }).eq('id', job.shop_id).select('id');
-      if (shopError) throw new Error(`${job.shops?.name}: ${shopError.message}`);
-    } else {
-      // Granular redo: return ONLY the failed measurement/photo to the same installer.
-      // Good evidence remains approved/preserved and is not re-uploaded.
-      const selectedCorrections = Object.values(correctionTargets);
-      if (!selectedCorrections.length) throw new Error('Select at least one exact Work Item or installation photo that needs correction.');
-      await supabase.from('field_corrections').update({ status: 'cancelled' }).eq('installation_job_id', job.id).eq('status', 'open');
-      const correctionRows = selectedCorrections.map((c) => ({
-        organization_id: job.organization_id, shop_id: job.shop_id, stage: 'installation', installation_job_id: job.id,
-        work_item_id: c.work_item_id || null, installation_proof_id: c.installation_proof_id || null,
-        assigned_to: job.installer_id, requested_by: profile!.id, issue_type: c.issue_type, note: c.note || decisionNote || null, status: 'open',
-      }));
-      const { error: correctionError } = await supabase.from('field_corrections').insert(correctionRows);
-      if (correctionError) throw new Error(`Could not create correction tasks: ${correctionError.message}`);
-
-      // Delete ONLY proofs explicitly marked bad (or proofs belonging to a Work Item
-      // marked for redo). Everything else stays as valid evidence.
-      const rejectedProofs = (job.installation_proofs || []) as { id: string; storage_path?: string | null; work_item_id?: string | null }[];
-      const badProofIds = new Set(selectedCorrections.flatMap(c => c.installation_proof_id ? [c.installation_proof_id] : []));
-      const badWorkItemIds = new Set(selectedCorrections.flatMap(c => c.issue_type === 'work_item' && c.work_item_id ? [c.work_item_id] : []));
-      const proofsToRemove = rejectedProofs.filter(p => badProofIds.has(p.id) || (!!p.work_item_id && badWorkItemIds.has(p.work_item_id)));
-      const rejectedPaths = proofsToRemove.map((p) => p.storage_path).filter(Boolean) as string[];
-      if (rejectedPaths.length) {
-        const { error: storageError } = await supabase.storage.from('installation-proof').remove(rejectedPaths);
-        if (storageError) console.error('[InstallationReview] rejected proof storage cleanup:', storageError.message);
-      }
-      const removeIds = proofsToRemove.map(p => p.id);
-      const { error: proofDeleteError } = removeIds.length ? await supabase.from('installation_proofs').delete().in('id', removeIds) : { error: null };
-      if (proofDeleteError) throw new Error(`${job.shops?.name}: could not clear rejected photos: ${proofDeleteError.message}`);
-
-      // Redo: send the shop back to the installer's own list, and reset
-      // the assignment so "Start Install" is enabled again.
-      const { error: shopError } = await supabase.from('shops').update({ status: 'installation_pending' }).eq('id', job.shop_id).select('id');
-      if (shopError) throw new Error(`${job.shops?.name}: ${shopError.message}`);
-      await supabase.from('shop_assignments').update({ status: 'assigned', completed_at: null })
-        .eq('shop_id', job.shop_id).eq('user_id', job.installer_id).eq('role', 'installer').select('id');
+      const res = await reviewApply({ stage: 'installation', shopId: job.shop_id, refId: job.id, decision: 'approved', note: decisionNote });
+      if (!res.finalized) throw new Error(`${job.shops?.name}: ${res.redo} item(s) are marked for redo and ${res.pending} still pending — finish those first.`);
+      return;
     }
-
-    await logAudit('installation_jobs', job.id, decision, 'review_status', job.review_status, newReviewStatus, `Installation ${decision === 'approve' ? 'approved' : 'sent back for redo'} for ${job.shops?.name}`);
-    await createNotification(
-      job.installer_id,
-      decision === 'approve' ? 'Installation Approved' : 'Installation Needs Redo',
-      decision === 'approve'
-        ? `Your installation for ${job.shops?.name} was approved.`
-        : `Your installation for ${job.shops?.name} needs redo. ${decisionNote || ''}`,
-      'info',
-      '/mobile'
-    );
+    const picked = Object.values(correctionTargets);
+    const entities: ReviewEntity[] | undefined = picked.length
+      ? picked.map((c) => c.installation_proof_id ? { type: 'installation_photo', id: c.installation_proof_id } : { type: 'work_item', id: c.work_item_id! })
+      : undefined;
+    await reviewApply({ stage: 'installation', shopId: job.shop_id, refId: job.id, entities, decision: 'redo', note: decisionNote || picked.map((c) => c.note).filter(Boolean).join(' | ') });
   }
 
   const reviewMutation = useMutation({
@@ -276,6 +216,23 @@ export default function InstallationReviewPage() {
       setBulkNote('');
     },
   });
+
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkResult, setBulkResult] = useState('');
+  async function runBulkAll(decision: 'approve' | 'reject') {
+    const targets = rows.filter((r) => selectedIds.has(r.id));
+    if (!targets.length) return;
+    if (decision === 'reject' && !bulkNote.trim()) { setBulkResult('Redo/reject ke liye note likhiye.'); return; }
+    setBulkBusy(true); setBulkResult('');
+    const lines: string[] = [];
+    for (const job of targets) {
+      try {
+        const res = await reviewApply({ stage: 'installation', shopId: job.shop_id, refId: job.id, decision: decision === 'approve' ? 'approved' : 'redo', note: bulkNote });
+        lines.push(`✅ ${job.shops?.name}: ${res.finalized ? 'approved — review se hat gaya' : res.left_review ? 'redo bhej diya — review se hat gaya' : 'kuch kaam abhi baaki, review me hai'}`);
+      } catch (e: any) { lines.push(`❌ ${job.shops?.name}: ${e.message}`); }
+    }
+    setBulkResult(lines.join('\n')); setBulkBusy(false); invalidateAll();
+  }
 
   function toggleSelected(id: string) {
     setSelectedIds((prev) => {
@@ -606,7 +563,7 @@ export default function InstallationReviewPage() {
           {reviewModal && (
             <div>
               <p className="text-xs font-medium text-slate-700 flex items-center gap-1.5 mb-2"><Palette className="w-3.5 h-3.5" /> Work Item Evidence — Survey → Measurement → Design → Installation</p>
-              <WorkItemEvidenceReview shopId={reviewModal.shop_id} jobId={reviewModal.id} assignedTo={reviewModal.installer_id} readOnly={reviewModal.review_status !== 'pending' && !reopenForRedo} onOpenPhoto={setLightbox} />
+              <WorkItemEvidenceReview shopId={reviewModal.shop_id} jobId={reviewModal.id} assignedTo={reviewModal.installer_id} readOnly={reviewModal.review_status !== 'pending' && !reopenForRedo} onOpenPhoto={setLightbox} onLeftReview={() => { setReviewModal(null); invalidateAll(); }} />
             </div>
           )}
 
@@ -654,10 +611,19 @@ export default function InstallationReviewPage() {
                   <ChevronRight className="w-4 h-4 text-slate-400 transition group-open:rotate-90"/>
                 </summary>
                 <div className="p-4 border-t border-slate-100">
-                  <WorkItemEvidenceReview shopId={j.shop_id} jobId={j.id} assignedTo={j.installer_id} onOpenPhoto={setLightbox}/>
+                  <WorkItemEvidenceReview shopId={j.shop_id} jobId={j.id} assignedTo={j.installer_id} onOpenPhoto={setLightbox} onLeftReview={invalidateAll}/>
                 </div>
               </details>;
             })}
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+            <p className="text-xs font-semibold text-slate-800">Sabhi selected shops ek saath ({selectedJobs.length})</p>
+            <input value={bulkNote} onChange={(e) => setBulkNote(e.target.value)} placeholder="Note (redo/reject ke liye zaroori)" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs bg-white" />
+            <div className="grid grid-cols-2 gap-2">
+              <button disabled={bulkBusy} onClick={() => void runBulkAll('approve')} className="rounded-lg bg-emerald-600 text-white py-2 text-sm font-semibold disabled:opacity-40">{bulkBusy ? 'Working…' : 'Approve all remaining (sab shops)'}</button>
+              <button disabled={bulkBusy} onClick={() => void runBulkAll('reject')} className="rounded-lg bg-red-600 text-white py-2 text-sm font-semibold disabled:opacity-40">Reject / redo all (sab shops)</button>
+            </div>
+            {bulkResult && <p className="text-xs whitespace-pre-line text-slate-700">{bulkResult}</p>}
           </div>
           <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
             <p className="text-xs text-slate-500">Decisions are saved per shop and per selected evidence — never across the wrong shop.</p>
@@ -765,7 +731,7 @@ function MaterialLoadedSummary({ job, onOpenPhoto }: { job: any; onOpenPhoto: (u
 // Shows before/after/installed proof photos plus GPS, so Admin/Owner can
 // actually see the completed work before approving it. Click any photo to
 // open it full-size.
-function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, onOpenPhoto }: { shopId: string; jobId: string; assignedTo?: string; readOnly?: boolean; onOpenPhoto: (url: string) => void }) {
+function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, onOpenPhoto, onLeftReview }: { shopId: string; jobId: string; assignedTo?: string; readOnly?: boolean; onOpenPhoto: (url: string) => void; onLeftReview?: () => void }) {
   const { profile } = useAuth();
   const qc = useQueryClient();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -803,57 +769,31 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
   const dmap = useMemo(() => new Map((decisions as any[]).map((d:any)=>[`${d.entity_type}:${d.entity_id}`,d])), [decisions]);
   const items=workItems||[];
   if(!items.length)return <p className="text-xs text-slate-400">No approved work items found for this shop.</p>;
-  const dim=(it:any)=>{const w=it.approved_width??it.survey_width,h=it.approved_height??it.survey_height,u=it.approved_unit??it.survey_unit??'ft',q=it.approved_quantity??it.survey_quantity??1,a=it.approved_area??it.survey_area;return `${w??'—'} × ${h??'—'} ${u} · Qty ${q}${a!=null?` · ${Number(a).toFixed(2)} sq.ft`:''}`};
+  const dim=(it:any)=>{const w=it.approved_width??it.survey_width,h=it.approved_height??it.survey_height,u=it.approved_unit??it.survey_unit??'ft',q=it.approved_quantity??it.survey_quantity??1,a=it.approved_area??it.survey_area;return `${itemSizeLabel(it)} · Qty ${q}${a!=null?` · ${Number(a).toFixed(2)} sq.ft`:''}`};
   const toggle=(key:string)=>setSelected(prev=>{const n=new Set(prev);n.has(key)?n.delete(key):n.add(key);return n});
   const Photo=({url,label,reviewKey,decision}:{url?:string|null;label:string;reviewKey?:string;decision?:any})=>url?(<div className={`relative rounded-xl border-2 overflow-hidden ${reviewKey&&selected.has(reviewKey)?'border-blue-500 ring-2 ring-blue-100':decision?.decision==='redo'?'border-amber-300':'border-slate-200'}`}><button onClick={()=>onOpenPhoto(url)} className="block w-full bg-slate-50"><img src={url} alt={label} className="w-full aspect-[4/3] object-contain bg-slate-100"/></button>{reviewKey&&!readOnly&&<button onClick={()=>toggle(reviewKey)} className="absolute top-2 left-2 rounded-md bg-white/95 shadow px-2 py-1 text-[10px] font-semibold flex items-center gap-1">{selected.has(reviewKey)?<CheckSquare className="w-3.5 h-3.5 text-blue-600"/>:<Square className="w-3.5 h-3.5 text-slate-500"/>} Select</button>}<div className="absolute left-2 bottom-2 flex gap-1"><span className="rounded-md bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-white">{label}</span>{decision&&<span className={`rounded-md px-2 py-1 text-[10px] font-bold ${decision.decision==='approved'?'bg-emerald-600 text-white':'bg-amber-500 text-white'}`}>{decision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div>):<div className="aspect-[4/3] rounded-xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center text-[11px] text-slate-400">No {label.toLowerCase()}</div>;
   async function applyInline(decision:'approved'|'redo'){
     if(!selected.size||!profile)return; setBusy(true);setReviewError('');
     try{
-      for(const key of selected){
-        const [kind,id]=key.split(':'); const isItem=kind==='work_item';
-        const {error}=await supabase.rpc('set_field_review_decision',{p_stage:'installation',p_shop_id:shopId,p_survey_id:null,p_installation_job_id:jobId,p_entity_type:isItem?'work_item':'installation_photo',p_entity_id:id,p_decision:decision,p_note:reviewNote||null});
-        if(error)throw error;
-      }
-      // IMPORTANT: a partial decision must NEVER remove the shop from Pending Review.
-      // Redo is scoped only to the selected Work Item/photo; the shop stays here until
-      // every Work Item has complete evidence and every required review is approved.
-      if (decision === 'redo') {
-        await supabase.from('installation_jobs').update({ review_status:'pending', reviewed_at:null, reviewed_by:null, review_note:reviewNote||'Selected Work Item sent for correction' }).eq('id',jobId);
-        if (assignedTo) await createNotification(assignedTo, 'Installation redo requested', `A specific Work Item for this shop was returned for correction. ${reviewNote||'Open My Installations to see exactly what needs to be fixed.'}`, 'warning', '/install');
-      } else {
-        // Approving an entity also closes an open correction for that exact entity only.
-        for (const key of selected) {
-          const [kind,id]=key.split(':');
-          let resolve=supabase.from('field_corrections').update({status:'resolved',resolved_at:new Date().toISOString()}).eq('stage','installation').eq('status','open').eq('installation_job_id',jobId);
-          resolve=kind==='work_item'?resolve.eq('work_item_id',id):resolve.eq('installation_proof_id',id);
-          await resolve;
-        }
-        const [{data:allItems},{data:allProofs},{data:allDecisions}] = await Promise.all([
-          supabase.from('work_items').select('id').eq('shop_id',shopId),
-          supabase.from('installation_proofs').select('id').eq('installation_job_id',jobId),
-          supabase.from('field_review_decisions').select('entity_type,entity_id,decision').eq('stage','installation').eq('installation_job_id',jobId),
-        ]);
-        const required=(allItems||[]).map((x:any)=>`work_item:${x.id}`);
-        const approved=new Set((allDecisions||[]).filter((x:any)=>x.decision==='approved').map((x:any)=>`${x.entity_type}:${x.entity_id}`));
-        const {count:openCorrections}=await supabase.from('field_corrections').select('id',{count:'exact',head:true}).eq('stage','installation').eq('installation_job_id',jobId).eq('status','open');
-
-        // A shop can leave Pending Review only when the full evidence chain exists for
-        // every Work Item: Survey/Measurement -> Approved Design -> Installation proof.
-        const evidenceComplete=(allItems||[]).every((it:any)=>{
-          const hasSurvey=(surveyPhotos||[]).some((p:any)=>(photoLinks||[]).some((x:any)=>x.work_item_id===it.id&&x.survey_photo_id===p.id)||(markings||[]).some((m:any)=>m.work_item_id===it.id&&m.survey_photo_id===p.id));
-          const hasDesign=(designTasks||[]).some((t:any)=>(t.design_versions||[]).some((v:any)=>(v.design_version_items||[]).some((x:any)=>x.work_item_id===it.id)));
-          const hasInstall=(allProofs||[]).some((p:any)=>p.work_item_id===it.id);
-          return hasSurvey&&hasDesign&&hasInstall;
-        });
-        if(required.length>0 && evidenceComplete && !openCorrections && required.every((k:string)=>approved.has(k))){
-          await supabase.from('installation_jobs').update({ review_status:'approved', reviewed_at:new Date().toISOString(), reviewed_by:profile.id, review_note:reviewNote||null }).eq('id',jobId);
-        } else {
-          // Partial approvals never make the shop disappear from this queue.
-          await supabase.from('installation_jobs').update({ review_status:'pending', reviewed_at:null, reviewed_by:null }).eq('id',jobId);
-        }
-      }
-      setSelected(new Set());setReviewNote(''); await qc.invalidateQueries({queryKey:['inline-install-review-decisions',jobId]}); await qc.invalidateQueries({queryKey:['item-review-decisions']}); await qc.invalidateQueries({queryKey:['field-corrections']}); await qc.invalidateQueries({queryKey:['installation-review']}); await qc.invalidateQueries({queryKey:['installation-review-counts']});
+      if(decision==='redo' && !reviewNote.trim()) throw new Error('Redo ke liye note likhiye — installer ko batana zaroori hai kya theek karna hai.');
+      const entities:ReviewEntity[]=[...selected].map(key=>{const [kind,id]=key.split(':');return {type:kind==='work_item'?'work_item':'installation_photo',id} as ReviewEntity;});
+      const res=await reviewApply({stage:'installation',shopId,refId:jobId,entities,decision,note:reviewNote});
+      setSelected(new Set());setReviewNote('');
+      await refreshReviewViews(qc,shopId);
+      if(res.finalized||res.left_review){ setReviewError(''); onLeftReview?.(); }
+      else if(decision==='approved'){ setReviewError(res.redo>0?`${res.redo} item abhi Redo me hai — pehle wo theek hona chahiye ya use approve kijiye.`:res.undecided&&res.undecided>0?`${res.undecided} work item ka decision baaki hai — unhe bhi approve/redo kijiye.`:'Approve ho gaya.'); }
+      else { setReviewError(`Redo bhej diya. ${res.undecided||0} item ka decision baaki hai, isliye shop abhi review me hai.`); }
     }catch(e:any){setReviewError(e.message||String(e));}finally{setBusy(false)}
+  }
+  async function toggleAvailability(item:any){
+    try{
+      if(item.excluded_from_calculations){ await setAvailability(item.id,false,null,null); }
+      else{
+        const reason=window.prompt('Yeh kaam installation ke liye available kyun nahi hai? (Renovation / site blocked / permission / removed)','Site renovation')?.trim(); if(!reason)return;
+        const n=window.prompt('Optional comment','')?.trim()||null; await setAvailability(item.id,true,reason,n);
+      }
+      await refreshReviewViews(qc,shopId);
+    }catch(e:any){setReviewError(e.message||String(e));}
   }
   const reviewableKeys=items.map((item:any)=>`work_item:${item.id}`);
   const allSelected=reviewableKeys.length>0&&reviewableKeys.every(k=>selected.has(k));
@@ -864,11 +804,12 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
       const designs=(designTasks||[]).flatMap((t:any)=>t.design_versions||[]).filter((v:any)=>(v.design_version_items||[]).some((x:any)=>x.work_item_id===item.id)).sort((a:any,b:any)=>(b.version_number||0)-(a.version_number||0));
       const itemProofs=(proofs||[]).filter((p:any)=>p.work_item_id===item.id); const itemKey=`work_item:${item.id}`; const itemDecision:any=dmap.get(itemKey);
       return <div key={item.id} className={`rounded-2xl border bg-white overflow-hidden shadow-sm ${selected.has(itemKey)?'border-blue-400 ring-2 ring-blue-100':'border-slate-200'}`}>
-        <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 bg-slate-50 border-b border-slate-200"><div className="flex gap-2.5 items-start">{!readOnly&&<button onClick={()=>toggle(itemKey)} className="mt-0.5">{selected.has(itemKey)?<CheckSquare className="w-5 h-5 text-blue-600"/>:<Square className="w-5 h-5 text-slate-400"/>}</button>}<div><p className="text-[10px] font-bold tracking-[.16em] text-slate-400 uppercase">Work Item {index+1}</p><h4 className="text-sm font-semibold text-slate-900 mt-0.5">{item.work_type_name||'Work item'}</h4><p className="text-xs text-slate-500 mt-1">{dim(item)}</p></div></div><div className="flex items-center gap-2">{itemDecision&&<span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${itemDecision.decision==='approved'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'}`}>{itemDecision.decision==='approved'?'APPROVED':'REDO'}</span>}<span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${itemProofs.length?'bg-emerald-50 text-emerald-700 border border-emerald-200':'bg-amber-50 text-amber-700 border border-amber-200'}`}>{itemProofs.length} installation photo{itemProofs.length===1?'':'s'}</span></div></div>
+        <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 bg-slate-50 border-b border-slate-200"><div className="flex gap-2.5 items-start">{!readOnly&&<button onClick={()=>toggle(itemKey)} className="mt-0.5">{selected.has(itemKey)?<CheckSquare className="w-5 h-5 text-blue-600"/>:<Square className="w-5 h-5 text-slate-400"/>}</button>}<div><p className="text-[10px] font-bold tracking-[.16em] text-slate-400 uppercase">Work Item {index+1}</p><h4 className="text-sm font-semibold text-slate-900 mt-0.5">{item.work_type_name||'Work item'}</h4><p className="text-xs text-slate-500 mt-1">{dim(item)}</p></div></div><div className="flex flex-wrap items-center gap-2">{item.excluded_from_calculations&&<span className="rounded-full px-2.5 py-1 text-[10px] font-bold bg-slate-200 text-slate-700">NOT AVAILABLE · EXCLUDED</span>}{!readOnly&&<button type="button" onClick={()=>void toggleAvailability(item)} className="rounded-full border border-slate-300 px-2.5 py-1 text-[10px] font-semibold text-slate-600 hover:bg-slate-100">{item.excluded_from_calculations?'Make installable':'Mark not available'}</button>}{itemDecision&&<span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${itemDecision.decision==='approved'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'}`}>{itemDecision.decision==='approved'?'APPROVED':'REDO'}</span>}<span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${itemProofs.length?'bg-emerald-50 text-emerald-700 border border-emerald-200':'bg-amber-50 text-amber-700 border border-amber-200'}`}>{itemProofs.length} installation photo{itemProofs.length===1?'':'s'}</span></div></div>
+        {item.excluded_from_calculations&&<div className="px-4 py-2 bg-slate-100 border-b text-xs text-slate-700">Site unavailable: <b>{item.execution_reason||'reason not given'}</b>{item.execution_note?` — ${item.execution_note}`:''}. Yeh kaam installed sq.ft / qty / billing mein count nahi hoga.</div>}
         <div className="p-4"><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><div><p className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-1.5">1 · Survey / Measurement</p><Photo url={linkedSurvey[0]?.photo_url} label="Survey"/>{linkedSurvey.length>1&&<p className="text-[10px] text-slate-400 mt-1">+{linkedSurvey.length-1} more survey photo(s)</p>}</div><div><p className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1.5">2 · Approved Design</p><Photo url={designs[0]?.file_url} label={designs[0]?`Design v${designs[0].version_number}`:'Design'}/></div><div><p className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 mb-1.5">3 · Installed Proof</p>{itemProofs.length?<div className="grid grid-cols-2 gap-2">{itemProofs.map((p:any)=><Photo key={p.id} url={p.photo_url} label={p.angle||'Installed'} decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div>:<Photo label="Installation proof"/>}</div></div></div>
       </div>;
     })}
-    {!readOnly&&<div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><div className="flex items-start gap-3"><div className="mt-0.5 rounded-full bg-blue-100 p-1.5"><CheckCircle2 className="w-4 h-4 text-blue-700"/></div><div><p className="text-xs font-semibold text-slate-900">Shop remains in Pending Review until everything is complete</p><p className="text-[11px] text-slate-500 mt-0.5">Partial approval or redo will not remove this shop. It moves out only after every Work Item has Survey/Measurement, Approved Design, Installation Proof, no open correction, and all required evidence is approved.</p></div></div></div>}
+    {!readOnly&&<div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><div className="flex items-start gap-3"><div className="mt-0.5 rounded-full bg-blue-100 p-1.5"><CheckCircle2 className="w-4 h-4 text-blue-700"/></div><div><p className="text-xs font-semibold text-slate-900">Shop tab tak review me rahega jab tak har Work Item ka decision na ho</p><p className="text-[11px] text-slate-500 mt-0.5">Jab tak koi Work Item undecided hai, shop Pending Review me rahega. Sab approved = Installed ho jata hai. Sab decide ho jayein aur kuch redo ho = shop review se hatkar installer ke paas Redo me chala jata hai.</p></div></div></div>}
     {!readOnly&&<div className="sticky bottom-0 z-10 rounded-2xl border border-slate-200 bg-white/95 backdrop-blur shadow-lg p-3"><div className="mb-2 flex items-center justify-between gap-2"><div><p className="text-xs font-semibold text-slate-900">{selected.size ? `${selected.size} selected` : 'Select evidence above'}</p><p className="text-[10px] text-slate-500">Action applies only to the selected Work Item(s) in this shop.</p></div>{selected.size>0&&<button onClick={()=>setSelected(new Set())} className="text-[11px] font-semibold text-slate-500 hover:text-slate-800">Clear selection</button>}</div><div className="flex flex-col md:flex-row gap-2"><input value={reviewNote} onChange={e=>setReviewNote(e.target.value)} placeholder="Note only if needed — especially for redo" className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-xs"/><button disabled={!selected.size||busy} onClick={()=>applyInline('approved')} className="rounded-lg bg-emerald-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><CheckCircle2 className="w-4 h-4"/>Approve ({selected.size})</button><button disabled={!selected.size||busy} onClick={()=>applyInline('redo')} className="rounded-lg bg-amber-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><Wrench className="w-4 h-4"/>Reject / Redo ({selected.size})</button></div>{reviewError&&<p className="text-xs text-red-600 mt-2">{reviewError}</p>}</div>}
     {(proofs||[]).some((p:any)=>!p.work_item_id)&&<div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold text-amber-800">Legacy/unmapped installation photos</p><p className="text-[11px] text-amber-700 mt-0.5">These older proofs are not automatically assigned to a measurement.</p><div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">{(proofs||[]).filter((p:any)=>!p.work_item_id).map((p:any)=><Photo key={p.id} url={p.photo_url} label="Unmapped proof" decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div></div>}
   </div>;

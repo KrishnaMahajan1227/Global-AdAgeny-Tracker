@@ -27,7 +27,7 @@ export default defineConfig({
     deploymentVersionPlugin(),
     react(),
     VitePWA({
-      registerType: 'prompt',
+      registerType: 'autoUpdate',
       injectRegister: 'auto',
       includeAssets: ['favicon-16x16.png', 'favicon-32x32.png', 'apple-touch-icon.png'],
       manifest: {
@@ -47,6 +47,10 @@ export default defineConfig({
         ],
       },
       workbox: {
+        skipWaiting: true,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
+        navigateFallbackDenylist: [/^\/api\//, /^\/version\.json/],
         // Precache the app shell (JS/CSS/HTML/icons) so the app opens even with no network.
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest}'],
         // Default Workbox ceiling is 2 MiB; the main JS chunk now exceeds that
@@ -57,7 +61,6 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         // Never let the service worker intercept Supabase API/auth/storage/realtime calls —
         // those must always hit the network (or fail explicitly) so data stays consistent.
-        navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
           {
             urlPattern: ({ url }) => url.origin.includes('supabase.co') && url.pathname.includes('/storage/'),

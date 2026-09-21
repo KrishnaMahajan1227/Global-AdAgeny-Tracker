@@ -7,7 +7,7 @@ import { ROLE_LABELS } from '@/lib/types';
 import { NotificationBell } from '@/components/NotificationBell';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
-import {
+import { BarChart3,
   LayoutDashboard, Building2, ShoppingCart, FileCheck, Palette,
   Printer, Wrench, FileText, IndianRupee, Settings, LogOut, Menu, X,
   Map as MapIcon, ClipboardCheck, ClipboardList, Truck, Route as RouteIcon, User,
@@ -88,6 +88,7 @@ export default function AdminLayout() {
 
   const navItems = [
     { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, show: isAdmin || isAccounts },
+    { to: '/progress', label: 'Work Progress', icon: BarChart3, show: isAdmin || isAccounts },
     { to: '/clients', label: 'Clients', icon: Building2, show: isAdmin },
     { to: '/campaigns', label: 'Campaigns', icon: ShoppingCart, show: isAdmin },
     { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts, badge: pendingCounts?.clientRequests },

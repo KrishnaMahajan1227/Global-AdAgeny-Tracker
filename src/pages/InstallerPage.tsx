@@ -4,9 +4,10 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { Card, Select, Textarea, Input, EmptyState } from '@/components/ui';
 import { logAudit, createNotification } from '@/lib/helpers';
+import { submitCorrections, setAvailability } from '@/lib/reviewApi';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { CameraCapture } from '@/components/CameraCapture';
-import { formatDim, LENGTH_UNIT_OPTIONS, areaSqFt } from '@/lib/units';
+import { formatDim, LENGTH_UNIT_OPTIONS, areaSqFt, itemSizeLabel } from '@/lib/units';
 import { useLiveLocationTracking } from '@/lib/locationTracking';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { computeImageHash, hammingDistance, DUPLICATE_HASH_THRESHOLD } from '@/lib/imageHash';
@@ -311,7 +312,7 @@ function MaterialsToBring({ items }: { items: WorkItem[] }) {
           <div key={it.id} className="flex items-center justify-between text-xs text-slate-700">
             <span className="truncate pr-2">
               {it.material || it.work_type_name || 'Item'}
-              {it.approved_width && it.approved_height ? ` — ${formatDim(it.approved_width)}×${formatDim(it.approved_height)} ${it.approved_unit || ''}` : ''}
+              {it.approved_width && it.approved_height ? ` — ${itemSizeLabel(it)}` : ''}
             </span>
             <span className="font-semibold text-slate-900 shrink-0">×{it.approved_quantity || 1}</span>
           </div>
@@ -358,6 +359,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   const [selectedProofWorkItemId, setSelectedProofWorkItemId] = useState('');
   const [expandedInstallItemId, setExpandedInstallItemId] = useState<string | null>(null);
   const [jobBlockedReason, setJobBlockedReason] = useState<string | null>(null);
+  const [unavail, setUnavail] = useState<{ item: WorkItem; reason: string; note: string; file: File | null } | null>(null);
+  const [unavailBusy, setUnavailBusy] = useState(false);
 
   // Live location sharing while this installation is in progress — pinged
   // to worker_locations so the Owner/Admin Live Field Map shows the
@@ -417,18 +420,30 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
 
   async function markItemAvailability(item: WorkItem, unavailable: boolean) {
     if (!profile) return;
-    let reason: string | null = null;
-    let note: string | null = null;
-    if (unavailable) {
-      reason = window.prompt('Why is this work not available for installation? (Renovation / site blocked / permission / removed scope / other)', item.execution_reason || 'Site renovation')?.trim() || null;
-      if (!reason) return;
-      note = window.prompt('Optional note for Owner/Admin', item.execution_note || '')?.trim() || null;
+    if (!unavailable) {
+      try { await setAvailability(item.id, false, null, null); } catch (e: any) { alert(e.message); return; }
+      await queryClient.invalidateQueries({ queryKey: ['shop-work-items-install', shopId] });
+      await queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
+      return;
     }
-    const { error } = await supabase.rpc('set_work_item_execution_availability', { p_work_item_id: item.id, p_unavailable: unavailable, p_reason: reason, p_note: note });
-    if (error) { alert(error.message); return; }
-    if (unavailable && selectedProofWorkItemId === item.id) setSelectedProofWorkItemId('');
-    await queryClient.invalidateQueries({ queryKey: ['shop-work-items-install', shopId] });
-    await queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
+    setUnavail({ item, reason: item.execution_reason || '', note: item.execution_note || '', file: null });
+  }
+
+  async function saveUnavailable() {
+    if (!unavail) return;
+    const { item, reason, note, file } = unavail;
+    if (!reason.trim()) { alert('Reason likhna zaroori hai.'); return; }
+    if (!file) { alert('Site ki photo zaroori hai.'); return; }
+    setUnavailBusy(true);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result)); r.onerror = () => reject(r.error); r.readAsDataURL(file); });
+      await handlePhotoCaptured(dataUrl, file.name, 'other', item.id, `NOT INSTALLED: ${reason.trim()}`);
+      await setAvailability(item.id, true, reason.trim(), note.trim() || null);
+      if (selectedProofWorkItemId === item.id) setSelectedProofWorkItemId('');
+      setUnavail(null);
+      await queryClient.invalidateQueries({ queryKey: ['shop-work-items-install', shopId] });
+      await queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
+    } catch (e: any) { alert(`Could not mark not available: ${e?.message || e}`); } finally { setUnavailBusy(false); }
   }
 
   // Phase 8 — the Production-side Vehicle Load record for this shop, if
@@ -540,8 +555,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   useEffect(() => {
     async function createJob() {
       if (!profile || !shop || jobId) return;
-      const existing = await supabase.from('installation_jobs').select('id').eq('shop_id', shopId).eq('installer_id', profile.id).maybeSingle();
-      if (existing.data) { setJobId(existing.data.id); return; }
+      const existing = await supabase.from('installation_jobs').select('id').eq('shop_id', shopId).eq('installer_id', profile.id).order('created_at', { ascending: false }).limit(1);
+      if (existing.data && existing.data.length) { setJobId(existing.data[0].id); return; }
       const { data, error } = await supabase.from('installation_jobs').insert({
         organization_id: profile.organization_id,
         shop_id: shopId,
@@ -658,7 +673,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     }
   }
 
-  async function handlePhotoCaptured(dataUrl: string, fileName: string, forcedAngle?: 'front' | 'side' | 'other', explicitWorkItemId?: string) {
+  async function handlePhotoCaptured(dataUrl: string, fileName: string, forcedAngle?: 'front' | 'side' | 'other', explicitWorkItemId?: string, caption?: string) {
     // cameraFor doubles as the angle here ('front' / 'side' / 'other') —
     // photo_type stays the constant 'installed' (matches the existing
     // check constraint); angle is the new, separate column that Section 7
@@ -737,6 +752,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       storage_path: path,
       photo_url: urlData.publicUrl,
       photo_type: 'installed',
+      caption: caption || null,
       work_item_id: explicitWorkItemId || selectedProofWorkItemId || (approvedItems.length === 1 ? approvedItems[0].id : null),
       angle,
       phash,
@@ -892,6 +908,9 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
         // matters for the redo case, where an Owner/Admin rejected a
         // previous attempt and the installer is reusing the same job row.
         review_status: exception ? 'not_applicable' : 'pending',
+        material_check_confirmed: true,
+        material_check_confirmed_by: profile.id,
+        material_check_confirmed_at: new Date().toISOString(),
         reviewed_by: null,
         reviewed_at: null,
         review_note: null,
@@ -944,7 +963,10 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
         }
       }
 
-      if ((correctionTasks || []).length) await supabase.from('field_corrections').update({ status: 'resubmitted', resubmitted_at: new Date().toISOString() }).in('id', correctionTasks!.map((c:any)=>c.id));
+      if ((correctionTasks || []).length && !exception) {
+        // atomic: marks corrections resubmitted, clears stale decisions, drops replaced photos, notifies reviewers
+        await submitCorrections('installation', shopId);
+      }
       queryClient.invalidateQueries();
       try { localStorage.removeItem(`adroute-install-draft:${shopId}`); } catch { /* ignore */ }
       setCompleted(true);
@@ -1021,6 +1043,29 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
         title={cameraFor ? `${cameraFor.charAt(0).toUpperCase()}${cameraFor.slice(1)} Photo` : 'Photo'}
       />
 
+      {unavail && (
+        <div className="fixed inset-0 z-[60] bg-black/60 flex items-end sm:items-center justify-center p-3">
+          <div className="bg-white w-full max-w-md rounded-2xl p-4 space-y-3">
+            <p className="font-bold text-slate-900">Install nahi hua — {unavail.item.work_type_name || unavail.item.material || 'work item'}</p>
+            <p className="text-xs text-slate-500">Reason + site ki photo dein. Yeh kaam installed sq.ft / qty / billing me count nahi hoga, par history me reason aur photo dikhegi.</p>
+            <select value={['Site renovation','Shop band / owner nahi mila','Permission nahi mili','Site pe jagah nahi / blocked','Kaam scope se hata diya'].includes(unavail.reason) ? unavail.reason : ''} onChange={(e) => setUnavail({ ...unavail, reason: e.target.value })} className="w-full border rounded-lg px-3 py-2 text-sm bg-white">
+              <option value="">Reason chuniye…</option>
+              {['Site renovation','Shop band / owner nahi mila','Permission nahi mili','Site pe jagah nahi / blocked','Kaam scope se hata diya'].map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+            <input value={unavail.reason} onChange={(e) => setUnavail({ ...unavail, reason: e.target.value })} placeholder="Ya apna reason likhiye" className="w-full border rounded-lg px-3 py-2 text-sm" />
+            <input value={unavail.note} onChange={(e) => setUnavail({ ...unavail, note: e.target.value })} placeholder="Comment (optional)" className="w-full border rounded-lg px-3 py-2 text-sm" />
+            <label className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-blue-300 bg-blue-50 text-blue-700 text-sm font-semibold py-3 rounded-xl cursor-pointer">
+              <Camera className="w-4 h-4" /> {unavail.file ? `Photo: ${unavail.file.name}` : 'Site ki photo lein / chunein (zaroori)'}
+              <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => setUnavail({ ...unavail, file: e.target.files?.[0] || null })} />
+            </label>
+            <div className="flex gap-2">
+              <button onClick={() => setUnavail(null)} className="flex-1 bg-slate-100 text-slate-700 py-3 rounded-lg font-medium">Cancel</button>
+              <button disabled={unavailBusy} onClick={() => void saveUnavailable()} className="flex-1 bg-amber-600 text-white py-3 rounded-lg font-semibold disabled:opacity-50">{unavailBusy ? 'Saving…' : 'Mark not installed'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="p-4">
         {step === 1 && shop && (
           <div className="space-y-4">
@@ -1046,6 +1091,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               onTakePhoto={(itemId) => { setSelectedProofWorkItemId(itemId); setCameraFor('front'); }}
               onUploadPhotos={(itemId, files) => { setSelectedProofWorkItemId(itemId); void handleInstallationFileSelection(files, itemId); }}
               onDeletePhoto={(photo) => void deleteInstallationPhoto(photo)}
+              onMarkUnavailable={(item) => void markItemAvailability(item, true)}
+              onRestore={(item) => void markItemAvailability(item, false)}
             />
 
             {proofPhotos.length > 0 && (
@@ -1078,7 +1125,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                 {bulkGalleryFiles.map((file, i) => <div key={`${file.name}-${i}`} className="rounded-xl border border-slate-200 p-3 bg-white">
                   <p className="text-xs font-semibold text-slate-800 truncate mb-2">Photo {i + 1}: {file.name}</p>
                   <select value={bulkGalleryMap[i] || ''} onChange={(e) => setBulkGalleryMap((m) => ({...m, [i]: e.target.value}))} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white">
-                    <option value="">Map to work item...</option>{installableItems.map((it, idx) => <option key={it.id} value={it.id}>{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}</option>)}
+                    <option value="">Map to work item...</option>{installableItems.map((it, idx) => <option key={it.id} value={it.id}>{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {itemSizeLabel(it)}</option>)}
                   </select>
                 </div>)}
                 <button type="button" disabled={bulkUploading} onClick={() => void uploadMappedGallery()} className="w-full bg-blue-600 disabled:opacity-50 text-white font-semibold py-3 rounded-xl">{bulkUploading ? 'Uploading...' : `Upload ${bulkGalleryFiles.length} Mapped Photo${bulkGalleryFiles.length > 1 ? 's' : ''}`}</button>
@@ -1087,7 +1134,12 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
 
             <button
               onClick={() => {
-                if (proofPhotos.length === 0) { alert('Add at least one installation photo from an approved work item.'); return; }
+                const targetItems = (correctionTasks && correctionTasks.length > 0)
+                  ? installableItems.filter((it) => correctionTasks.some((c: any) => c.work_item_id === it.id || (c.installation_proof_id && proofPhotos.some((p) => p.id === c.installation_proof_id && p.workItemId === it.id))))
+                  : installableItems;
+                const missingPhoto = targetItems.filter((it) => !proofPhotos.some((p) => p.workItemId === it.id) && !(installableItems.length === 1 && proofPhotos.length > 0));
+                if (missingPhoto.length) { alert(`Photo baaki hai: ${missingPhoto.map((it) => it.work_type_name || it.material || 'Work item').join(', ')}.\nHar available item ki photo lein, ya site ready nahi hai to us item ko "Not available" mark karein.`); return; }
+                if (installableItems.length === 0 && unavailableItems.length === 0 && proofPhotos.length === 0) { alert('Add at least one installation photo.'); return; }
                 setStep(4);
               }}
               className="w-full bg-slate-900 text-white font-semibold py-3.5 rounded-xl"
@@ -1115,8 +1167,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                 <div className="min-w-0">
                   <p className="text-sm font-bold text-emerald-800">Gaadi Load Ho Chuki Hai</p>
                   <p className="text-xs text-emerald-700 mt-0.5">
-                    Vehicle <span className="font-semibold">{vehicleLoad.vehicle_number}</span>
-                    {vehicleLoad.driver_name ? ` · Driver ${vehicleLoad.driver_name}` : ''} — quantities shown below are the recorded loaded quantities.
+                    Vehicle <span className="font-semibold">{vehicleLoad?.vehicle_number}</span>
+                    {vehicleLoad?.driver_name ? ` · Driver ${vehicleLoad?.driver_name}` : ''} — quantities shown below are the recorded loaded quantities.
                   </p>
                 </div>
               </div>
@@ -1147,7 +1199,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                       >
                         <div className="min-w-0">
                           <p className="font-medium text-slate-900 truncate">{it.material || it.work_type_name || 'Item'}</p>
-                          <p className="text-xs text-slate-500">{formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit} · Approved Qty {approvedQty}</p>
+                          <p className="text-xs text-slate-500">{itemSizeLabel(it)} · Approved Qty {approvedQty}</p>
                         </div>
                         <input
                           type="number"
@@ -1188,9 +1240,9 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
           <div className="space-y-4">
             <p className="text-sm text-slate-600">After installation, capture or upload proof photos. At least one photo is required; add as many angles as the client requires.</p>
 
-            {approvedItems.length > 0 && <Card className="p-3"><div className="flex items-start justify-between gap-2 mb-2"><div><p className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Installation work items</p><p className="text-[11px] text-slate-500 mt-0.5">Install available items. If a surveyed location is unavailable today, mark only that item — it stays in history but is excluded from installed/billing calculations.</p></div></div><div className="space-y-2">{approvedItems.map((it, idx) => { const unavailable = it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active'); return <div key={it.id} className={`rounded-xl border p-3 ${unavailable?'border-amber-300 bg-amber-50':'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-2"><button disabled={!!unavailable} onClick={() => { setSelectedProofWorkItemId(it.id); setCameraFor('installed'); }} className="min-w-0 flex-1 text-left disabled:cursor-default"><p className="font-semibold text-slate-900 text-sm">{it.work_type_name || it.material || `Work Item ${idx + 1}`}</p><p className="text-xs text-slate-500 mt-0.5">{formatDim(it.approved_width)} × {formatDim(it.approved_height)} {it.approved_unit} · {Math.round((it.approved_area || 0) * 100) / 100} sq.ft · Qty {it.approved_quantity || 1}</p>{unavailable?<><p className="text-xs font-semibold text-amber-800 mt-1">Not available for installation · excluded from calculation</p><p className="text-[11px] text-amber-700">{it.execution_reason}{it.execution_note?` · ${it.execution_note}`:''}</p></>:<p className="text-xs text-blue-600 font-medium mt-1">Tap to take photo</p>}</button><button type="button" onClick={() => void markItemAvailability(it, !unavailable)} className={`shrink-0 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border ${unavailable?'border-emerald-300 bg-white text-emerald-700':'border-amber-300 bg-amber-50 text-amber-800'}`}>{unavailable?'Make available':'Not available'}</button></div></div>})}</div></Card>}
+            {approvedItems.length > 0 && <Card className="p-3"><div className="flex items-start justify-between gap-2 mb-2"><div><p className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Installation work items</p><p className="text-[11px] text-slate-500 mt-0.5">Install available items. If a surveyed location is unavailable today, mark only that item — it stays in history but is excluded from installed/billing calculations.</p></div></div><div className="space-y-2">{approvedItems.map((it, idx) => { const unavailable = it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active'); return <div key={it.id} className={`rounded-xl border p-3 ${unavailable?'border-amber-300 bg-amber-50':'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-2"><button disabled={!!unavailable} onClick={() => { setSelectedProofWorkItemId(it.id); setCameraFor('installed'); }} className="min-w-0 flex-1 text-left disabled:cursor-default"><p className="font-semibold text-slate-900 text-sm">{it.work_type_name || it.material || `Work Item ${idx + 1}`}</p><p className="text-xs text-slate-500 mt-0.5">{itemSizeLabel(it)} · {Math.round((it.approved_area || 0) * 100) / 100} sq.ft · Qty {it.approved_quantity || 1}</p>{unavailable?<><p className="text-xs font-semibold text-amber-800 mt-1">Not available for installation · excluded from calculation</p><p className="text-[11px] text-amber-700">{it.execution_reason}{it.execution_note?` · ${it.execution_note}`:''}</p></>:<p className="text-xs text-blue-600 font-medium mt-1">Tap to take photo</p>}</button><button type="button" onClick={() => void markItemAvailability(it, !unavailable)} className={`shrink-0 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border ${unavailable?'border-emerald-300 bg-white text-emerald-700':'border-amber-300 bg-amber-50 text-amber-800'}`}>{unavailable?'Make available':'Not available'}</button></div></div>})}</div></Card>}
 
-            <Card className="p-3 border-slate-200"><label className="block text-xs font-semibold text-slate-700 mb-1">Gallery upload: choose work item</label><select value={selectedProofWorkItemId} onChange={(e) => setSelectedProofWorkItemId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="">Select work item...</option>{installableItems.map((it, idx) => <option key={it.id} value={it.id}>{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit}</option>)}</select></Card>
+            <Card className="p-3 border-slate-200"><label className="block text-xs font-semibold text-slate-700 mb-1">Gallery upload: choose work item</label><select value={selectedProofWorkItemId} onChange={(e) => setSelectedProofWorkItemId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="">Select work item...</option>{installableItems.map((it, idx) => <option key={it.id} value={it.id}>{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {itemSizeLabel(it)}</option>)}</select></Card>
 
             <label className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-blue-200 bg-blue-50/50 text-blue-700 text-sm font-semibold py-3 rounded-xl cursor-pointer hover:bg-blue-50">
               <ImagePlus className="w-4 h-4" /> Upload one or multiple installation photos
@@ -1246,7 +1298,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                 <div className="space-y-2">
                   {approvedItems.map((it) => { const unavailable = it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active'); return (
                     <div key={it.id} className={`rounded-lg px-3 py-2 text-sm border ${unavailable?'bg-amber-50 border-amber-200':'bg-slate-50 border-transparent'}`}>
-                      <div className="flex items-center justify-between gap-2"><div><p className="font-medium text-slate-900">{it.material || it.work_type_name || 'Item'}</p><p className="text-xs text-slate-500">{formatDim(it.approved_width)}×{formatDim(it.approved_height)} {it.approved_unit} · Qty {it.approved_quantity || 1}</p></div>{unavailable?<span className="text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-1 rounded-full">NOT INSTALLED · EXCLUDED</span>:<p className="text-xs font-semibold text-blue-600">{it.approved_area != null ? Math.round(it.approved_area) : ''} sq.ft</p>}</div>
+                      <div className="flex items-center justify-between gap-2"><div><p className="font-medium text-slate-900">{it.material || it.work_type_name || 'Item'}</p><p className="text-xs text-slate-500">{itemSizeLabel(it)} · Qty {it.approved_quantity || 1}</p></div>{unavailable?<span className="text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-1 rounded-full">NOT INSTALLED · EXCLUDED</span>:<p className="text-xs font-semibold text-blue-600">{it.approved_area != null ? Math.round(it.approved_area) : ''} sq.ft</p>}</div>
                       {unavailable && <p className="text-[11px] text-amber-700 mt-1">{it.execution_reason || 'Site unavailable'}{it.execution_note?` · ${it.execution_note}`:''} · 0 installed sq.ft / qty for billing</p>}
                     </div>
                   );})}
@@ -1344,7 +1396,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
 // to install.
 function ApprovedSpecsCard({
   items, photos, markings, photoItemLinks, expandedItemId, onToggleItem,
-  proofPhotos, onTakePhoto, onUploadPhotos, onDeletePhoto,
+  proofPhotos, onTakePhoto, onUploadPhotos, onDeletePhoto, onMarkUnavailable, onRestore,
 }: {
   items: WorkItem[];
   photos: SurveyPhoto[];
@@ -1356,6 +1408,8 @@ function ApprovedSpecsCard({
   onTakePhoto: (itemId: string) => void;
   onUploadPhotos: (itemId: string, files: FileList | null) => void;
   onDeletePhoto: (photo: { id?: string; storagePath?: string; url: string; type: string; angle: 'front' | 'side' | 'other'; workItemId?: string }) => void;
+  onMarkUnavailable: (item: WorkItem) => void;
+  onRestore: (item: WorkItem) => void;
 }) {
   if (items.length === 0) return null;
 
@@ -1387,22 +1441,34 @@ function ApprovedSpecsCard({
           const installedCount = proofPhotos.filter((p) => p.workItemId === it.id).length;
           const label = it.work_type_name || it.material || `Work Item ${idx + 1}`;
           return (
-            <div key={it.id} className={open ? 'bg-blue-50/40' : 'bg-white'}>
+            <div key={it.id} className={(it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active')) ? 'bg-amber-50' : open ? 'bg-blue-50/40' : 'bg-white'}>
               <button type="button" onClick={() => onToggleItem(it.id)} className="w-full px-4 py-3.5 flex items-center gap-3 text-left active:bg-slate-50">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <p className="font-semibold text-slate-900 truncate">{label}</p>
                     {installedCount > 0 && <span className="shrink-0 text-[10px] font-bold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">{installedCount} PHOTO{installedCount > 1 ? 'S' : ''}</span>}
                   </div>
-                  <p className="text-xs text-blue-600 mt-0.5">{open ? 'Installation details' : 'Tap to view details & add photos'}</p>
+                  <p className="text-sm font-bold text-slate-800 mt-0.5">{itemSizeLabel(it)}<span className="font-medium text-slate-500"> · Qty {it.approved_quantity || 1}</span></p>
+                  <p className="text-[11px] text-blue-600 mt-0.5">{open ? 'Tap to close' : 'Tap for survey photo & to add photos'}</p>
                 </div>
                 <span className={`text-blue-600 text-lg transition-transform ${open ? 'rotate-45' : ''}`}>+</span>
               </button>
+              {(it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active')) ? (
+                <div className="mx-4 mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5">
+                  <p className="text-[11px] font-bold text-amber-900">NOT INSTALLED — count nahi hoga</p>
+                  <p className="text-[11px] text-amber-800 mt-0.5">Reason: {it.execution_reason || 'not given'}{it.execution_note ? ` · ${it.execution_note}` : ''}</p>
+                  <button type="button" onClick={() => onRestore(it)} className="mt-1.5 text-xs font-semibold text-blue-700 underline">Wapas installable karein</button>
+                </div>
+              ) : (
+                <div className="px-4 pb-2.5 -mt-1 flex justify-end">
+                  <button type="button" onClick={() => onMarkUnavailable(it)} className="text-[11px] font-medium text-slate-500 hover:text-amber-700 inline-flex items-center gap-1 rounded-md px-2 py-1 border border-transparent hover:border-amber-300 hover:bg-amber-50">⋯ Install nahi hua? Not available</button>
+                </div>
+              )}
 
               {open && (
                 <div className="px-4 pb-4 space-y-3">
                   <div className="grid grid-cols-3 gap-2">
-                    <div className="rounded-lg bg-white border border-slate-200 p-2.5"><p className="text-[10px] uppercase tracking-wide text-slate-400">Size</p><p className="text-xs font-semibold text-slate-800 mt-1">{formatDim(it.approved_width)} × {formatDim(it.approved_height)} {it.approved_unit}</p></div>
+                    <div className="rounded-lg bg-white border border-slate-200 p-2.5"><p className="text-[10px] uppercase tracking-wide text-slate-400">Size</p><p className="text-xs font-semibold text-slate-800 mt-1">{itemSizeLabel(it)}</p></div>
                     <div className="rounded-lg bg-white border border-slate-200 p-2.5"><p className="text-[10px] uppercase tracking-wide text-slate-400">Quantity</p><p className="text-xs font-semibold text-slate-800 mt-1">{it.approved_quantity || 1}</p></div>
                     <div className="rounded-lg bg-white border border-slate-200 p-2.5"><p className="text-[10px] uppercase tracking-wide text-slate-400">Area</p><p className="text-xs font-semibold text-slate-800 mt-1">{it.approved_area != null ? `${Math.round(it.approved_area * 100) / 100} sq.ft` : '—'}</p></div>
                   </div>

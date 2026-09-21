@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, type ReactNode } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabase';
@@ -8,11 +8,13 @@ import {
   Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, PageHeader,
   FilterButton, FilterDrawer, FilterSection, Combobox,
 } from '@/components/ui';
-import { Client, Project, Campaign, Shop, WorkType, WorkItem, SurveyPhoto, BoardMarking, Zone, PurchaseOrder, POLineItem, WorkItemComponent } from '@/lib/types';
+import { Client, Project, Campaign, Shop, WorkType, WorkItem, SurveyPhoto, BoardMarking, Zone, PurchaseOrder, POLineItem, WorkItemComponent, SHOP_STATUSES, STATUS_LABELS } from '@/lib/types';
 import { logAudit, createNotification } from '@/lib/helpers';
+import { setAvailability, refreshReviewViews } from '@/lib/reviewApi';
+import { WorkItemsPanel } from '@/components/shop/WorkItemsPanel';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
-import { formatDim, LENGTH_UNIT_OPTIONS, toFeet } from '@/lib/units';
+import { formatDim, LENGTH_UNIT_OPTIONS, toFeet, itemSizeLabel , trimNum, unitShort } from '@/lib/units';
 import { fulfillmentTypeLabel } from '@/lib/poUtilization';
 import { geocodeAddress, buildAddressQuery } from '@/lib/geocode';
 import { findShopHeaderRow, findExtraHeaders, buildShopRows, resolveZoneIds, type ParsedShopRow } from '@/lib/shopBulkUpload';
@@ -1076,7 +1078,7 @@ export function ShopsPage() {
         .order('name')
         .limit(2000);
       if (error) throw new Error(`Could not load shops: ${error.message}`);
-      return data as BulkBackfillShopRow[];
+      return data as unknown as BulkBackfillShopRow[];
     },
     enabled: !!orgId && bulkBackfillOpen,
   });
@@ -1170,11 +1172,44 @@ export function ShopsPage() {
         return (purchaseOrders || []).find((p) => p.po_number.toLowerCase() === poNumber.toLowerCase());
       };
 
+      // Work types + PO lines are looked up ONCE, so every board gets its work type and its own Work Order line.
+      const { data: wtRows } = await supabase.from('work_types').select('id, name').eq('organization_id', orgId);
+      const poNumbersUsed = new Set(rows.flatMap((r) => [r.workOrderNumber, ...r.items.map((i) => i.workOrder)]).filter(Boolean).map((x) => x.toLowerCase()));
+      const poIdsUsed = (purchaseOrders || []).filter((pp) => poNumbersUsed.has(pp.po_number.toLowerCase())).map((pp) => pp.id);
+      const { data: lineRows } = poIdsUsed.length ? await supabase.from('po_line_items').select('id, purchase_order_id, work_type_id').in('purchase_order_id', poIdsUsed) : { data: [] as any[] };
+      const mapItems = (s: BulkBackfillParsedShop) => s.items.map((it) => {
+        // Work Type blank? then the Material text often IS the work type (e.g. "Foam Sheet") — match either.
+        const wt = (wtRows || []).find((w: any) => w.name.trim().toLowerCase() === (it.workType || it.material).trim().toLowerCase());
+        const itemPo = resolvePo(it.workOrder) || resolvePo(s.workOrderNumber);
+        const lines = (lineRows || []).filter((l: any) => itemPo && l.purchase_order_id === itemPo.id);
+        const line = lines.find((l: any) => wt && l.work_type_id === wt.id) || (lines.length === 1 ? lines[0] : undefined);
+        return { workTypeId: wt?.id || '', workTypeName: it.workType || wt?.name || '', material: it.material, width: it.width, height: it.height, unit: it.unit, heightUnit: it.heightUnit, quantity: it.quantity, poLineItemId: line?.id || '' };
+      });
+      const applyStatus = async (shopIdToSet: string, status: string | null): Promise<string> => {
+        if (!status) return '';
+        const { error: stErr } = await supabase.rpc('set_shop_stage', { p_shop_id: shopIdToSet, p_status: status });
+        if (stErr) throw new Error(`Status set nahi hua: ${stErr.message}`);
+        return ` · status → ${STATUS_LABELS[status] || status}`;
+      };
+
       const results: { shopId: string; shopName: string; ok: boolean; message: string }[] = [];
       for (const s of rows) {
         const existingMeta = s.isNew ? null : resolvedExisting.get(s.key) || null;
         const displayName = s.shopName || existingMeta?.name || s.shopId || '(unnamed)';
         if (s.isNewAmbiguous) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'Set "New Shop?" to Yes or No for this row — could not tell which it should be' }); continue; }
+        if (!s.stage && !s.stageRaw && s.items.length === 0 && s.currentStatus) {
+          try {
+            let sid = s.shopId; let sname = s.shopName;
+            if (!sid) {
+              const { data: found } = await supabase.from('shops').select('id, name').eq('organization_id', orgId).ilike('name', s.shopName.replace(/[%_]/g, '\\$&')).limit(1);
+              sid = found?.[0]?.id || ''; sname = found?.[0]?.name || s.shopName;
+            }
+            if (!sid) throw new Error('Shop not found in this org');
+            const note = await applyStatus(sid, s.currentStatus);
+            results.push({ shopId: s.key, shopName: sname, ok: true, message: `Status updated${note}` });
+          } catch (err) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: (err as Error).message }); }
+          continue;
+        }
         if (!s.stage) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: s.stageRaw ? `Stage "${s.stageRaw}" not recognized` : 'Stage left blank' }); continue; }
         if (s.items.length === 0) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'No item rows with Width, Height and Qty filled in' }); continue; }
         if (!s.isNew && !existingMeta) { results.push({ shopId: s.key, shopName: displayName, ok: false, message: 'Shop not found in this org — check Shop ID / Shop Name, or it may already be past Production Done' }); continue; }
@@ -1218,7 +1253,6 @@ export function ShopsPage() {
               .select('id, name, status, purchase_order_id, city, address')
               .eq('organization_id', orgId)
               .eq('client_id', clientId);
-            if (po?.id) existingQuery = existingQuery.eq('purchase_order_id', po.id);
             const { data: possibleExisting, error: existingLookupError } = await existingQuery;
             if (existingLookupError) throw new Error(`Could not check existing shops: ${existingLookupError.message}`);
             const existingNatural = (possibleExisting || []).find((sh) => {
@@ -1242,7 +1276,8 @@ export function ShopsPage() {
                 supabase.from('work_items').select('id', { count: 'exact', head: true }).eq('shop_id', existingNatural.id),
               ]);
               if ((surveyCount || 0) > 0 || (itemCount || 0) > 0) {
-                results.push({ shopId: s.key, shopName: targetShopName, ok: true, message: 'Existing shop matched — skipped duplicate import' });
+                const stNote = await applyStatus(targetShopId, s.currentStatus);
+                results.push({ shopId: s.key, shopName: targetShopName, ok: true, message: `Existing shop matched — works already in app, skipped duplicate import${stNote}` });
                 continue;
               }
             } else {
@@ -1272,11 +1307,12 @@ export function ShopsPage() {
           await runBackfillPipeline({
             orgId, shopId: targetShopId, shopName: targetShopName, shopStatusBefore: targetShopStatus, actorId: profile.id,
             stage: s.stage, note: s.note,
-            items: s.items.map((it) => ({ workTypeId: '', workTypeName: it.workType, material: it.material, width: it.width, height: it.height, unit: it.unit, quantity: it.quantity })),
+            items: mapItems(s),
             surveyorId, designerId, productionId, installerId,
             workTypes: [], existingAssignments,
           });
-          results.push({ shopId: s.key, shopName: targetShopName, ok: true, message: s.isNew ? 'Shop created + backfilled' : 'Backfilled' });
+          const stNote2 = await applyStatus(targetShopId, s.currentStatus);
+          results.push({ shopId: s.key, shopName: targetShopName, ok: true, message: `${s.isNew ? 'Shop created + backfilled' : 'Backfilled'} · ${s.items.length} work item${s.items.length === 1 ? '' : 's'}${stNote2}` });
         } catch (err) {
           results.push({ shopId: s.key, shopName: displayName, ok: false, message: (err as Error).message });
         }
@@ -1629,7 +1665,7 @@ export function ShopsPage() {
           if (bulkRole === 'surveyor' && shop.status === 'pending') {
             await supabase.from('shops').update({ status: 'assigned' }).eq('id', shop.id);
           }
-          await createNotification(bulkUserId, 'New Assignment', `You've been assigned as ${bulkRole} for ${shop.name}`, 'info', bulkRole === 'surveyor' ? '/survey' : undefined);
+          await createNotification(bulkUserId, 'New Assignment', `You've been assigned as ${bulkRole} for ${shop.name}`, 'info', '/mobile');
         }
       }
 
@@ -2693,10 +2729,11 @@ export function ShopsPage() {
                     />
                     <Input label="Or type a name" value={item.workTypeName} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, workTypeName: v } : it)))} />
                   </div>
-                  <div className="grid grid-cols-4 gap-2">
+                  <div className="grid grid-cols-5 gap-2">
                     <Input label="Width" type="number" value={item.width} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, width: v } : it)))} />
+                    <Select label="Width unit" value={item.unit} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, unit: v } : it)))} options={LENGTH_UNIT_OPTIONS} />
                     <Input label="Height" type="number" value={item.height} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, height: v } : it)))} />
-                    <Select label="Unit" value={item.unit} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, unit: v } : it)))} options={LENGTH_UNIT_OPTIONS} />
+                    <Select label="Height unit" value={(item as any).heightUnit || item.unit} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, heightUnit: v } as typeof it : it)))} options={LENGTH_UNIT_OPTIONS} />
                     <Input label="Qty" type="number" value={item.quantity} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, quantity: v } : it)))} />
                   </div>
                   <Input label="Material (optional)" value={item.material} onChange={(v) => setFtItems((prev) => prev.map((it, i) => (i === idx ? { ...it, material: v } : it)))} />
@@ -2830,9 +2867,10 @@ export function ShopsPage() {
                   const meta = s.isNew ? null : ((s.shopId ? (eligibleShops || []).find((sh) => sh.id === s.shopId) : undefined) || (eligibleShops || []).find((sh) => sh.name.toLowerCase() === s.shopName.toLowerCase()));
                   const po = s.workOrderNumber ? (purchaseOrders || []).find((p) => p.po_number.toLowerCase() === s.workOrderNumber.toLowerCase()) : undefined;
                   const client = s.isNew ? (po ? { id: po.client_id } : (clients || []).find((c) => c.name.toLowerCase() === s.clientName.toLowerCase())) : null;
-                  const valid = !s.isNewAmbiguous && !!s.stage && s.items.length > 0 && (s.isNew ? !!s.shopName && !!client : !!meta);
+                  const statusOnly = !s.stage && !s.stageRaw && s.items.length === 0 && !!s.currentStatus;
+                  const valid = statusOnly || (!s.isNewAmbiguous && !!s.stage && s.items.length > 0 && (s.isNew ? !!s.shopName && !!client : !!meta));
                   const reason = s.isNewAmbiguous ? 'Set "New Shop?" to Yes or No'
-                    : !s.stage ? `Bad stage: "${s.stageRaw}"`
+                    : !s.stage ? (s.stageRaw ? `Bad stage: "${s.stageRaw}"` : 'Stage dropdown se chuniye (ya sirf Current Status)')
                     : s.items.length === 0 ? 'No items'
                     : s.isNew && !s.shopName ? 'New shop needs a name'
                     : s.isNew && s.workOrderNumber && !po ? `Work Order "${s.workOrderNumber}" not found`
@@ -2845,7 +2883,7 @@ export function ShopsPage() {
                         {s.isNew && <span className="ml-1 text-emerald-600 font-medium">(new)</span>}
                       </span>
                       <span className={valid ? 'text-slate-500' : 'text-red-600 font-medium'}>
-                        {valid ? `${s.items.length} item${s.items.length === 1 ? '' : 's'} · ${s.stageRaw}` : reason}
+                        {valid ? (statusOnly ? `Status → ${STATUS_LABELS[s.currentStatus!] || s.currentStatus}` : `${s.items.length} work item${s.items.length === 1 ? '' : 's'} · ${s.stageRaw}${s.currentStatus ? ` · status → ${STATUS_LABELS[s.currentStatus] || s.currentStatus}` : ''}`) : reason}
                       </span>
                     </div>
                   );
@@ -2901,9 +2939,68 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const [detailEditOpen, setDetailEditOpen] = useState(false);
   const [detailForm, setDetailForm] = useState({ name: '', owner_name: '', contact_phone: '', address: '', city: '', district: '', state: '', signage_language: '' });
   const [editWorkItem, setEditWorkItem] = useState<WorkItem | null>(null);
-  const [workItemForm, setWorkItemForm] = useState({ work_type_name: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' });
+  type WorkItemForm = { work_type_id: string; work_type_name: string; po_line_item_id: string; material: string; materialOther: boolean; width: string; wUnit: string; height: string; hUnit: string; quantity: string };
+  const BLANK_ITEM_FORM: WorkItemForm = { work_type_id: '', work_type_name: '', po_line_item_id: '', material: '', materialOther: false, width: '', wUnit: 'ft', height: '', hUnit: 'ft', quantity: '1' };
+  const [workItemForm, setWorkItemForm] = useState<WorkItemForm>(BLANK_ITEM_FORM);
+  const [stageBusy, setStageBusy] = useState(false);
+  const changeStage = async (next: string) => {
+    if (!shop || next === shop.status) return;
+    if (!window.confirm(`Shop ka stage badlein?\n\n${STATUS_LABELS[shop.status] || shop.status}  →  ${STATUS_LABELS[next] || next}`)) return;
+    setStageBusy(true);
+    try {
+      const { error } = await supabase.rpc('set_shop_stage', { p_shop_id: shopId, p_status: next });
+      if (error) throw error;
+      await logAudit('shops', shopId, 'update', null, null, null, `Stage changed ${shop.status} -> ${next}`);
+      await refreshReviewViews(queryClient, shopId);
+    } catch (e: any) {
+      alert(/set_shop_stage|schema cache/i.test(e?.message || '') ? 'Database update (RUN_THIS_FIRST.sql) abhi chalani baaki hai.' : (e?.message || 'Stage change nahi hua'));
+    } finally { setStageBusy(false); }
+  };
+  const openWorkItemForm = (item: any | null) => {
+    if (!item) { setEditWorkItem({ id: '__new__' } as WorkItem); setWorkItemForm(BLANK_ITEM_FORM); return; }
+    const w = item.approved_width ?? item.survey_width, h = item.approved_height ?? item.survey_height;
+    const enteredOk = item.entered_width != null && item.entered_height != null && item.entered_width_unit && item.entered_height_unit
+      && Math.abs(toFeet(Number(item.entered_width), item.entered_width_unit) - Number(w)) < 0.05 && Math.abs(toFeet(Number(item.entered_height), item.entered_height_unit) - Number(h)) < 0.05;
+    setEditWorkItem(item);
+    setWorkItemForm({
+      work_type_id: item.work_type_id || '', work_type_name: item.work_type_name || '', po_line_item_id: item.po_line_item_id || '',
+      material: item.material || '', materialOther: false,
+      width: String(enteredOk ? item.entered_width : trimNum(w, 2) === '—' ? '' : trimNum(w, 2)), wUnit: enteredOk ? item.entered_width_unit : 'ft',
+      height: String(enteredOk ? item.entered_height : trimNum(h, 2) === '—' ? '' : trimNum(h, 2)), hUnit: enteredOk ? item.entered_height_unit : 'ft',
+      quantity: String(item.approved_quantity ?? item.survey_quantity ?? 1),
+    });
+  };
   const [photoUploading, setPhotoUploading] = useState(false);
   const [evidencePreview, setEvidencePreview] = useState<{ src: string; label: string } | null>(null);
+  const [installUploadOpen, setInstallUploadOpen] = useState(false);
+  const [installUploadTarget, setInstallUploadTarget] = useState<string | null>(null);
+  const [installUploadFiles, setInstallUploadFiles] = useState<File[]>([]);
+  const [installUploadMap, setInstallUploadMap] = useState<Record<number, string>>({});
+  const [installUploadCaption, setInstallUploadCaption] = useState('');
+  const [installUploading, setInstallUploading] = useState(false);
+  const [installUploadError, setInstallUploadError] = useState('');
+  const { data: shopWorkTypes = [] } = useQuery({
+    queryKey: ['shop-work-types', orgId],
+    queryFn: async () => { const { data } = await supabase.from('work_types').select('id,name').eq('organization_id', orgId!); return (data || []) as { id: string; name: string }[]; },
+    enabled: !!orgId,
+  });
+  const { data: knownMaterials = [] } = useQuery({
+    queryKey: ['shop-known-materials', orgId],
+    queryFn: async () => {
+      const [c, w] = await Promise.all([
+        supabase.from('work_type_consumables').select('work_type_id, material').eq('organization_id', orgId!),
+        supabase.from('work_items').select('material').eq('organization_id', orgId!).not('material', 'is', null).limit(2000),
+      ]);
+      return { byType: (c.data || []) as { work_type_id: string; material: string | null }[], used: ((w.data || []) as { material: string | null }[]).map((x) => x.material).filter(Boolean) as string[] };
+    },
+    enabled: !!orgId,
+  });
+  const materialOptions = (() => {
+    const forType = ((knownMaterials as any).byType || []).filter((m: any) => m.work_type_id === workItemForm.work_type_id).map((m: any) => m.material).filter(Boolean);
+    const all = [...((knownMaterials as any).byType || []).map((m: any) => m.material).filter(Boolean), ...(((knownMaterials as any).used) || [])];
+    const uniq = (a: string[]) => [...new Map(a.map((x) => [x.trim().toLowerCase(), x.trim()])).values()].sort((x, y) => x.localeCompare(y));
+    return { preferred: uniq(forType), others: uniq(all).filter((m) => !forType.some((f: string) => f.trim().toLowerCase() === m.toLowerCase())) };
+  })();
   const [surveyPhotoUploadOpen, setSurveyPhotoUploadOpen] = useState(false);
   const [surveyPhotoUploadFiles, setSurveyPhotoUploadFiles] = useState<File[]>([]);
   const [surveyPhotoItemIds, setSurveyPhotoItemIds] = useState<Set<string>>(new Set());
@@ -2973,6 +3070,17 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['shop', shopId] }); queryClient.invalidateQueries({ queryKey: ['shops', orgId] }); setDetailEditOpen(false); },
   });
 
+  // Self-heal: if every live work item is already approved, the shop must be Installed (server decides; no-op otherwise).
+  useEffect(() => {
+    if (!shop || !['installation_review', 'installation_pending', 'installing'].includes(shop.status)) return;
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.rpc('reconcile_installation_shop', { p_shop_id: shopId });
+      if (!cancelled && data === true) await refreshReviewViews(queryClient, shopId);
+    })().catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [shop?.status, shopId]);
+
   const { data: workItems } = useQuery({
     queryKey: ['shop-work-items', shopId],
     queryFn: async () => {
@@ -3013,8 +3121,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       if (!reason) return;
       note = window.prompt('Optional internal note for installer / Owner / Admin', item.execution_note || '')?.trim() || null;
     }
-    const { error } = await supabase.rpc('set_work_item_execution_availability', { p_work_item_id: item.id, p_unavailable: unavailable, p_reason: reason, p_note: note });
-    if (error) throw error;
+    try { await setAvailability(item.id, unavailable, reason, note); } catch (e: any) { alert(e.message || 'Could not update availability'); return; }
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }),
       queryClient.invalidateQueries({ queryKey: ['po-utilization'] }),
@@ -3025,14 +3132,17 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const saveWorkItemMutation = useMutation({
     mutationFn: async () => {
       if (!editWorkItem) return;
-      const width = Number(workItemForm.width), height = Number(workItemForm.height), quantity = Math.max(1, Number(workItemForm.quantity) || 1);
-      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new Error('Enter valid width and height.');
-      const widthFt = toFeet(width, workItemForm.unit), heightFt = toFeet(height, workItemForm.unit);
+      const f = workItemForm;
+      const width = Number(f.width), height = Number(f.height), quantity = Math.max(1, Number(f.quantity) || 1);
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new Error('Width aur height sahi daliye.');
+      const widthFt = toFeet(width, f.wUnit), heightFt = toFeet(height, f.hUnit);
       const area = Math.round(widthFt * heightFt * quantity * 100) / 100;
+      const typeName = (shopWorkTypes || []).find((w) => w.id === f.work_type_id)?.name || f.work_type_name.trim() || null;
       const payload = {
-        work_type_name: workItemForm.work_type_name.trim() || null, material: workItemForm.material.trim() || null,
+        work_type_id: f.work_type_id || null, work_type_name: typeName, po_line_item_id: f.po_line_item_id || null, material: f.material.trim() || null,
         survey_width: widthFt, survey_height: heightFt, survey_unit: 'ft', survey_quantity: quantity, survey_area: area,
         approved_width: widthFt, approved_height: heightFt, approved_unit: 'ft', approved_quantity: quantity, approved_area: area,
+        entered_width: width, entered_height: height, entered_width_unit: f.wUnit, entered_height_unit: f.hUnit,
       };
       if (editWorkItem.id === '__new__') {
         const { error } = await supabase.from('work_items').insert({ organization_id: orgId, shop_id: shopId, ...payload, status: 'approved' });
@@ -3044,7 +3154,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         await logAudit('work_items', editWorkItem.id, 'update', null, null, null, `Updated board/item for ${shop?.name || 'shop'}`);
       }
     },
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }); setEditWorkItem(null); },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }); queryClient.invalidateQueries({ queryKey: ['shop-work-items'] }); setEditWorkItem(null); },
   });
   const deleteWorkItemMutation = useMutation({
     mutationFn: async (id: string) => { const { error } = await supabase.from('work_items').delete().eq('id', id); if (error) throw error; },
@@ -3153,6 +3263,51 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     await queryClient.invalidateQueries({ queryKey: ['shop-installations', shopId] });
   };
 
+  // Admin / owner adds installation photos from the Shop Details page (same idea as survey / design uploads).
+  const uploadInstallationPhotos = async () => {
+    if (!profile || !orgId || !installUploadFiles.length) return;
+    const unmapped = installUploadFiles.findIndex((_, i) => !installUploadMap[i]);
+    if (unmapped >= 0) { setInstallUploadError('Har photo ke liye work item chuniye.'); return; }
+    setInstallUploading(true); setInstallUploadError('');
+    try {
+      let jobId = (installations || []).find((j: any) => !String(j.id).startsWith('history-'))?.id as string | undefined;
+      if (!jobId) {
+        const { data: created, error: jobErr } = await supabase.from('installation_jobs').insert({
+          organization_id: orgId, shop_id: shopId, installer_id: profile.id, status: 'completed', review_status: 'not_applicable', completed_at: new Date().toISOString(),
+        }).select('id').single();
+        if (jobErr) throw jobErr;
+        jobId = created.id;
+      }
+      for (let i = 0; i < installUploadFiles.length; i++) {
+        const file = installUploadFiles[i];
+        const safe = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const path = `${orgId}/${jobId}/admin-${Date.now()}-${i}-${safe}`;
+        const up = await supabase.storage.from('installation-proof').upload(path, file);
+        if (up.error) throw up.error;
+        const url = supabase.storage.from('installation-proof').getPublicUrl(path).data.publicUrl;
+        const { error: insErr } = await supabase.from('installation_proofs').insert({
+          organization_id: orgId, installation_job_id: jobId, shop_id: shopId, work_item_id: installUploadMap[i],
+          storage_path: path, photo_url: url, photo_type: 'installed', angle: 'other', caption: installUploadCaption || null,
+        });
+        if (insErr) { await supabase.storage.from('installation-proof').remove([path]); throw insErr; }
+      }
+      setInstallUploadOpen(false); setInstallUploadFiles([]); setInstallUploadMap({}); setInstallUploadCaption('');
+      await queryClient.invalidateQueries({ queryKey: ['shop-installations', shopId] });
+    } catch (e: any) { setInstallUploadError(e?.message || String(e)); } finally { setInstallUploading(false); }
+  };
+
+  // Work item name: saved name -> work type -> PO line item -> material -> "Work Item n".
+  const workItemName = (item: any, index: number): string => {
+    const clean = (v: any) => { const t = String(v || '').trim(); return t && !/^(work item|other)$/i.test(t) ? t : ''; };
+    const li: any = (poLineItems || []).find((x: any) => x.id === item.po_line_item_id);
+    return clean(item.work_type_name)
+      || clean((shopWorkTypes || []).find((w) => w.id === item.work_type_id)?.name)
+      || clean((shopWorkTypes || []).find((w) => w.id === li?.work_type_id)?.name)
+      || clean(li?.description)
+      || clean(item.material)
+      || `Work Item ${index + 1}`;
+  };
+
   const { data: surveyPhotoItems } = useQuery({
     queryKey: ['shop-survey-photo-items', shopId, (surveyPhotos || []).map((p) => p.id).join(',')],
     queryFn: async () => {
@@ -3184,7 +3339,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     queryFn: async () => {
       const { data } = await supabase
         .from('surveys')
-        .select('*, profiles(full_name)')
+        .select('*, profiles:surveyor_id(full_name)')
         .eq('shop_id', shopId)
         .order('created_at', { ascending: false });
       return data;
@@ -3229,11 +3384,22 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   // relationship cache here: a stale relationship/schema cache used to make
   // approved installation photos silently disappear from Shop Details even
   // though the proof rows were present.
+  const { data: fieldCorrections = [] } = useQuery({
+    queryKey: ['shop-field-corrections', shopId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('field_corrections').select('*').eq('shop_id', shopId).order('created_at', { ascending: false });
+      if (error && /field_corrections|schema cache/i.test(error.message || '')) return [];
+      if (error) throw error;
+      return data || [];
+    },
+    enabled: !!shopId,
+  });
+
   const { data: installations } = useQuery({
     queryKey: ['shop-installations', shopId],
     queryFn: async () => {
       const [{ data: jobs, error: jobsError }, { data: proofs, error: proofsError }] = await Promise.all([
-        supabase.from('installation_jobs').select('*, profiles(full_name)').eq('shop_id', shopId).order('created_at', { ascending: false }),
+        supabase.from('installation_jobs').select('*, profiles:installer_id(full_name)').eq('shop_id', shopId).order('created_at', { ascending: false }),
         supabase.from('installation_proofs').select('*').eq('shop_id', shopId).order('captured_at', { ascending: false }),
       ]);
       if (jobsError) throw jobsError;
@@ -3348,7 +3514,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           if (!it.width.trim() || !it.height.trim() || !it.quantity.trim()) continue;
           const width = Number(it.width), height = Number(it.height), quantity = Math.max(1, Number(it.quantity) || 1);
           const widthFt = toFeet(width, it.unit), heightFt = toFeet(height, (it as any).heightUnit || it.unit); const area = Math.round(widthFt * heightFt * quantity * 100) / 100;
-          const payload: any = { work_type_id: it.workTypeId || null, work_type_name: it.workTypeName.trim() || null, material: it.material.trim() || null, survey_width: widthFt, survey_height: heightFt, survey_unit: 'ft', survey_quantity: quantity, survey_area: area, approved_width: widthFt, approved_height: heightFt, approved_unit: 'ft', approved_quantity: quantity, approved_area: area };
+          const payload: any = { work_type_id: it.workTypeId || null, work_type_name: it.workTypeName.trim() || null, material: it.material.trim() || null, entered_width: width, entered_height: height, entered_width_unit: it.unit || 'ft', entered_height_unit: (it as any).heightUnit || it.unit || 'ft', survey_width: widthFt, survey_height: heightFt, survey_unit: 'ft', survey_quantity: quantity, survey_area: area, approved_width: widthFt, approved_height: heightFt, approved_unit: 'ft', approved_quantity: quantity, approved_area: area };
           if (backfillStage === 'production_done' || backfillStage === 'dispatched') { payload.produced_quantity = quantity; payload.produced_at = new Date().toISOString(); }
           const exists = (workItems || []).some((w) => w.id === it.key);
           const q = exists ? supabase.from('work_items').update(payload).eq('id', it.key) : supabase.from('work_items').insert({ organization_id: orgId, shop_id: shopId, status: backfillStage === 'design_pending' ? 'approved' : backfillStage === 'production_pending' ? 'design_approved' : 'production_done', ...payload });
@@ -3482,7 +3648,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         ? `Reassigned ${assignModal} for ${shop.name} to ${worker?.full_name || 'user'}`
         : `Assigned ${worker?.full_name || 'user'} as ${assignModal} for ${shop.name}`;
       await logAudit('shop_assignments', null, action, 'role', null, assignModal, logMessage);
-      await createNotification(assignUserId, 'New Assignment', `You've been assigned as ${assignModal} for ${shop.name}`, 'info', assignModal === 'surveyor' ? '/survey' : undefined);
+      await createNotification(assignUserId, 'New Assignment', `You've been assigned as ${assignModal} for ${shop.name}`, 'info', '/mobile');
       for (const prev of previousHolders) {
         await createNotification(
           prev.user_id,
@@ -3560,12 +3726,12 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   // exact page while a designer approves or a production order completes
   // elsewhere would see a stale Timeline until they refreshed.
   useRealtimeInvalidate(
-    ['shops', 'surveys', 'survey_photos', 'survey_photo_items', 'board_markings', 'work_items', 'field_review_decisions', 'design_tasks', 'design_versions', 'design_version_items', 'production_orders', 'installation_jobs', 'installation_proofs', 'shop_assignments'],
+    ['shops', 'surveys', 'survey_photos', 'survey_photo_items', 'board_markings', 'work_items', 'field_review_decisions', 'field_corrections', 'design_tasks', 'design_versions', 'design_version_items', 'production_orders', 'installation_jobs', 'installation_proofs', 'shop_assignments'],
     orgId,
     [
       ['shop', shopId], ['shop-work-items', shopId], ['shop-field-review-decisions', shopId], ['shop-survey-photos', shopId],
       ['shop-surveys', shopId], ['shop-design-tasks', shopId], ['shop-production', shopId],
-      ['shop-installations', shopId], ['shop-survey-photo-items', shopId], ['shop-board-markings', shopId], ['shop-assignments', shopId],
+      ['shop-installations', shopId], ['shop-field-corrections', shopId], ['shop-survey-photo-items', shopId], ['shop-board-markings', shopId], ['shop-assignments', shopId],
     ]
   );
 
@@ -3630,7 +3796,9 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const workItemsInstalled = (workItems || []).some((w) => w.installed_width != null);
 
   const installedApproved = installations?.find((i) => i.review_status === 'approved');
-  const installationRejected = installations?.find((i) => i.review_status === 'rejected') && !reached('installed');
+  const latestInstallJob = installations?.find((i: any) => !String(i.id).startsWith('history-'));
+  // Only the LATEST installation attempt decides "sent back" — an old rejected attempt must not haunt an approved shop.
+  const installationRejected = latestInstallJob?.review_status === 'rejected' && !reached('installed') && !installedApproved;
   const installationException = installations?.find((i) => i.status === 'exception') && !reached('installation_review');
   const installationSubmitted = installations?.find((i) => i.status === 'completed');
 
@@ -3683,7 +3851,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       label: 'Installed (Approved)',
       date: installedApproved?.reviewed_at,
       status: installedApprovedDone ? 'done' : installationRejected ? 'issue' : 'pending',
-      note: installationRejected ? 'Sent back for redo' : null,
+      note: installationRejected && !installedApprovedDone ? 'Sent back for redo' : null,
     },
   ];
 
@@ -3704,15 +3872,71 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         <ArrowLeft className="w-4 h-4" /> Back to Shops
       </Link>
 
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">{shop.name}</h1>
-          <p className="text-sm text-slate-500 mt-1">{shop.clients?.name} - {shop.projects?.name || 'No project'}</p>
+      <div className="mb-5 rounded-2xl border border-slate-200 bg-white p-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="text-2xl font-bold text-slate-900 break-words">{shop.name}</h1>
+            <p className="mt-1 text-sm text-slate-500">{shop.clients?.name}{shop.projects?.name ? ` · ${shop.projects.name}` : ''}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {canCrudShop ? (
+              <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white pl-3 text-xs font-medium text-slate-500">
+                Stage
+                <select value={shop.status} disabled={stageBusy} onChange={(e) => void changeStage(e.target.value)} className="rounded-r-lg border-0 border-l border-slate-200 bg-slate-50 py-2 pl-2 pr-8 text-sm font-semibold text-slate-900 outline-none focus:ring-2 focus:ring-slate-400 disabled:opacity-50">
+                  {SHOP_STATUSES.map((st) => <option key={st} value={st}>{STATUS_LABELS[st] || st}</option>)}
+                </select>
+              </label>
+            ) : <StatusBadge status={shop.status} />}
+            {canCrudShop && <button onClick={() => setDetailEditOpen(true)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50"><Pencil className="w-4 h-4" /> Edit shop</button>}
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          {canCrudShop && <button onClick={() => setDetailEditOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium border border-slate-200 rounded-lg bg-white hover:bg-slate-50"><Pencil className="w-4 h-4" /> Edit Shop</button>}
-          <StatusBadge status={shop.status} />
-        </div>
+        {(() => {
+          const Val = ({ v, wide }: { v: ReactNode; wide?: boolean }) => {
+            const empty = v === null || v === undefined || v === '';
+            return empty
+              ? (canCrudShop ? <button onClick={() => setDetailEditOpen(true)} className="text-sm text-slate-300 hover:text-blue-600 hover:underline">— add</button> : <span className="text-sm text-slate-300">—</span>)
+              : <span className={`text-sm text-slate-900 break-words ${wide ? '' : ''}`}>{v}</span>;
+          };
+          const Fact = ({ label, v, span }: { label: string; v: ReactNode; span?: string }) => (
+            <div className={`min-w-0 ${span || ''}`}><dt className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</dt><dd className="mt-0.5"><Val v={v} /></dd></div>
+          );
+          const phone = shop.contact_phone ? String(shop.contact_phone).trim() : '';
+          const waNumber = phone.replace(/[^0-9]/g, '');
+          const extras = Object.entries(shop.extra_details || {}).filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '');
+          const created = shop.created_at ? new Date(shop.created_at).toLocaleDateString('en-IN') : null;
+          return (
+            <div className="mt-5 grid grid-cols-1 gap-x-10 gap-y-5 border-t border-slate-100 pt-5 lg:grid-cols-2">
+              {/* Contact & location */}
+              <section>
+                <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Contact &amp; location</h2>
+                <dl className="grid grid-cols-2 gap-x-6 gap-y-3.5 sm:grid-cols-3">
+                  <Fact label="Owner name" v={shop.owner_name} />
+                  <Fact label="Phone" v={phone ? <span className="inline-flex flex-wrap items-center gap-x-2"><a href={`tel:${phone}`} className="font-medium hover:underline">{phone}</a>{waNumber.length >= 10 && <a href={`https://wa.me/${waNumber.length === 10 ? '91' + waNumber : waNumber}`} target="_blank" rel="noreferrer" className="text-xs text-slate-500 hover:text-slate-800 hover:underline">WhatsApp</a>}</span> : null} />
+                  <Fact label="Signage language" v={shop.signage_language} />
+                  <Fact label="Address" v={shop.address} span="col-span-2 sm:col-span-3" />
+                  <Fact label="Village" v={shop.village} />
+                  <Fact label="City" v={shop.city} />
+                  <Fact label="District" v={shop.district} />
+                  <Fact label="State" v={shop.state} />
+                  <Fact label="Zone" v={shop.zones?.name || shop.zone} />
+                  <Fact label="GPS" v={shop.latitude ? <a href={`https://www.google.com/maps?q=${shop.latitude},${shop.longitude}`} target="_blank" rel="noreferrer" className="hover:underline">{Number(shop.latitude).toFixed(5)}, {Number(shop.longitude).toFixed(5)} ↗</a> : null} />
+                </dl>
+              </section>
+              {/* Work order & record */}
+              <section>
+                <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Work order &amp; record</h2>
+                <dl className="grid grid-cols-2 gap-x-6 gap-y-3.5 sm:grid-cols-3">
+                  <Fact label="Client" v={shop.clients?.name} />
+                  <Fact label="Project" v={shop.projects?.name} />
+                  <Fact label="Purchase order" v={shop.purchase_orders?.po_number} />
+                  <Fact label="Fulfilment" v={shop.purchase_orders?.fulfillment_type ? String(shop.purchase_orders.fulfillment_type).replace(/_/g, ' ') : null} />
+                  <Fact label="Added on" v={created} />
+                  {extras.map(([k, v]) => <Fact key={k} label={k.replace(/_/g, ' ')} v={String(v)} />)}
+                </dl>
+              </section>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Timeline */}
@@ -3769,43 +3993,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Shop Info */}
-        <Card className="p-4">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4 flex items-center gap-2">
-            <Store className="w-5 h-5 text-blue-600" /> Shop Information
-          </h2>
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between"><span className="text-slate-500">Owner:</span><span className="text-slate-900">{shop.owner_name || 'N/A'}</span></div>
-            {shop.signage_language && (
-              <div className="flex justify-between"><span className="text-slate-500">Signage Language:</span><span className="text-slate-900">{shop.signage_language}</span></div>
-            )}
-            <div className="flex justify-between"><span className="text-slate-500">Phone:</span><span className="text-slate-900">{shop.contact_phone || 'N/A'}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">Address:</span><span className="text-slate-900 text-right">{shop.address || 'N/A'}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">City:</span><span className="text-slate-900">{shop.city || 'N/A'}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">District:</span><span className="text-slate-900">{shop.district || 'N/A'}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">Zone:</span><span className="text-slate-900">{shop.zones?.name || shop.zone || 'N/A'}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">Purchase Order:</span><span className="text-slate-900">{shop.purchase_orders?.po_number || 'Not linked'}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">State:</span><span className="text-slate-900">{shop.state || 'N/A'}</span></div>
-            <div className="flex justify-between"><span className="text-slate-500">GPS:</span><span className="text-slate-900">{shop.latitude ? `${shop.latitude.toFixed(4)}, ${shop.longitude?.toFixed(4)}` : 'N/A'}</span></div>
-          </div>
-
-          {shop.extra_details && Object.keys(shop.extra_details).length > 0 && (
-            <div className="mt-5 pt-4 border-t border-slate-100">
-              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Additional Details</h3>
-              <div className="space-y-2 text-sm">
-                {Object.entries(shop.extra_details).map(([k, v]) => (
-                  <div key={k} className="flex justify-between gap-3">
-                    <span className="text-slate-500 shrink-0">{k}:</span>
-                    <span className="text-slate-900 text-right">{String(v)}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </Card>
-
         {/* Assignments */}
-        <Card className="p-4">
+        <Card className="p-4 lg:col-span-2">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
               <Users className="w-5 h-5 text-blue-600" /> Assignments
@@ -3884,106 +4073,31 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         )}
 
         {/* Work Items */}
-        <Card className="p-4 lg:col-span-2">
-          <div className="flex items-center justify-between mb-3"><h2 className="text-base font-semibold text-slate-900 flex items-center gap-2">
-            <Ruler className="w-5 h-5 text-blue-600" /> Work Items ({workItems?.length || 0})
-          </h2>{canCrudShop && <div className="flex flex-wrap items-center gap-2"><button onClick={() => { setSurveyPhotoTargetItemId(null); setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 border border-blue-200 bg-blue-50 px-2.5 py-1.5 rounded-lg"><UploadCloud className="w-3.5 h-3.5" /> Bulk survey</button><button onClick={() => { setDesignUploadTargetItemId(null); setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set()); setDesignUploadOpen(true); }} className="inline-flex items-center gap-1 text-xs font-medium text-violet-700 border border-violet-200 bg-violet-50 px-2.5 py-1.5 rounded-lg"><Palette className="w-3.5 h-3.5" /> Bulk designs</button><button onClick={() => { setEditWorkItem({ id: '__new__' } as WorkItem); setWorkItemForm({ work_type_name: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }); }} className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 border border-blue-200 bg-blue-50 px-2.5 py-1.5 rounded-lg"><Plus className="w-3.5 h-3.5" /> Add item</button></div>}</div>
-          {workItems && workItems.length > 0 ? (
-            <div className="space-y-3">
-              {workItems.map((item) => (
-                <div key={item.id} className="border border-slate-200 rounded-lg p-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-medium text-slate-900 text-sm">{item.work_type_name || 'Work Item'}</span>
-                    <div className="flex items-center gap-2">
-                      {canCrudShop && <button title="Edit item" onClick={() => { setEditWorkItem(item); setWorkItemForm({ work_type_name: item.work_type_name || '', material: item.material || '', width: String(item.approved_width ?? item.survey_width ?? ''), height: String(item.approved_height ?? item.survey_height ?? ''), unit: item.approved_unit || item.survey_unit || 'ft', quantity: String(item.approved_quantity ?? item.survey_quantity ?? 1) }); }} className="text-slate-400 hover:text-blue-600"><Pencil className="w-4 h-4" /></button>}
-                      {canCrudShop && <button title="Delete item" onClick={() => { if (window.confirm('Delete this work item and its dependent links?')) deleteWorkItemMutation.mutate(item.id); }} className="text-slate-400 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>}
-                      <StatusBadge status={item.status} />
-                      {canCrudShop && <button type="button" onClick={() => void setExecutionAvailability(item)} className={`rounded-full border px-2 py-1 text-[10px] font-bold ${item.excluded_from_calculations ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-amber-300 bg-amber-50 text-amber-800'}`}>{item.excluded_from_calculations ? 'MAKE INSTALLABLE' : 'MARK UNAVAILABLE'}</button>}
-                      {item.excluded_from_calculations && <span className="rounded-full bg-amber-100 text-amber-800 px-2 py-1 text-[10px] font-bold">NOT INSTALLED · EXCLUDED</span>}
-                    </div>
-                  </div>
-                  <div className="space-y-1 text-xs">
-                    <WorkItemStageRow label="Survey" width={item.survey_width} height={item.survey_height} unit={item.survey_unit} quantity={item.survey_quantity} area={item.survey_area} />
-                    <WorkItemStageRow label="Approved" width={item.approved_width} height={item.approved_height} unit={item.approved_unit} quantity={item.approved_quantity} area={item.approved_area} />
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Produced</span>
-                      <span className="text-slate-900">{item.produced_quantity != null ? `Qty ${item.produced_quantity}${item.produced_at ? ` · ${new Date(item.produced_at).toLocaleDateString('en-IN')}` : ''}` : '—'}</span>
-                    </div>
-                    <WorkItemStageRow label="Installed" width={item.installed_width} height={item.installed_height} unit={item.installed_unit} quantity={item.installed_quantity} area={item.installed_area} />
-                  </div>
-                  {item.excluded_from_calculations && <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2"><p className="text-xs font-semibold text-amber-900">Site unavailable / not executed</p><p className="text-xs text-amber-800 mt-0.5">{item.execution_reason || 'Installation not possible'}{item.execution_note ? ` · ${item.execution_note}` : ''}</p><p className="text-[11px] text-amber-700 mt-1">This work item remains in project history but is excluded from installed quantities, installed sq.ft and billing calculations.</p></div>}
-                  {(() => {
-                    // Prefer explicit evidence -> work-item links. For legacy single-item shops,
-                    // mapping is unambiguous, so show historical evidence on that sole item too.
-                    // Multi-item shops are never guessed: unlinked evidence remains in the
-                    // Legacy / unmapped section below instead of being attached incorrectly.
-                    const isOnlyWorkItem = (workItems || []).length === 1;
-                    const surveyForItem = (surveyPhotos || []).filter((p) =>
-                      (surveyPhotoItems || []).some((x) => x.survey_photo_id === p.id && x.work_item_id === item.id) ||
-                      (boardMarkings || []).some((m) => m.survey_photo_id === p.id && m.work_item_id === item.id) ||
-                      (isOnlyWorkItem && !(surveyPhotoItems || []).some((x) => x.survey_photo_id === p.id) && !(boardMarkings || []).some((m) => m.survey_photo_id === p.id && m.work_item_id))
-                    );
-                    const designForItem = (designTasks || []).flatMap((d: any) => (d.design_versions || []).filter((v: any) => (v.design_version_items || []).some((x: any) => x.work_item_id === item.id)));
-                    const installForItem = (installations || []).flatMap((inst: any) => (inst.installation_proofs || []).filter((proof: any) => proof.work_item_id === item.id || (isOnlyWorkItem && !proof.work_item_id)));
-                    const measurementDecision:any = (fieldReviewDecisions as any[]).find((d:any) => d.stage === 'survey' && d.entity_type === 'measurement' && d.entity_id === item.id);
-                    const installDecision:any = (fieldReviewDecisions as any[]).find((d:any) => d.stage === 'installation' && d.entity_type === 'work_item' && d.entity_id === item.id);
-                    const latestDecision = (stage: 'survey' | 'installation', entityType: string, entityId: string) => (fieldReviewDecisions as any[]).find((d:any) => d.stage === stage && d.entity_type === entityType && d.entity_id === entityId);
-                    const Thumb = ({ src, label, onDelete, decision }: { src: string; label: string; onDelete?: () => void; decision?: any }) => <div className="relative shrink-0"><button type="button" onClick={() => setEvidencePreview({ src, label })} className="block rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" title="Click to preview"><img src={src} onError={(e) => { (e.currentTarget as HTMLImageElement).style.opacity='0.25'; }} className="w-20 h-16 rounded-lg object-contain bg-slate-100 border border-slate-200 shadow-sm"/><span className="absolute bottom-1 left-1 bg-black/65 text-white text-[9px] px-1.5 py-0.5 rounded pointer-events-none">{label}</span>{decision && <span className={`absolute top-1 left-1 text-[8px] font-bold px-1.5 py-0.5 rounded ${decision.decision==='approved'?'bg-emerald-600 text-white':'bg-amber-500 text-white'}`}>{decision.decision==='approved'?'APPROVED':'REDO'}</span>}</button>{canCrudShop && onDelete && <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete photo" className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-white border border-red-200 text-red-600 shadow flex items-center justify-center hover:bg-red-50"><Trash2 className="w-3.5 h-3.5"/></button>}</div>;
-                    return <div className="mt-4 pt-4 border-t border-slate-200">
-                      <div className="flex items-center justify-between mb-3"><div><p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Complete evidence · this work item</p><div className="flex gap-1.5 mt-1">{measurementDecision && <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${measurementDecision.decision==='approved'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-800'}`}>SURVEY {measurementDecision.decision==='approved'?'APPROVED':'REDO'}</span>}{installDecision && <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${installDecision.decision==='approved'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-800'}`}>INSTALL {installDecision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div><div className="flex gap-2">{canCrudShop && <><button onClick={() => { setSurveyPhotoTargetItemId(item.id); setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-700">+ Survey photos</button><button onClick={() => { setDesignUploadTargetItemId(item.id); setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(new Set([item.id])); setDesignUploadOpen(true); }} className="text-[11px] px-2 py-1 rounded border border-violet-200 bg-violet-50 text-violet-700">+ Designs</button></>}</div></div>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-blue-800">SURVEY / BEFORE</p><span className="text-[10px] text-blue-600">{surveyForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{surveyForItem.length ? surveyForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`S${i+1}`} decision={latestDecision('survey','survey_photo',p.id)} onDelete={() => void deleteDetailPhoto(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped survey photo</span>}</div></div>
-                        <div className="rounded-lg bg-violet-50/50 border border-violet-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-violet-800">DESIGN / ARTWORK</p><span className="text-[10px] text-violet-600">{designForItem.length} file(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{designForItem.length ? designForItem.map((v:any)=> v.file_url?.match(/\.(png|jpe?g|webp|gif)(\?|$)/i) ? <Thumb key={v.id} src={v.file_url} label={`v${v.version_number}`} /> : <a key={v.id} href={v.file_url} target="_blank" rel="noreferrer" className="w-16 h-16 rounded-lg border border-violet-200 bg-white text-violet-700 flex flex-col items-center justify-center text-[10px] font-semibold shrink-0"><Palette className="w-4 h-4 mb-1"/>v{v.version_number}</a>) : <span className="text-xs text-slate-400 py-5">No mapped design</span>}</div></div>
-                        <div className="rounded-lg bg-emerald-50/50 border border-emerald-100 p-2.5"><div className="flex justify-between mb-2"><p className="text-[11px] font-semibold text-emerald-800">INSTALLATION / AFTER</p><span className="text-[10px] text-emerald-600">{installForItem.length} photo(s)</span></div><div className="flex gap-2 overflow-x-auto pb-1">{installForItem.length ? installForItem.map((p:any, i:number)=><Thumb key={p.id} src={p.photo_url} label={`I${i+1}`} decision={latestDecision('installation','installation_photo',p.id)} onDelete={() => void deleteInstallationProof(p)} />) : <span className="text-xs text-slate-400 py-5">No mapped installation proof</span>}</div></div>
-                      </div>
-                    </div>;
-                  })()}
-                  {item.material && <p className="text-xs text-slate-500 mt-2 pt-2 border-t border-slate-100">Material: {item.material}</p>}
-                  {(item.approved_notes || item.survey_notes) && (
-                    <p className="text-xs text-slate-400 mt-1">Note: {item.approved_notes || item.survey_notes}</p>
-                  )}
-                  {item.po_variance_note && (
-                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 mt-2">
-                      PO variance adjustment: {item.po_variance_note}
-                    </p>
-                  )}
-                  {(() => {
-                    const comps = (workItemComponents || []).filter((c) => c.work_item_id === item.id);
-                    if (comps.length === 0) return null;
-                    const readyCount = comps.filter((c) => c.status === 'ready').length;
-                    const allReady = readyCount === comps.length;
-                    return (
-                      <div
-                        className={`mt-2 pt-2 border-t border-slate-100 flex items-center gap-1.5 text-xs ${
-                          allReady ? 'text-green-700' : 'text-amber-700'
-                        }`}
-                      >
-                        <ListChecks className="w-3.5 h-3.5 shrink-0" />
-                        <span>
-                          BOM: {readyCount}/{comps.length} components ready
-                          {!allReady && ' — manage from Production Studio'}
-                        </span>
-                      </div>
-                    );
-                  })()}
-                  {shop?.purchase_order_id && (
-                    <div className="mt-2 pt-2 border-t border-slate-100">
-                      <label className="block text-[11px] font-medium text-slate-500 mb-1">PO Line Item (budget tracking)</label>
-                      <select
-                        value={item.po_line_item_id || ''}
-                        onChange={(e) => assignLineItemMutation.mutate({ workItemId: item.id, poLineItemId: e.target.value || null })}
-                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-lg bg-white outline-none focus:ring-2 focus:ring-blue-500"
-                      >
-                        <option value="">Unassigned</option>
-                        {(poLineItems || []).map((li) => (
-                          <option key={li.id} value={li.id}>{li.description} ({li.uom})</option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                </div>
-              ))}
-              {(() => {
+        <div className="lg:col-span-2 lg:order-first">
+          <WorkItemsPanel
+            items={workItems || []}
+            names={(workItems || []).map((w, i) => workItemName(w, i))}
+            canEdit={!!canCrudShop}
+            hasPO={!!shop?.purchase_order_id}
+            surveyPhotos={surveyPhotos || []}
+            photoItemLinks={(surveyPhotoItems || []) as any}
+            markings={(boardMarkings || []) as any}
+            designTasks={(designTasks || []) as any}
+            installations={(installations || []) as any}
+            decisions={(fieldReviewDecisions || []) as any}
+            poLineItems={(poLineItems || []) as any}
+            components={(workItemComponents || []) as any}
+            onAddSurvey={(itemId) => { setSurveyPhotoTargetItemId(itemId); setSurveyPhotoUploadFiles([]); setSurveyPhotoFileMap({}); setSurveyPhotoSurveyId(surveys?.[0]?.id || ''); setSurveyPhotoUploadOpen(true); }}
+            onAddDesign={(itemId) => { setDesignUploadTargetItemId(itemId); setDesignUploadFiles([]); setDesignUploadFileMap({}); setDesignUploadItemIds(itemId ? new Set([itemId]) : new Set()); setDesignUploadOpen(true); }}
+            onAddInstall={(itemId) => { setInstallUploadTarget(itemId); setInstallUploadFiles([]); setInstallUploadMap({}); setInstallUploadError(''); setInstallUploadOpen(true); }}
+            onAddItem={() => openWorkItemForm(null)}
+            onEdit={(item) => openWorkItemForm(item)}
+            onDelete={(item) => deleteWorkItemMutation.mutate(item.id)}
+            onToggleAvailability={(item) => void setExecutionAvailability(item)}
+            onDeleteSurveyPhoto={(photo) => void deleteDetailPhoto(photo)}
+            onDeleteInstallProof={(proof) => void deleteInstallationProof(proof)}
+            onAssignLine={(workItemId, poLineItemId) => assignLineItemMutation.mutate({ workItemId, poLineItemId })}
+            extra={(() => {
                 const currentItemIds = new Set((workItems || []).map((w:any) => w.id));
                 const mappedSurveyIds = new Set([
                   ...(surveyPhotoItems || []).filter((x:any)=>currentItemIds.has(x.work_item_id)).map((x:any)=>x.survey_photo_id),
@@ -4001,9 +4115,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                 if (!unmappedSurvey.length && !unmappedInstall.length) return null;
                 return <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-3"><p className="text-xs font-bold text-amber-900">Legacy / unmapped evidence</p><p className="text-[11px] text-amber-700 mt-0.5">These photos exist in the shop and are shown here so evidence never disappears. They are not guessed onto a measurement.</p><div className="mt-2 flex flex-wrap gap-2">{unmappedSurvey.map((p:any,i:number)=><button key={`us-${p.id}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped survey ${i+1}`})} className="relative"><img src={p.photo_url} className="w-20 h-16 object-contain bg-white rounded-lg border border-amber-200"/><span className="absolute bottom-1 left-1 text-[8px] bg-blue-700 text-white px-1 rounded">SURVEY</span></button>)}{unmappedInstall.map((p:any,i:number)=><button key={`ui-${p.id}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped installation ${i+1}`})} className="relative"><img src={p.photo_url} className="w-20 h-16 object-contain bg-white rounded-lg border border-amber-200"/><span className="absolute bottom-1 left-1 text-[8px] bg-emerald-700 text-white px-1 rounded">INSTALL</span></button>)}</div></div>;
               })()}
-            </div>
-          ) : <p className="text-sm text-slate-400">No work items yet</p>}
-        </Card>
+          />
+        </div>
 
       </div>
 
@@ -4075,6 +4188,42 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         </div>
       </Modal>
 
+      <Modal open={installUploadOpen} onClose={() => setInstallUploadOpen(false)} title="Upload Installation Photos — Map Every Photo" size="lg">
+        <div className="space-y-4">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+            {installUploadTarget ? <>Ye photos seedhe <b>{(() => { const i = (workItems || []).findIndex((w) => w.id === installUploadTarget); return i >= 0 ? workItemName((workItems || [])[i], i) : 'is work item'; })()}</b> ke saath jud jayengi.</> : <>Har photo ke liye us work item ko chuniye jiska wo installation proof hai.</>}
+          </div>
+          <label className="flex cursor-pointer items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-lg py-5 text-sm text-slate-600 hover:border-slate-400 hover:bg-slate-50">
+            <UploadCloud className="w-5 h-5" /> Photos chuniye (ek ya kai)
+            <input type="file" multiple accept="image/*" className="hidden" onChange={(e) => { const files = Array.from(e.target.files || []); setInstallUploadFiles(files); setInstallUploadMap(installUploadTarget ? Object.fromEntries(files.map((_, i) => [i, installUploadTarget])) : {}); e.currentTarget.value = ''; }} />
+          </label>
+          <Input label="Caption / reference (optional)" value={installUploadCaption} onChange={setInstallUploadCaption} />
+          {installUploadFiles.length > 0 && (
+            <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
+              {installUploadFiles.map((file, i) => (
+                <div key={`${file.name}-${i}`} className="grid grid-cols-[56px_1fr] gap-3 items-center rounded-lg border border-slate-200 p-2">
+                  <img src={URL.createObjectURL(file)} alt="" className="w-14 h-12 rounded object-cover bg-slate-100" />
+                  <div className="min-w-0">
+                    <p className="text-xs text-slate-500 truncate">{file.name}</p>
+                    {installUploadTarget ? <p className="text-xs font-medium text-slate-600">Mapped to selected work item</p> : (
+                      <select value={installUploadMap[i] || ''} onChange={(e) => setInstallUploadMap((m) => ({ ...m, [i]: e.target.value }))} className="mt-1 w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
+                        <option value="">Work item chuniye…</option>
+                        {(workItems || []).map((w, wi) => <option key={w.id} value={w.id}>{wi + 1}. {workItemName(w, wi)} · {itemSizeLabel(w, w.approved_width != null ? 'approved' : 'survey')}</option>)}
+                      </select>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {installUploadError && <p className="text-sm text-red-600">{installUploadError}</p>}
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setInstallUploadOpen(false)} className="px-4 py-2 text-sm rounded-lg bg-slate-100 text-slate-700">Cancel</button>
+            <button disabled={installUploading || installUploadFiles.length === 0} onClick={() => void uploadInstallationPhotos()} className="px-4 py-2 text-sm rounded-lg bg-slate-900 text-white font-medium disabled:opacity-40">{installUploading ? 'Uploading…' : `Upload ${installUploadFiles.length || ''} photo(s)`}</button>
+          </div>
+        </div>
+      </Modal>
+
       <Modal open={designUploadOpen} onClose={() => setDesignUploadOpen(false)} title="Upload Designs · Map Every File" size="lg">
         <div className="space-y-4">
           <div className="rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm text-violet-900">{designUploadTargetItemId ? <>Every selected design will be attached directly to <b>{(() => { const x=(workItems||[]).find(w=>w.id===designUploadTargetItemId); return `${x?.work_type_name || 'this work item'} · ${x?.approved_width ?? x?.survey_width ?? '—'} × ${x?.approved_height ?? x?.survey_height ?? '—'} ${x?.approved_unit || x?.survey_unit || ''}`; })()}</b>. No board selection is required.</> : <>Bulk mode: select all files once and map each design to its exact Work Item / measurement.</>}</div>
@@ -4097,13 +4246,72 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         </div>
       </Modal>
 
-      <Modal open={!!editWorkItem} onClose={() => setEditWorkItem(null)} title="Edit Work Item">
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-3"><Input label="Work Type" value={workItemForm.work_type_name} onChange={(v) => setWorkItemForm({ ...workItemForm, work_type_name: v })} /><Input label="Material" value={workItemForm.material} onChange={(v) => setWorkItemForm({ ...workItemForm, material: v })} /></div>
-          <div className="grid grid-cols-4 gap-2"><Input label="Width" type="number" value={workItemForm.width} onChange={(v) => setWorkItemForm({ ...workItemForm, width: v })} /><Input label="Height" type="number" value={workItemForm.height} onChange={(v) => setWorkItemForm({ ...workItemForm, height: v })} /><Select label="Unit" value={workItemForm.unit} onChange={(v) => setWorkItemForm({ ...workItemForm, unit: v })} options={LENGTH_UNIT_OPTIONS} /><Input label="Qty" type="number" value={workItemForm.quantity} onChange={(v) => setWorkItemForm({ ...workItemForm, quantity: v })} /></div>
-          {saveWorkItemMutation.isError && <p className="text-sm text-red-600">{(saveWorkItemMutation.error as Error).message}</p>}
-          <button onClick={() => saveWorkItemMutation.mutate()} disabled={saveWorkItemMutation.isPending} className="w-full bg-blue-600 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{saveWorkItemMutation.isPending ? 'Saving...' : 'Save Work Item'}</button>
-        </div>
+      <Modal open={!!editWorkItem} onClose={() => setEditWorkItem(null)} title={editWorkItem?.id === '__new__' ? 'Add Work Item' : 'Edit Work Item'} size="lg">
+        {(() => {
+          const f = workItemForm; const set = (patch: Partial<WorkItemForm>) => setWorkItemForm((cur) => ({ ...cur, ...patch }));
+          const lbl = 'mb-1 block text-xs font-medium text-slate-600';
+          const ctl = 'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-slate-400';
+          const wFt = toFeet(Number(f.width) || 0, f.wUnit), hFt = toFeet(Number(f.height) || 0, f.hUnit), qty = Math.max(1, Number(f.quantity) || 1);
+          const area = Math.round(wFt * hFt * qty * 100) / 100;
+          const poIds = new Set((poLineItems || []).map((l: any) => l.work_type_id).filter(Boolean));
+          const inPO = (shopWorkTypes || []).filter((w) => poIds.has(w.id)), rest = (shopWorkTypes || []).filter((w) => !poIds.has(w.id));
+          const matValue = f.materialOther ? '__other__' : f.material;
+          return (
+            <div className="space-y-4">
+              {shop?.purchase_order_id && (
+                <div>
+                  <label className={lbl}>Work order line item</label>
+                  <select className={ctl} value={f.po_line_item_id} onChange={(e) => { const l: any = (poLineItems || []).find((x: any) => x.id === e.target.value); set({ po_line_item_id: e.target.value, ...(l?.work_type_id ? { work_type_id: l.work_type_id, work_type_name: (shopWorkTypes || []).find((w) => w.id === l.work_type_id)?.name || f.work_type_name } : {}) }); }}>
+                    <option value="">Select from work order…</option>
+                    {(poLineItems || []).map((l: any) => <option key={l.id} value={l.id}>{l.description} ({l.uom})</option>)}
+                  </select>
+                </div>
+              )}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className={lbl}>Work type</label>
+                  <select className={ctl} value={f.work_type_id} onChange={(e) => set({ work_type_id: e.target.value, work_type_name: (shopWorkTypes || []).find((w) => w.id === e.target.value)?.name || '', material: '', materialOther: false })}>
+                    <option value="">Select work type…</option>
+                    {inPO.length > 0 && <optgroup label="In this work order">{inPO.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}</optgroup>}
+                    <optgroup label={inPO.length ? 'Other work types' : 'Work types'}>{rest.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}</optgroup>
+                  </select>
+                </div>
+                <div>
+                  <label className={lbl}>Material</label>
+                  <select className={ctl} value={matValue} onChange={(e) => e.target.value === '__other__' ? set({ materialOther: true, material: '' }) : set({ materialOther: false, material: e.target.value })}>
+                    <option value="">Select material…</option>
+                    {materialOptions.preferred.length > 0 && <optgroup label="For this work type">{materialOptions.preferred.map((m) => <option key={m} value={m}>{m}</option>)}</optgroup>}
+                    {materialOptions.others.length > 0 && <optgroup label={materialOptions.preferred.length ? 'Other materials' : 'Materials'}>{materialOptions.others.map((m) => <option key={m} value={m}>{m}</option>)}</optgroup>}
+                    {f.material && !f.materialOther && ![...materialOptions.preferred, ...materialOptions.others].includes(f.material) && <option value={f.material}>{f.material}</option>}
+                    <option value="__other__">Other (type manually)…</option>
+                  </select>
+                  {f.materialOther && <input className={`${ctl} mt-2`} placeholder="Material likhiye" value={f.material} onChange={(e) => set({ material: e.target.value })} />}
+                </div>
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className={lbl}>Width</label>
+                  <div className="flex gap-2"><input type="number" inputMode="decimal" min="0" step="any" className={ctl} value={f.width} onChange={(e) => set({ width: e.target.value })} />
+                    <select className="w-28 shrink-0 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm" value={f.wUnit} onChange={(e) => set({ wUnit: e.target.value })}>{LENGTH_UNIT_OPTIONS.map((u) => <option key={u.value} value={u.value}>{u.label}</option>)}</select></div>
+                </div>
+                <div>
+                  <label className={lbl}>Height</label>
+                  <div className="flex gap-2"><input type="number" inputMode="decimal" min="0" step="any" className={ctl} value={f.height} onChange={(e) => set({ height: e.target.value })} />
+                    <select className="w-28 shrink-0 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm" value={f.hUnit} onChange={(e) => set({ hUnit: e.target.value })}>{LENGTH_UNIT_OPTIONS.map((u) => <option key={u.value} value={u.value}>{u.label}</option>)}</select></div>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div className="w-32"><label className={lbl}>Quantity</label><input type="number" min="1" className={ctl} value={f.quantity} onChange={(e) => set({ quantity: e.target.value })} /></div>
+                <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">{f.width && f.height ? <><span className="font-medium">{trimNum(f.width)} {unitShort(f.wUnit)} × {trimNum(f.height)} {unitShort(f.hUnit)}</span> · Qty {qty} · <span className="font-semibold">{area} sq.ft</span></> : 'Size daalne par area yahan dikhega'}</p>
+              </div>
+              {saveWorkItemMutation.isError && <p className="rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-600">{(saveWorkItemMutation.error as Error).message}</p>}
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setEditWorkItem(null)} className="rounded-lg bg-slate-100 px-4 py-2 text-sm text-slate-700">Cancel</button>
+                <button onClick={() => saveWorkItemMutation.mutate()} disabled={saveWorkItemMutation.isPending || !f.work_type_id && !f.work_type_name} className="rounded-lg bg-slate-900 px-5 py-2 text-sm font-medium text-white disabled:opacity-40">{saveWorkItemMutation.isPending ? 'Saving…' : editWorkItem?.id === '__new__' ? 'Add work item' : 'Save changes'}</button>
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
 
       <Modal open={backfillOpen} onClose={() => setBackfillOpen(false)} title="Backfill Completed Work" size="lg">
@@ -4187,10 +4395,11 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                     />
                     <Input label="Or type a name" value={item.workTypeName} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, workTypeName: v } : it)))} />
                   </div>
-                  <div className="grid grid-cols-4 gap-2">
+                  <div className="grid grid-cols-5 gap-2">
                     <Input label="Width" type="number" value={item.width} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, width: v } : it)))} />
+                    <Select label="Width unit" value={item.unit} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, unit: v } : it)))} options={LENGTH_UNIT_OPTIONS} />
                     <Input label="Height" type="number" value={item.height} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, height: v } : it)))} />
-                    <Select label="Unit" value={item.unit} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, unit: v } : it)))} options={LENGTH_UNIT_OPTIONS} />
+                    <Select label="Height unit" value={(item as any).heightUnit || item.unit} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, heightUnit: v } as typeof it : it)))} options={LENGTH_UNIT_OPTIONS} />
                     <Input label="Qty" type="number" value={item.quantity} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, quantity: v } : it)))} />
                   </div>
                   <Input label="Material (optional)" value={item.material} onChange={(v) => setBackfillItems((prev) => prev.map((it, i) => (i === idx ? { ...it, material: v } : it)))} />
@@ -4293,8 +4502,9 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
 // shown with its *actual* recorded unit instead of a hardcoded "sq ft",
 // which previously mislabeled areas recorded in meters/inches/cm.
 function WorkItemStageRow({
-  label, width, height, unit, quantity, area,
+  label, width, height, unit, quantity, area, sizeLabel,
 }: {
+  sizeLabel?: string;
   label: string; width: number | null; height: number | null; unit: string | null; quantity: number | null; area: number | null;
 }) {
   if (width == null || height == null) {
@@ -4313,7 +4523,7 @@ function WorkItemStageRow({
     <div className="flex justify-between">
       <span className="text-slate-500">{label}</span>
       <span className="text-slate-900">
-        {w}×{h} {u} · Qty {quantity ?? 1}{a != null ? ` · ${a} sq ${u}` : ''}
+        {sizeLabel && sizeLabel !== '—' ? sizeLabel : `${w}×${h} ${u}`} · Qty {quantity ?? 1}{area != null ? ` · ${Math.round(area * 100) / 100} sq.ft` : ''}
       </span>
     </div>
   );

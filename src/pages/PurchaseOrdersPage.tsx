@@ -140,9 +140,10 @@ export default function PurchaseOrdersPage() {
     setPage(0);
   }, [search, statusFilter, clientFilter, fulfillmentFilter, campaignFilterValue, zoneFilter, sortBy, pageSize]);
 
-  useRealtimeInvalidate(['purchase_orders', 'po_line_items', 'work_items', 'invoice_items'], orgId, [
+  useRealtimeInvalidate(['purchase_orders', 'po_line_items', 'work_items', 'invoice_items', 'shops'], orgId, [
     ['purchase_orders', orgId],
     ['po-utilization', orgId],
+    ['po-shop-links', orgId],
   ]);
 
   const { data: clients } = useQuery({
@@ -192,9 +193,22 @@ export default function PurchaseOrdersPage() {
   const { data: poShopLinks } = useQuery({
     queryKey: ['po-shop-links', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('shops').select('purchase_order_id, zone_id').eq('organization_id', orgId).not('purchase_order_id', 'is', null);
-      if (error) throw error;
-      return data as { purchase_order_id: string; zone_id: string | null }[];
+      // PostgREST caps a single response (commonly 1,000 rows). Fetch each
+      // page so Work Orders always show every linked shop, not only page one.
+      const result: { purchase_order_id: string; zone_id: string | null }[] = [];
+      const batchSize = 500;
+      for (let start = 0; ; start += batchSize) {
+        const { data, error } = await supabase.from('shops')
+          .select('purchase_order_id, zone_id')
+          .eq('organization_id', orgId)
+          .not('purchase_order_id', 'is', null)
+          .order('id', { ascending: true })
+          .range(start, start + batchSize - 1);
+        if (error) throw error;
+        result.push(...(data || []));
+        if (!data || data.length < batchSize) break;
+      }
+      return result;
     },
     enabled: !!orgId,
   });

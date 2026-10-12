@@ -78,7 +78,7 @@ export function SurveyCorrectionFixer({ shopId, onExit }: { shopId: string; onEx
   if (done) return (
     <div className="min-h-screen flex items-center justify-center p-6 max-w-md mx-auto"><div className="bg-white rounded-2xl border p-8 text-center w-full">
       <CheckCircle2 className="w-14 h-14 text-green-500 mx-auto mb-3" /><h2 className="text-lg font-bold">Corrections submit ho gaye</h2>
-      <p className="text-sm text-slate-500 mt-1 mb-5">Owner/Admin ab sirf theek kiye hue items dobara check karenge.</p>
+      <p className="text-sm text-slate-500 mt-1 mb-5">The reviewer will verify only the corrected items.</p>
       <button onClick={onExit} className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium">Done</button></div></div>
   );
 
@@ -89,14 +89,14 @@ export function SurveyCorrectionFixer({ shopId, onExit }: { shopId: string; onEx
         <div><p className="font-semibold text-slate-900">Fix Redo · {shop?.name}</p><p className="text-xs text-slate-500">{corr.length} item wapas aaye hain</p></div>
       </div>
       <div className="p-4 space-y-3">
-        {corr.length === 0 && <p className="text-sm text-slate-500">Koi open redo nahi hai.</p>}
+        {corr.length === 0 && <p className="text-sm text-slate-500">No pending corrections.</p>}
         {corr.map((c: any) => {
           const it = data!.items.find((x: any) => x.id === c.work_item_id);
           const ph = data!.photos.find((x: any) => x.id === c.survey_photo_id);
           const isSaved = saved.has(c.id);
           return (
             <div key={c.id} className={`rounded-2xl border p-3 bg-white ${isSaved ? 'border-emerald-300' : 'border-amber-300'}`}>
-              <div className="flex items-center gap-2 mb-2"><AlertCircle className="w-4 h-4 text-amber-600" /><p className="text-sm font-semibold">{ph ? 'Survey photo dobara lein' : `Measurement theek karein — ${it?.work_type_name || ''}`}</p>{isSaved && <span className="ml-auto text-[10px] font-bold text-emerald-700 bg-emerald-100 rounded-full px-2 py-0.5">FIXED</span>}</div>
+              <div className="flex items-center gap-2 mb-2"><AlertCircle className="w-4 h-4 text-amber-600" /><p className="text-sm font-semibold">{ph ? 'Retake survey photo' : `Correct measurement — ${it?.work_type_name || ''}`}</p>{isSaved && <span className="ml-auto text-[10px] font-bold text-emerald-700 bg-emerald-100 rounded-full px-2 py-0.5">FIXED</span>}</div>
               {c.note && <p className="text-xs text-amber-800 bg-amber-50 rounded-lg px-2 py-1.5 mb-2">Reviewer: {c.note}</p>}
               {ph && <>
                 <img src={ph.photo_url} alt="" className="w-full max-h-56 object-contain bg-slate-100 rounded-lg border" />

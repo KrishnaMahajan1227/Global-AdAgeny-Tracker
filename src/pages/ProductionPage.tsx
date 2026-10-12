@@ -1804,13 +1804,13 @@ function ProductionOverviewTab({
             className="w-full flex items-center gap-2.5 bg-red-50 border border-red-200 text-red-700 rounded-lg px-3.5 py-2.5 text-sm font-medium hover:bg-red-100 transition"
           >
             <AlertTriangle className="w-4 h-4 shrink-0" />
-            {needsLoadAttention} shop{needsLoadAttention > 1 ? 's have' : ' has'} ready material not (fully) loaded into a vehicle yet — kuch missing na ho, check karo.
+            {needsLoadAttention} shop{needsLoadAttention > 1 ? 's have' : ' has'} ready material not (fully) loaded into a vehicle yet — Please verify that no items are missing.
             <ChevronRight className="w-4 h-4 ml-auto shrink-0" />
           </button>
         )}
         {vehicleLoadStats && needsLoadAttention === 0 && (vehicleLoadStats.shops_loaded > 0) && (
           <p className="flex items-center gap-2 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3.5 py-2.5">
-            <CheckCircle2 className="w-4 h-4 shrink-0" /> Sab kuch loaded hai — every ready shop's material has been fully handed off to an installer's vehicle.
+            <CheckCircle2 className="w-4 h-4 shrink-0" /> All ready materials have been loaded and handed over to installers.
           </p>
         )}
       </div>

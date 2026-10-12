@@ -99,7 +99,7 @@ export function EvidenceViewer({ slides, index, onClose, onIndex }: { slides: Sl
       </div>
       <div className="relative flex-1 min-h-0 flex items-center justify-center px-14" onClick={(e) => e.stopPropagation()}>
         {index > 0 && <button onClick={() => onIndex(index - 1)} className="absolute left-2 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white"><ChevronLeft className="w-6 h-6" /></button>}
-        {failed ? <div className="text-slate-300 flex flex-col items-center gap-2"><ImageOff className="w-10 h-10" /><p className="text-sm">Photo load nahi hui</p><a href={s.src} target="_blank" rel="noreferrer" className="text-xs underline">Original link kholiye</a></div> : (
+        {failed ? <div className="text-slate-300 flex flex-col items-center gap-2"><ImageOff className="w-10 h-10" /><p className="text-sm">Unable to load photo</p><a href={s.src} target="_blank" rel="noreferrer" className="text-xs underline">Open original image</a></div> : (
           <div className="relative inline-block max-h-full max-w-full">
             <img src={s.src} alt={s.title} onError={() => setFailed(true)} className="block max-h-[calc(100vh-190px)] max-w-full rounded-lg object-contain" />
             <MarkOverlay marks={s.marks} showLabels />

@@ -99,7 +99,7 @@ export function WorkItemsPanel(p: Props) {
           <p className="mt-1 text-sm text-slate-500">
             {stats.installed} of {stats.active} installed
             {stats.unavailable > 0 && <> · <span className="text-amber-700">{stats.unavailable} not available</span></>}
-            {stats.planned > 0 && <> · {r2(stats.done)} / {r2(stats.planned)} sq.ft <span className="text-slate-400">({r2(Math.max(0, stats.planned - stats.done))} baaki)</span></>}
+            {stats.planned > 0 && <> · {r2(stats.done)} / {r2(stats.planned)} sq.ft <span className="text-slate-400">({r2(Math.max(0, stats.planned - stats.done))} pending)</span></>}
           </p>
           {stats.planned > 0 && <div className="mt-2 h-1.5 w-64 max-w-full overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-slate-800" style={{ width: `${stats.pct}%` }} /></div>}
         </div>
@@ -123,11 +123,11 @@ export function WorkItemsPanel(p: Props) {
       <div className="space-y-3 p-5">
         {p.items.length === 0 && (
           <div className="rounded-xl border border-dashed border-slate-300 py-10 text-center">
-            <Package className="mx-auto mb-2 h-7 w-7 text-slate-300" /><p className="text-sm font-medium text-slate-700">Abhi koi work item nahi</p>
+            <Package className="mx-auto mb-2 h-7 w-7 text-slate-300" /><p className="text-sm font-medium text-slate-700">No work items yet</p>
             <p className="mt-1 text-xs text-slate-500">Survey se apne aap aayenge, ya "Add item" se jodiye.</p>
           </div>
         )}
-        {p.items.length > 0 && filtered.length === 0 && <p className="py-6 text-center text-sm text-slate-400">Is filter me koi item nahi.</p>}
+        {p.items.length > 0 && filtered.length === 0 && <p className="py-6 text-center text-sm text-slate-400">No items match this filter.</p>}
 
         {filtered.map((item) => {
           const idx = p.items.indexOf(item);
@@ -196,20 +196,20 @@ export function WorkItemsPanel(p: Props) {
               {unavailable && (
                 <div className="mx-4 mt-3 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                  <p><span className="font-medium">Install nahi hua:</span> {item.execution_reason || 'reason not given'}{item.execution_note ? ` — ${item.execution_note}` : ''}. <span className="text-amber-700">Installed qty / sq.ft / billing me count nahi hoga.</span></p>
+                  <p><span className="font-medium">Not Installed:</span> {item.execution_reason || 'reason not given'}{item.execution_note ? ` — ${item.execution_note}` : ''}. <span className="text-amber-700">Installed qty / sq.ft / billing me excluded from totals.</span></p>
                 </div>
               )}
 
               {/* Evidence — always visible, zero clicks */}
               <div className="mt-3 grid grid-cols-1 divide-y divide-slate-100 border-t border-slate-100 px-4 lg:grid-cols-3 lg:divide-x lg:divide-y-0">
                 <Group icon={<Camera className="h-3.5 w-3.5" />} title="Survey" count={ev.survey.length} onAdd={p.canEdit ? () => p.onAddSurvey(item.id) : undefined}>
-                  {ev.survey.length ? ev.survey.map((ph: any, i: number) => { const d = decisionFor('survey', 'survey_photo', ph.id); return <EvidenceThumb key={ph.id} slide={surveySlides[i]} onOpen={() => open(surveySlides, i)} onDelete={p.canEdit ? () => p.onDeleteSurveyPhoto(ph) : undefined} badge={d ? (d.decision === 'approved' ? '✓' : 'REDO') : undefined} badgeTone={d?.decision === 'approved' ? 'ok' : 'redo'} />; }) : empty('Photo nahi')}
+                  {ev.survey.length ? ev.survey.map((ph: any, i: number) => { const d = decisionFor('survey', 'survey_photo', ph.id); return <EvidenceThumb key={ph.id} slide={surveySlides[i]} onOpen={() => open(surveySlides, i)} onDelete={p.canEdit ? () => p.onDeleteSurveyPhoto(ph) : undefined} badge={d ? (d.decision === 'approved' ? '✓' : 'REDO') : undefined} badgeTone={d?.decision === 'approved' ? 'ok' : 'redo'} />; }) : empty('No photo')}
                 </Group>
                 <Group icon={<Palette className="h-3.5 w-3.5" />} title="Design" count={ev.designs.length} onAdd={p.canEdit ? () => p.onAddDesign(item.id) : undefined}>
-                  {ev.designs.length ? ev.designs.map((v: any) => { const si = designSlides.findIndex((s) => s.src === v.file_url); return isImageUrl(v.file_url) && si >= 0 ? <EvidenceThumb key={v.id} slide={designSlides[si]} onOpen={() => open(designSlides, si)} badge={`v${v.version_number}`} /> : <FileTile key={v.id} url={v.file_url} label={`v${v.version_number}`} tone="border-slate-200 text-slate-700" />; }) : empty('Design nahi')}
+                  {ev.designs.length ? ev.designs.map((v: any) => { const si = designSlides.findIndex((s) => s.src === v.file_url); return isImageUrl(v.file_url) && si >= 0 ? <EvidenceThumb key={v.id} slide={designSlides[si]} onOpen={() => open(designSlides, si)} badge={`v${v.version_number}`} /> : <FileTile key={v.id} url={v.file_url} label={`v${v.version_number}`} tone="border-slate-200 text-slate-700" />; }) : empty('No design')}
                 </Group>
                 <Group icon={<Wrench className="h-3.5 w-3.5" />} title="Installation" count={ev.install.length} onAdd={p.canEdit ? () => p.onAddInstall(item.id) : undefined}>
-                  {ev.install.length ? ev.install.map((pr: any, i: number) => { const d = decisionFor('installation', 'installation_photo', pr.id); return <EvidenceThumb key={pr.id} slide={installSlides[i]} onOpen={() => open(installSlides, i)} onDelete={p.canEdit ? () => p.onDeleteInstallProof(pr) : undefined} badge={/^NOT INSTALLED/i.test(pr.caption || '') ? 'N/A' : d ? (d.decision === 'approved' ? '✓' : 'REDO') : undefined} badgeTone={d?.decision === 'approved' ? 'ok' : 'redo'} />; }) : empty('Photo nahi')}
+                  {ev.install.length ? ev.install.map((pr: any, i: number) => { const d = decisionFor('installation', 'installation_photo', pr.id); return <EvidenceThumb key={pr.id} slide={installSlides[i]} onOpen={() => open(installSlides, i)} onDelete={p.canEdit ? () => p.onDeleteInstallProof(pr) : undefined} badge={/^NOT INSTALLED/i.test(pr.caption || '') ? 'N/A' : d ? (d.decision === 'approved' ? '✓' : 'REDO') : undefined} badgeTone={d?.decision === 'approved' ? 'ok' : 'redo'} />; }) : empty('No photo')}
                 </Group>
               </div>
 

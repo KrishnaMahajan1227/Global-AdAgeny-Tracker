@@ -433,8 +433,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   async function saveUnavailable() {
     if (!unavail) return;
     const { item, reason, note, file } = unavail;
-    if (!reason.trim()) { alert('Reason likhna zaroori hai.'); return; }
-    if (!file) { alert('Site ki photo zaroori hai.'); return; }
+    if (!reason.trim()) { alert('A reason is required.'); return; }
+    if (!file) { alert('A site photo is required.'); return; }
     setUnavailBusy(true);
     try {
       const dataUrl = await new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result)); r.onerror = () => reject(r.error); r.readAsDataURL(file); });
@@ -1049,11 +1049,11 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       {unavail && (
         <div className="fixed inset-0 z-[60] bg-black/60 flex items-end sm:items-center justify-center p-3">
           <div className="bg-white w-full max-w-md rounded-2xl p-4 space-y-3">
-            <p className="font-bold text-slate-900">Install nahi hua — {unavail.item.work_type_name || unavail.item.material || 'work item'}</p>
-            <p className="text-xs text-slate-500">Reason + site ki photo dein. Yeh kaam installed sq.ft / qty / billing me count nahi hoga, par history me reason aur photo dikhegi.</p>
-            <select value={['Site renovation','Shop band / owner nahi mila','Permission nahi mili','Site pe jagah nahi / blocked','Kaam scope se hata diya'].includes(unavail.reason) ? unavail.reason : ''} onChange={(e) => setUnavail({ ...unavail, reason: e.target.value })} className="w-full border rounded-lg px-3 py-2 text-sm bg-white">
+            <p className="font-bold text-slate-900">Not Installed — {unavail.item.work_type_name || unavail.item.material || 'work item'}</p>
+            <p className="text-xs text-slate-500">Reason + site ki photo dein. Yeh kaam installed sq.ft / qty / billing me excluded from totals, par history me reason aur photo dikhegi.</p>
+            <select value={['Site renovation','Shop closed / Owner unavailable','Permission not granted','Site unavailable / Obstructed','Removed from scope'].includes(unavail.reason) ? unavail.reason : ''} onChange={(e) => setUnavail({ ...unavail, reason: e.target.value })} className="w-full border rounded-lg px-3 py-2 text-sm bg-white">
               <option value="">Reason chuniye…</option>
-              {['Site renovation','Shop band / owner nahi mila','Permission nahi mili','Site pe jagah nahi / blocked','Kaam scope se hata diya'].map((r) => <option key={r} value={r}>{r}</option>)}
+              {['Site renovation','Shop closed / Owner unavailable','Permission not granted','Site unavailable / Obstructed','Removed from scope'].map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
             <input value={unavail.reason} onChange={(e) => setUnavail({ ...unavail, reason: e.target.value })} placeholder="Ya apna reason likhiye" className="w-full border rounded-lg px-3 py-2 text-sm" />
             <input value={unavail.note} onChange={(e) => setUnavail({ ...unavail, note: e.target.value })} placeholder="Comment (optional)" className="w-full border rounded-lg px-3 py-2 text-sm" />
@@ -1141,7 +1141,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                   ? installableItems.filter((it) => correctionTasks.some((c: any) => c.work_item_id === it.id || (c.installation_proof_id && proofPhotos.some((p) => p.id === c.installation_proof_id && p.workItemId === it.id))))
                   : installableItems;
                 const missingPhoto = targetItems.filter((it) => !proofPhotos.some((p) => p.workItemId === it.id) && !(installableItems.length === 1 && proofPhotos.length > 0));
-                if (missingPhoto.length) { alert(`Photo baaki hai: ${missingPhoto.map((it) => it.work_type_name || it.material || 'Work item').join(', ')}.\nHar available item ki photo lein, ya site ready nahi hai to us item ko "Not available" mark karein.`); return; }
+                if (missingPhoto.length) { alert(`Photo pending hai: ${missingPhoto.map((it) => it.work_type_name || it.material || 'Work item').join(', ')}.\nCapture a photo for each available item or mark the item as unavailable.`); return; }
                 if (installableItems.length === 0 && unavailableItems.length === 0 && proofPhotos.length === 0) { alert('Add at least one installation photo.'); return; }
                 setStep(4);
               }}
@@ -1458,13 +1458,13 @@ function ApprovedSpecsCard({
               </button>
               {(it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active')) ? (
                 <div className="mx-4 mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5">
-                  <p className="text-[11px] font-bold text-amber-900">NOT INSTALLED — count nahi hoga</p>
+                  <p className="text-[11px] font-bold text-amber-900">NOT INSTALLED — excluded from totals</p>
                   <p className="text-[11px] text-amber-800 mt-0.5">Reason: {it.execution_reason || 'not given'}{it.execution_note ? ` · ${it.execution_note}` : ''}</p>
                   <button type="button" onClick={() => onRestore(it)} className="mt-1.5 text-xs font-semibold text-blue-700 underline">Wapas installable karein</button>
                 </div>
               ) : (
                 <div className="px-4 pb-2.5 -mt-1 flex justify-end">
-                  <button type="button" onClick={() => onMarkUnavailable(it)} className="text-[11px] font-medium text-slate-500 hover:text-amber-700 inline-flex items-center gap-1 rounded-md px-2 py-1 border border-transparent hover:border-amber-300 hover:bg-amber-50">⋯ Install nahi hua? Not available</button>
+                  <button type="button" onClick={() => onMarkUnavailable(it)} className="text-[11px] font-medium text-slate-500 hover:text-amber-700 inline-flex items-center gap-1 rounded-md px-2 py-1 border border-transparent hover:border-amber-300 hover:bg-amber-50">⋯ Not Installed? Not available</button>
                 </div>
               )}
 

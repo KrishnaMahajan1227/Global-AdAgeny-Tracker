@@ -8,11 +8,11 @@ import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 
 type Stage = 'not_started' | 'survey' | 'design' | 'production' | 'installation' | 'install_review' | 'done' | 'cancelled';
 const STAGES: { key: Stage; label: string; tone: string }[] = [
-  { key: 'not_started', label: 'Survey baaki', tone: 'bg-slate-100 text-slate-700' },
+  { key: 'not_started', label: 'Survey Pending', tone: 'bg-slate-100 text-slate-700' },
   { key: 'survey', label: 'Survey / Survey review', tone: 'bg-sky-100 text-sky-800' },
   { key: 'design', label: 'Design', tone: 'bg-violet-100 text-violet-800' },
   { key: 'production', label: 'Production', tone: 'bg-orange-100 text-orange-800' },
-  { key: 'installation', label: 'Installation baaki', tone: 'bg-amber-100 text-amber-800' },
+  { key: 'installation', label: 'Installation Pending', tone: 'bg-amber-100 text-amber-800' },
   { key: 'install_review', label: 'Installation review', tone: 'bg-blue-100 text-blue-800' },
   { key: 'done', label: 'Complete', tone: 'bg-emerald-100 text-emerald-800' },
 ];
@@ -134,22 +134,22 @@ export default function WorkProgressPage() {
   const stageCounts = useMemo(() => { const c: Record<string, number> = {}; (view || []).forEach((r) => { c[r.stage] = (c[r.stage] || 0) + 1; }); return c; }, [view]);
 
   if (isLoading) return <div className="p-8 text-slate-400 text-sm">Loading progress…</div>;
-  if (error) return <div className="p-8 text-red-600 text-sm">Progress load nahi hua: {(error as any).message}</div>;
+  if (error) return <div className="p-8 text-red-600 text-sm">Unable to load progress: {(error as any).message}</div>;
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Work Progress" subtitle="Kitna kaam ho gaya, kitna baaki hai, kis shop me kya atka hai aur kaun kar raha hai — live." />
+      <PageHeader title="Work Progress" subtitle="Live overview of work completed, pending tasks, blocked sites, and assigned teams." />
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <Card className="p-4"><p className="text-xs text-slate-500">Total shops</p><p className="text-2xl font-bold text-slate-900">{totals.shops}</p></Card>
-        <Card className="p-4"><p className="text-xs text-slate-500">Complete (installed)</p><p className="text-2xl font-bold text-emerald-700">{totals.complete}</p><p className="text-[11px] text-slate-400">{totals.pct}% shops · {totals.shops - totals.complete} baaki</p></Card>
+        <Card className="p-4"><p className="text-xs text-slate-500">Complete (installed)</p><p className="text-2xl font-bold text-emerald-700">{totals.complete}</p><p className="text-[11px] text-slate-400">{totals.pct}% shops · {totals.shops - totals.complete} pending</p></Card>
         <Card className="p-4"><p className="text-xs text-slate-500">Installed sq.ft</p><p className="text-2xl font-bold text-slate-900">{fmt(totals.done)}</p><p className="text-[11px] text-slate-400">planned {fmt(totals.planned)}</p></Card>
         <Card className="p-4"><p className="text-xs text-slate-500">Baaki sq.ft</p><p className="text-2xl font-bold text-amber-700">{fmt(totals.remaining)}</p></Card>
-        <Card className="p-4"><p className="text-xs text-slate-500">Not available (count nahi)</p><p className="text-2xl font-bold text-slate-700">{totals.unavailableItems}</p><p className="text-[11px] text-slate-400">{fmt(totals.unavailableArea)} sq.ft excluded</p></Card>
+        <Card className="p-4"><p className="text-xs text-slate-500">Unavailable Items</p><p className="text-2xl font-bold text-slate-700">{totals.unavailableItems}</p><p className="text-[11px] text-slate-400">{fmt(totals.unavailableArea)} sq.ft excluded</p></Card>
       </div>
 
       <Card className="p-4">
-        <p className="text-sm font-semibold text-slate-900 mb-3">Pipeline — shop abhi kis stage me hai</p>
+        <p className="text-sm font-semibold text-slate-900 mb-3">Shop Progress by Stage</p>
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2">
           {STAGES.map((st) => (
             <button key={st.key} onClick={() => setStageFilter(stageFilter === st.key ? 'all' : st.key)} className={`rounded-xl border p-3 text-left ${stageFilter === st.key ? 'ring-2 ring-blue-500 border-blue-300' : 'border-slate-200'} bg-white`}>
@@ -164,7 +164,7 @@ export default function WorkProgressPage() {
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Shop / city search" className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white" />
         <select value={clientFilter} onChange={(e) => setClientFilter(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="all">Sab clients</option>{clients.map(([id, n]) => <option key={id} value={id}>{n}</option>)}</select>
         <select value={personFilter} onChange={(e) => setPersonFilter(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="all">Sab log</option>{people.map((p) => <option key={p.id} value={p.id}>{p.name} ({[...p.roles].join('/')})</option>)}</select>
-        <select value={sort} onChange={(e) => setSort(e.target.value as any)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="remaining">Sort: sabse zyada baaki</option><option value="progress">Sort: progress %</option><option value="name">Sort: naam</option></select>
+        <select value={sort} onChange={(e) => setSort(e.target.value as any)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="remaining">Sort: sabse zyada pending</option><option value="progress">Sort: progress %</option><option value="name">Sort: naam</option></select>
         {(stageFilter !== 'all' || clientFilter !== 'all' || personFilter !== 'all' || search) && <button onClick={() => { setStageFilter('all'); setClientFilter('all'); setPersonFilter('all'); setSearch(''); }} className="text-sm text-blue-700 font-medium px-2">Clear filters</button>}
       </div>
 
@@ -189,7 +189,7 @@ export default function WorkProgressPage() {
                 </tr>
               );
             })}
-            {filtered.length === 0 && <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-400 text-sm">Koi shop nahi mila.</td></tr>}
+            {filtered.length === 0 && <tr><td colSpan={7} className="px-3 py-8 text-center text-slate-400 text-sm">No shops found.</td></tr>}
           </tbody>
         </table>
       </Card>
@@ -200,7 +200,7 @@ export default function WorkProgressPage() {
           <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="text-left px-3 py-2.5">Naam</th><th className="text-left px-3 py-2.5">Role</th><th className="text-left px-3 py-2.5">Assigned shops</th><th className="text-left px-3 py-2.5">Complete</th><th className="text-left px-3 py-2.5">Baaki</th><th className="text-left px-3 py-2.5">Installed sq.ft</th></tr></thead>
           <tbody className="divide-y">
             {perPerson.map((p) => <tr key={p.name + p.role}><td className="px-3 py-2 font-medium text-slate-900">{p.name}</td><td className="px-3 py-2 capitalize text-slate-600">{p.role}</td><td className="px-3 py-2">{p.shops}</td><td className="px-3 py-2 text-emerald-700 font-semibold">{p.complete}</td><td className="px-3 py-2 text-amber-700">{p.pending}</td><td className="px-3 py-2">{p.role === 'installer' ? fmt(p.sqft) : '—'}</td></tr>)}
-            {perPerson.length === 0 && <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-400 text-sm">Abhi koi assignment nahi.</td></tr>}
+            {perPerson.length === 0 && <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-400 text-sm">No assignments found.</td></tr>}
           </tbody>
         </table>
       </Card>

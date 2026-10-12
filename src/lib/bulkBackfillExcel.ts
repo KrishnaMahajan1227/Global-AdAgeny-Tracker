@@ -119,7 +119,7 @@ export async function downloadBulkBackfillTemplate(opts: BulkBackfillTemplateOpt
   wsInstructions.addRow([]);
   bold('Same shop, many works  kaise likhein');
   plain('Ek shop ke jitne kaam hain utni rows likhiye. Shop Name + Phone SAME rakhiye  bas itna kaafi hai, ye sab ek hi shop me judenge.');
-  plain('Har row ka Work Order alag ho sakta hai  shop ka Work Order pehli row se liya jata hai, baaki rows ke works apne Work Order ki line se jud jate hain.');
+  plain('Har row ka Work Order alag ho sakta hai  shop ka Work Order pehli row se liya jata hai, pending rows ke works apne Work Order ki line se jud jate hain.');
   wsInstructions.addRow([]);
   bold('Sizes aur Unit  ek hi Unit column');
   plain('Width aur Height me sirf number likhiye (10, 4.5). Formula bhi chalega (=288/12).');

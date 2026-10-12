@@ -366,7 +366,7 @@ export default function ReportsPage() {
             const shopMarkings = (boardMarkings || []).filter((m) => photoIds.has(m.survey_photo_id));
             entries.push({ shop: shop as any, survey: shopSurvey as any, photos: photos as any, workItems: items as any, surveyorName: (shopSurvey as any).profiles?.full_name || 'Unknown', markings: shopMarkings as any });
           }
-          if (entries.length === 0) { setNotice({ kind: 'error', message: 'Selected shops ke liye koi submitted survey nahi mila.' }); break; }
+          if (entries.length === 0) { setNotice({ kind: 'error', message: 'No submitted surveys found for the selected shops.' }); break; }
           if (combined) {
             await generateSurveyReportPDF(entries, org, { groupLabel: selectedClientLabel, fileName: bundleFileName('survey-report', selectedClientLabel, entries.length) });
           } else {
@@ -385,7 +385,7 @@ export default function ReportsPage() {
             const items = (workItems || []).filter((w) => w.shop_id === shop.id);
             entries.push({ shop: shop as any, job: job as any, proofs: proofs as any, workItems: items as any, installerName: (job as any).profiles?.full_name || 'Unknown' });
           }
-          if (entries.length === 0) { setNotice({ kind: 'error', message: 'Selected shops ke liye koi installation record nahi mila.' }); break; }
+          if (entries.length === 0) { setNotice({ kind: 'error', message: 'No installation records found for the selected shops.' }); break; }
           if (combined) {
             await generateInstallationReportPDF(entries, org, { groupLabel: selectedClientLabel, fileName: bundleFileName('installation-report', selectedClientLabel, entries.length) });
           } else {
@@ -402,7 +402,7 @@ export default function ReportsPage() {
             const client = (clients || []).find((c) => c.id === inv.client_id);
             entries.push({ invoice: inv as any, items: inv.invoice_items || [], client: client || null });
           }
-          if (entries.length === 0) { setNotice({ kind: 'error', message: 'Is filter ke liye koi invoice nahi mila.' }); break; }
+          if (entries.length === 0) { setNotice({ kind: 'error', message: 'No invoices found for the selected filters.' }); break; }
           if (combined) {
             await generateInvoiceBundlePDF(entries, org, { fileName: bundleFileName('invoices', selectedClientLabel, entries.length) });
           } else {
@@ -424,7 +424,7 @@ export default function ReportsPage() {
             const shopMarkings = (boardMarkings || []).filter((m) => photoIds.has(m.survey_photo_id));
             entries.push({ shop: shop as any, survey: (survey as any) || null, surveyPhotos: photos as any, workItems: items as any, proofs: proofs as any, surveyorName: (survey as any)?.profiles?.full_name || 'Unknown', installerName: (job as any)?.profiles?.full_name || 'Unknown', markings: shopMarkings as any });
           }
-          if (entries.length === 0) { setNotice({ kind: 'error', message: 'Selected shops mein se koi bhi "installed" stage par nahi hai.' }); break; }
+          if (entries.length === 0) { setNotice({ kind: 'error', message: 'None of the selected shops have been installed.' }); break; }
           if (combined) {
             await generateFinalClientReportPDF(entries, org, { groupLabel: selectedClientLabel, fileName: bundleFileName('final-client-report', selectedClientLabel, entries.length) });
           } else {
@@ -437,7 +437,7 @@ export default function ReportsPage() {
         case 'design-approval-pdf':
         case 'design-approval-ppt': {
           const candidateShops = filteredShops.filter((s: any) => (workItems || []).some((w) => w.shop_id === s.id));
-          if (candidateShops.length === 0) { setNotice({ kind: 'error', message: 'Selected shops ke liye koi board (work item) nahi mila.' }); break; }
+          if (candidateShops.length === 0) { setNotice({ kind: 'error', message: 'No work items found for the selected shops.' }); break; }
           if (candidateShops.length > DESIGN_APPROVAL_MAX_SHOPS) {
             setNotice({ kind: 'error', message: `Ek baar mein ${DESIGN_APPROVAL_MAX_SHOPS} shops tak hi. Filters se PO, Campaign ya shop selection se list chota karein (abhi ${candidateShops.length} shops match ho rahe hain).` });
             break;

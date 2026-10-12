@@ -1190,7 +1190,7 @@ export function ShopsPage() {
       const applyStatus = async (shopIdToSet: string, status: string | null): Promise<string> => {
         if (!status) return '';
         const { error: stErr } = await supabase.rpc('set_shop_stage', { p_shop_id: shopIdToSet, p_status: status });
-        if (stErr) throw new Error(`Status set nahi hua: ${stErr.message}`);
+        if (stErr) throw new Error(`Unable to update status: ${stErr.message}`);
         return ` · status → ${STATUS_LABELS[status] || status}`;
       };
 
@@ -1382,7 +1382,7 @@ export function ShopsPage() {
   // one page (pageSize rows) comes back, alongside an exact total count
   // from Postgres for the "X–Y of Z" indicator and page controls below.
   const shopsQueryKey = ['shops', orgId, { poFilter, statusFilter, zoneFilter, campaignFilter, city: debouncedCityFilter, district: debouncedDistrictFilter, state: debouncedStateFilter, q: debouncedSearch, sortBy, page, pageSize }];
-  const { data: shopsPage, isFetching: shopsLoading } = useQuery({
+  const { data: shopsPage, isFetching: shopsLoading, error: shopsLoadError, refetch: refetchShops } = useQuery({
     queryKey: shopsQueryKey,
     queryFn: async () => {
       // Campaign lives on purchase_orders, not shops directly, so filtering
@@ -1420,13 +1420,36 @@ export function ShopsPage() {
       const from = page * pageSize;
       const to = from + pageSize - 1;
       const { data, error, count } = await query.order(sortColumn, { ascending: sortDir }).range(from, to);
-      if (error) throw error;
+      if (error) {
+        // Backwards compatibility: shop reads must not depend on an optional
+        // reviewer FK being present in a database awaiting a migration.
+        const missingReviewerRelation = /rejected_profile|shops_rejected_by_fkey|relationship.*profiles|PGRST200/i.test(error.message);
+        if (!missingReviewerRelation) throw error;
+        let fallback = supabase.from('shops')
+          .select(`*, clients(name), projects(name), zones(name), ${poEmbed}`, { count: 'exact' })
+          .eq('organization_id', orgId);
+        if (poFilter) fallback = fallback.eq('purchase_order_id', poFilter);
+        if (statusFilter) fallback = fallback.eq('status', statusFilter);
+        if (zoneFilter) fallback = fallback.eq('zone_id', zoneFilter);
+        if (campaignFilter) fallback = fallback.eq('purchase_orders.campaign_id', campaignFilter);
+        if (debouncedCityFilter) fallback = fallback.ilike('city', `%${debouncedCityFilter}%`);
+        if (debouncedDistrictFilter) fallback = fallback.ilike('district', `%${debouncedDistrictFilter}%`);
+        if (debouncedStateFilter) fallback = fallback.ilike('state', `%${debouncedStateFilter}%`);
+        if (debouncedSearch) {
+          const term = debouncedSearch.replace(/[%,]/g, '');
+          fallback = fallback.or(`name.ilike.%${term}%,city.ilike.%${term}%,address.ilike.%${term}%,owner_name.ilike.%${term}%`);
+        }
+        const retry = await fallback.order(sortColumn, { ascending: sortDir }).range(from, to);
+        if (retry.error) throw retry.error;
+        return { rows: retry.data || [], total: retry.count || 0 };
+      }
       return { rows: data || [], total: count || 0 };
     },
     enabled: !!orgId,
     placeholderData: (prev) => prev,
   });
 
+  // Distinguish failed database requests from an actually empty shop list.
   const shops = shopsPage?.rows;
   const totalShops = shopsPage?.total || 0;
   const totalPages = Math.max(1, Math.ceil(totalShops / pageSize));
@@ -1913,7 +1936,7 @@ export function ShopsPage() {
       }).in('id', targets.map((shop) => shop.id)).neq('status', 'rejected').select('id');
       if (error) throw error;
       if ((data || []).length !== targets.filter((shop) => shop.status !== 'rejected').length) throw new Error('Some shops were not updated. Refresh the list before retrying.');
-      for (const shop of targets) await logAudit('shops', shop.id, 'update', 'status', shop.status, 'rejected', `Rejected: ${rejectReason.trim()} · PO ${shop.purchase_orders?.po_number || 'unlinked'}`);
+      for (const shop of targets) await logAudit('shops', shop.id, 'update', 'status', shop.status, 'rejected', `Rejected: ${rejectReason.trim()} · PO ${(purchaseOrders || []).find((po) => po.id === shop.purchase_order_id)?.po_number || 'unlinked'}`);
       return data?.length || 0;
     },
     onSuccess: () => {
@@ -1960,6 +1983,13 @@ export function ShopsPage() {
 
   return (
     <div>
+      {shopsLoadError && (
+        <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          <strong>Unable to load shops from the database.</strong>
+          <p className="mt-1">{shopsLoadError instanceof Error ? shopsLoadError.message : 'Please check database permissions and migrations.'}</p>
+          <button type="button" onClick={() => void refetchShops()} className="mt-2 rounded-md bg-red-700 px-3 py-1.5 font-medium text-white">Retry</button>
+        </div>
+      )}
       <PageHeader
         title="Shops"
         subtitle="Manage all shop locations"
@@ -2470,7 +2500,7 @@ export function ShopsPage() {
       <Modal open={!!rejectTargets} onClose={() => { setRejectTargets(null); setRejectReason(''); }} title={`Reject ${rejectTargets?.length || 0} Shop(s)`} size="md">
         <div className="space-y-3">
           <p className="text-xs text-red-700">Final rejection, not redo. Rejected shops remain in a separate filter and are not returned to survey/installation queues.</p>
-          <div className="max-h-40 overflow-y-auto text-xs bg-slate-50 rounded p-2 space-y-1">{(rejectTargets || []).map((shop) => <p key={shop.id}>{shop.name} · Work Order: {shop.purchase_orders?.po_number || 'Not linked'}</p>)}</div>
+          <div className="max-h-40 overflow-y-auto text-xs bg-slate-50 rounded p-2 space-y-1">{(rejectTargets || []).map((shop) => <p key={shop.id}>{shop.name} · Work Order: {(purchaseOrders || []).find((po) => po.id === shop.purchase_order_id)?.po_number || 'Not linked'}</p>)}</div>
           <Textarea label="Rejection reason (required)" value={rejectReason} onChange={setRejectReason} rows={3}/>
           {rejectShopsMutation.isError && <p className="text-xs text-red-700">{(rejectShopsMutation.error as Error).message}</p>}
           <button type="button" disabled={!rejectReason.trim() || rejectShopsMutation.isPending} onClick={() => rejectShopsMutation.mutate()} className="w-full py-2.5 rounded-lg bg-red-600 text-white font-medium disabled:opacity-50">{rejectShopsMutation.isPending ? 'Rejecting...' : 'Confirm Rejection'}</button>
@@ -2994,7 +3024,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       await logAudit('shops', shopId, 'update', null, null, null, `Stage changed ${shop.status} -> ${next}`);
       await refreshReviewViews(queryClient, shopId);
     } catch (e: any) {
-      alert(/set_shop_stage|schema cache/i.test(e?.message || '') ? 'Database update (RUN_THIS_FIRST.sql) abhi chalani baaki hai.' : (e?.message || 'Stage change nahi hua'));
+      alert(/set_shop_stage|schema cache/i.test(e?.message || '') ? 'Database update (RUN_THIS_FIRST.sql) abhi chalani pending hai.' : (e?.message || 'Unable to change stage'));
     } finally { setStageBusy(false); }
   };
   const openWorkItemForm = (item: any | null) => {
@@ -4238,7 +4268,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       <Modal open={installUploadOpen} onClose={() => setInstallUploadOpen(false)} title="Upload Installation Photos — Map Every Photo" size="lg">
         <div className="space-y-4">
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-            {installUploadTarget ? <>Ye photos seedhe <b>{(() => { const i = (workItems || []).findIndex((w) => w.id === installUploadTarget); return i >= 0 ? workItemName((workItems || [])[i], i) : 'is work item'; })()}</b> ke saath jud jayengi.</> : <>Har photo ke liye us work item ko chuniye jiska wo installation proof hai.</>}
+            {installUploadTarget ? <>These photos will be linked directly to <b>{(() => { const i = (workItems || []).findIndex((w) => w.id === installUploadTarget); return i >= 0 ? workItemName((workItems || [])[i], i) : 'is work item'; })()}</b> .</> : <>Select the work item associated with each installation photo.</>}
           </div>
           <label className="flex cursor-pointer items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-lg py-5 text-sm text-slate-600 hover:border-slate-400 hover:bg-slate-50">
             <UploadCloud className="w-5 h-5" /> Photos chuniye (ek ya kai)

@@ -111,7 +111,7 @@ export function ItemLevelReviewPanel(props: Props) {
       if (res.finalized) setMsg(stage === 'survey' ? '✅ Survey approved — design task assign ho gaya.' : stage === 'installation' ? '✅ Installation approved — shop Installed ho gaya.' : '✅ Design approved.');
       else if (res.needs_designer) setMsg('Sab items approved hain. Neeche designer chuniye aur "Approve all" dabaiye.');
       else if (decision === 'redo') setMsg('Redo bhej diya — sirf selected items wapas gaye.');
-      else setMsg(`Approved. ${res.pending} item abhi review baaki, ${res.redo} redo mein.`);
+      else setMsg(`Approved. ${res.pending} item abhi review pending, ${res.redo} redo mein.`);
       setSelected(new Set()); setNote('');
       await refreshReviewViews(qc, shopId);
       if (res.finalized || res.left_review) onDone?.();
@@ -132,7 +132,7 @@ export function ItemLevelReviewPanel(props: Props) {
       <div className="px-4 py-3 bg-slate-50 border-b flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-semibold text-slate-900">Item-by-item review</p>
-          <p className="text-xs text-slate-500">{rows.length} items · {undecided} baaki · {redoCount} redo. Ek, kai ya sab — approve ya redo.</p>
+          <p className="text-xs text-slate-500">{rows.length} items · {undecided} pending · {redoCount} redo. Ek, kai ya sab — approve ya redo.</p>
         </div>
         {!readOnly && <button onClick={() => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.key)))} className="text-xs font-medium text-blue-700 flex items-center gap-1">{allSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />} Select all</button>}
       </div>
@@ -155,7 +155,7 @@ export function ItemLevelReviewPanel(props: Props) {
                     {d && <span className={`rounded-full px-2 py-1 text-[10px] font-bold ${d.decision === 'approved' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{d.decision === 'approved' ? 'APPROVED' : 'REDO'}</span>}
                   </div>
                 </div>
-                {r.unavailable && <p className="text-[11px] text-slate-600 mt-1">Reason: {r.reason || 'Site unavailable'} — installed/billing calculation mein count nahi hoga.</p>}
+                {r.unavailable && <p className="text-[11px] text-slate-600 mt-1">Reason: {r.reason || 'Site unavailable'} — installed/billing calculation mein excluded from totals.</p>}
                 {d?.note && <p className="text-[11px] text-slate-500 mt-1">Note: {d.note}</p>}
                 {!readOnly && stage === 'installation' && r.entity.type === 'work_item' && !r.unavailable && (
                   <button onClick={() => void markUnavailable(r)} className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-slate-600 border border-slate-300 rounded-md px-2 py-0.5 hover:bg-slate-100"><Ban className="w-3 h-3" /> Mark not available</button>

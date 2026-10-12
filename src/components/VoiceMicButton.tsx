@@ -113,7 +113,7 @@ export function VoiceSizeButton({ onValues }: VoiceSizeButtonProps) {
         {label}
       </button>
       {status === 'recording' && (
-        <p className="text-[11px] text-slate-500 text-center mt-1">Bolne ke baad button dubara tap karo bhejne ke liye</p>
+        <p className="text-[11px] text-slate-500 text-center mt-1">Tap again after speaking to submit.</p>
       )}
       {message && (
         <p className="flex items-start gap-1 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5 mt-1.5">
@@ -122,7 +122,7 @@ export function VoiceSizeButton({ onValues }: VoiceSizeButtonProps) {
       )}
       {usedFallback && !message && (
         <p className="flex items-center gap-1 text-[10px] text-amber-600 mt-1">
-          <Languages className="w-3 h-3" /> Basic voice mode use ho raha hai (kam accurate ho sakta hai) — check karke confirm kar lo.
+          <Languages className="w-3 h-3" /> Basic voice recognition is active. Please review the transcription before submitting.
         </p>
       )}
     </div>

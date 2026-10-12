@@ -57,7 +57,7 @@ export function useSmartVoice(): SmartVoiceHandle {
 
   const runBrowserFallback = useCallback((reason?: string) => {
     if (!browserVoice.supported) {
-      setMessage(reason ? `${reason} Basic voice bhi is phone/browser me nahi chalta — type kar do.` : 'Voice yahan support nahi hai — type kar do.');
+      setMessage(reason ? `${reason} Basic voice input is unavailable on this device. Please type your response.` : 'Voice input is not supported here. Please type your response.');
       setStatus('idle');
       return;
     }
@@ -98,7 +98,7 @@ export function useSmartVoice(): SmartVoiceHandle {
         try {
           const result = await transcribeWithGemini(blob);
           if (result.numbers.length === 0 && !result.transcript.trim()) {
-            runBrowserFallback('Kuch samajh nahi aaya.');
+            runBrowserFallback('Speech not recognized.');
             return;
           }
           setUsedFallback(false);
@@ -107,7 +107,7 @@ export function useSmartVoice(): SmartVoiceHandle {
           setStatus('idle');
         } catch (err) {
           console.warn('[useSmartVoice] Gemini path failed, falling back to browser recognizer:', err);
-          runBrowserFallback('Advanced voice abhi available nahi hai.');
+          runBrowserFallback('Advanced voice recognition is currently unavailable.');
         }
       });
       return;
@@ -126,8 +126,8 @@ export function useSmartVoice(): SmartVoiceHandle {
       setStatus('recording');
       recorder.start().catch((err: Error) => {
         const friendly = err.message === 'not-allowed'
-          ? 'Mic permission nahi mili — phone Settings me is app ko mic access do.'
-          : 'Mic start nahi ho paya.';
+          ? 'Microphone permission denied. Enable microphone access in device settings.'
+          : 'Unable to start the microphone.';
         runBrowserFallback(friendly);
       });
     } else {

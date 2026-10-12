@@ -13,6 +13,10 @@ export interface DraftPhoto {
   dataUrl: string;
   fileName: string;
   photoType: 'survey';
+  captureLat?: number | null;
+  captureLng?: number | null;
+  captureAccuracy?: number | null;
+  capturedAt?: string;
   storagePath?: string;
   photoUrl?: string;
   photoId?: string;

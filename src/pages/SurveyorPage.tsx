@@ -626,7 +626,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   const { profile } = useAuth();
   const queryClient = useQueryClient();
   const isOnline = useOnlineStatus();
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState(2);
   const [photos, setPhotos] = useState<DraftPhoto[]>([]);
   const [workItems, setWorkItems] = useState<WorkItemDraft[]>([]);
   const [gps, setGps] = useState<{ lat: number; lng: number; accuracy: number } | null>(null);
@@ -847,7 +847,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
         // 2-4 (Photos / Mark Board / Measure) all fold into new step 2, old
         // step 5 (Review) becomes new step 3, old step 6 (Submit) becomes 4.
         const stepMap: Record<number, number> = { 1: 1, 2: 2, 3: 2, 4: 2, 5: 3, 6: 4 };
-        setStep(stepMap[existing.step] || Math.min(existing.step, 4));
+        setStep(Math.max(2, stepMap[existing.step] || Math.min(existing.step, 3)));
         setPhotos(existing.photos);
         setWorkItems(existing.workItems);
         setGps(existing.gps);
@@ -957,6 +957,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       dataUrl,
       fileName,
       photoType: 'survey',
+      captureLat: photoGps?.lat ?? null, captureLng: photoGps?.lng ?? null, captureAccuracy: photoGps?.accuracy ?? null, capturedAt: new Date().toISOString(),
       uploaded: false,
     };
     const nextPhotos = [...photos, draftPhoto];
@@ -978,6 +979,16 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
     const singlePO = shop?.purchase_order_id && poLineItemsForShop?.length === 1 ? poLineItemsForShop[0] : null;
     const defaultWt = !shop?.purchase_order_id && allowedWorkTypes.length === 1 ? allowedWorkTypes[0] : null;
     setWorkItems([...workItems, { ...BLANK_WORK_ITEM, photoLocalId: currentPhotoLocalId, points: [], ...(singlePO ? { work_type_id: singlePO.work_type_id || '', work_type_name: singlePO.description, po_line_item_id: singlePO.id } : defaultWt ? { work_type_id: defaultWt.id, work_type_name: defaultWt.name, po_line_item_id: null } : {}) }]);
+  }
+
+  function deleteSurveyPhoto(localId: string) {
+    if (!window.confirm('Delete this photo and all markings attached to it?')) return;
+    const nextPhotos = photos.filter((p) => p.localId !== localId);
+    const nextWorkItems = workItems.filter((w) => w.photoLocalId !== localId);
+    setPhotos(nextPhotos);
+    setWorkItems(nextWorkItems);
+    setCurrentPhotoLocalId(null);
+    persistDraft({ photos: nextPhotos, workItems: nextWorkItems });
   }
 
   function removeBoard(idx: number) {
@@ -1141,7 +1152,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
     );
   }
 
-  const steps = ['Shop', 'Capture & Mark', 'Review & Submit'];
+  const steps = ['Capture & Mark', 'Review & Submit'];
 
   return (
     <div className="min-h-screen bg-slate-50 pb-24 max-w-md mx-auto">
@@ -1154,7 +1165,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       <div className="bg-white border-b border-slate-200 sticky top-0 z-30">
         <div className="flex items-center justify-between p-4">
           <button onClick={() => onExit()} className="text-sm text-slate-500">Cancel</button>
-          <p className="font-semibold text-slate-900">{step === 1 ? 'Shop' : step === 2 ? 'Capture & Mark' : 'Review & Submit'}</p>
+          <p className="font-semibold text-slate-900">{step === 2 ? 'Capture & Mark' : 'Review & Submit'}</p>
           <span className="text-xs text-slate-400">{photos.length} photos</span>
         </div>
         {/* §9.3 — "Shop N of M today" so the surveyor always knows how much
@@ -1163,7 +1174,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
           <p className="px-4 pb-1 text-xs text-blue-600 font-medium">Shop {queuePosition + 1} of {queueTotal} today</p>
         )}
         <div className="flex px-4 pb-3 gap-1">
-          {[1, 2, 3].map((s) => (
+          {[2, 3].map((s) => (
             <div key={s} className={`h-1.5 flex-1 rounded-full ${s <= step ? 'bg-blue-600' : 'bg-slate-200'}`} />
           ))}
         </div>
@@ -1180,76 +1191,19 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       />
 
       <div className="p-4">
-        {/* Step 1: Shop */}
-        {step === 1 && shop && (
-          <div className="space-y-4">
-            {correctionTasks && correctionTasks.length > 0 && <Card className="p-4 border border-amber-300 bg-amber-50"><p className="font-semibold text-sm text-amber-900">Correction-only visit · {correctionTasks.length} item{correctionTasks.length===1?'':'s'}</p><p className="text-xs text-amber-700 mt-1">Fix only the items listed below. Other approved survey evidence does not need to be repeated.</p><div className="mt-2 space-y-1">{correctionTasks.map((c:any)=><div key={c.id} className="text-xs bg-white/80 border border-amber-200 rounded px-2 py-1.5"><b>{c.issue_type==='measurement'?'Measurement':'Survey photo'}</b>{c.note?` — ${c.note}`:''}</div>)}</div></Card>}
-
-          {lastReview && (
-              <Card className={`p-4 border ${lastReview.status === 'rejected' ? 'border-red-300 bg-red-50' : 'border-amber-300 bg-amber-50'}`}>
-                <div className="flex items-center gap-2 mb-1">
-                  <AlertCircle className={`w-4 h-4 ${lastReview.status === 'rejected' ? 'text-red-600' : 'text-amber-600'}`} />
-                  <p className={`font-medium text-sm ${lastReview.status === 'rejected' ? 'text-red-800' : 'text-amber-800'}`}>
-                    {lastReview.status === 'rejected' ? 'This survey was rejected' : 'Correction requested by Admin/Owner'}
-                  </p>
-                </div>
-                <p className={`text-xs ${lastReview.status === 'rejected' ? 'text-red-700' : 'text-amber-700'}`}>
-                  {lastReview.review_note || 'No note was left — re-check the boards and measurements carefully before resubmitting.'}
-                </p>
-              </Card>
-            )}
-
-            <Card className="p-4">
-              <h2 className="font-bold text-slate-900 text-lg mb-3">{shop.name}</h2>
-              <div className="space-y-2 text-sm text-slate-600">
-                <p>Client: {shop.clients?.name}</p>
-                <p>Owner: {shop.owner_name || 'N/A'}</p>
-                <p>Address: {shop.address || 'N/A'}</p>
-                <p>City: {shop.city}, {shop.state}</p>
-              </div>
-            </Card>
-
-            <Card className="p-4">
-              <div className="flex items-center gap-2 mb-2">
-                <MapPin className="w-5 h-5 text-blue-600" />
-                <span className="font-medium text-slate-900">Location</span>
-              </div>
-              {gpsStatus === 'captured' && gps ? (
-                <div className="text-sm text-green-600 flex items-center gap-1">
-                  <CheckCircle2 className="w-4 h-4" /> Location captured (accuracy: {gps.accuracy.toFixed(0)}m)
-                </div>
-              ) : gpsStatus === 'capturing' ? (
-                <div className="text-sm text-blue-600 flex items-center gap-1">
-                  <Loader2 className="w-4 h-4 animate-spin" /> Capturing location...
-                </div>
-              ) : gpsStatus === 'denied' ? (
-                <div className="text-sm text-amber-600 flex items-center gap-1">
-                  <AlertCircle className="w-4 h-4" /> Location unavailable - check permissions
-                </div>
-              ) : (
-                <p className="text-sm text-slate-400">Waiting to capture...</p>
-              )}
-            </Card>
-
-            <button
-              onClick={() => navigateToShop(shop)}
-              className="w-full flex items-center justify-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-lg text-sm transition"
-            >
-              <Navigation className="w-4 h-4" /> Navigate to Shop
-            </button>
-
-            <button onClick={() => setStep(2)} className="w-full bg-slate-900 text-white font-medium py-3 rounded-lg">
-              Continue
-            </button>
-          </div>
-        )}
-
         {/* Step 2: Photos & Boards — take a photo, mark its board(s), fill
             in its measurements, then move to the next photo. Everything
             for one photo happens together instead of three separate passes
             over the whole photo set. */}
         {step === 2 && (
           <div className="space-y-4">
+            {shop && <Card className="p-3 space-y-2">
+              <div className="flex items-start justify-between gap-2"><div><p className="font-semibold text-slate-900">{shop.name}</p><p className="text-xs text-slate-600">{shop.clients?.name || 'Client'} · {shop.owner_name || 'Owner not entered'}</p></div><button type="button" onClick={() => navigateToShop(shop)} className="text-xs text-blue-600 flex items-center gap-1"><Navigation className="w-3.5 h-3.5"/> Map</button></div>
+              <p className="text-xs text-slate-600">Office address: {[shop.address, shop.city, shop.district, shop.state].filter(Boolean).join(', ') || 'Not entered'}</p>
+              <div className="flex flex-wrap gap-3 text-xs"><span className="text-slate-600">Office pin: {shop.latitude != null && shop.longitude != null ? `${shop.latitude.toFixed(5)}, ${shop.longitude.toFixed(5)}` : 'Not entered'}</span><span className={gps ? 'text-green-700' : 'text-amber-700'}>Device GPS: {gps ? `${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)} (±${Math.round(gps.accuracy)}m)` : 'Awaiting location permission'}</span></div>
+              {lastReview && <p className={lastReview.status === 'rejected' ? 'text-xs text-red-700' : 'text-xs text-amber-700'}>{lastReview.status === 'rejected' ? 'Rejected' : 'Redo'}: {lastReview.review_note || 'See review details'}</p>}
+              {!!correctionTasks?.length && <p className="text-xs text-amber-700">Redo requested for {correctionTasks.length} specific item(s); approved items remain unchanged.</p>}
+            </Card>}
             {!currentPhotoLocalId && (
               <p className="text-sm text-slate-600">
                 {photos.length === 0
@@ -1330,6 +1284,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
 
               return (
                 <div className="space-y-4">
+                  <button type="button" onClick={() => deleteSurveyPhoto(photo.localId)} className="w-full rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm py-2">Delete incorrect photo & markings</button>
                   {boardsForPhoto.map(({ w: item, idx }, n) => {
                     const area = areaSqFt(parseFloat(item.width) || 0, item.unit, parseFloat(item.height) || 0, item.heightUnit || item.unit) * (parseInt(item.quantity) || 1);
                     return (
@@ -1500,8 +1455,8 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
             })()}
 
             <div className="flex gap-2">
-              <button onClick={() => setStep(1)} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
-                <ChevronLeft className="w-4 h-4" /> Back
+              <button onClick={() => { setCurrentPhotoLocalId(null); persistDraft(); }} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
+                <Camera className="w-4 h-4" /> Photos
               </button>
               <button
                 onClick={() => { persistDraft(); setCurrentPhotoLocalId(null); setStep(3); }}
@@ -1563,6 +1518,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                   <Card key={p.localId} className="p-3">
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-sm font-medium text-slate-900">Photo {i + 1}</span>
+                      <button type="button" onClick={() => { deleteSurveyPhoto(p.localId); setStep(2); }} className="text-xs font-medium text-red-600 mr-3">Delete</button>
                       <button
                         onClick={() => { setCurrentPhotoLocalId(p.localId); setStep(2); }}
                         className="text-xs font-medium text-blue-600"

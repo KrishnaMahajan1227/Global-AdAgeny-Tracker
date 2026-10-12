@@ -107,6 +107,9 @@ export interface Project {
   start_date: string | null;
   end_date: string | null;
   status: string;
+  rejected_reason?: string | null;
+  rejected_by?: string | null;
+  rejected_at?: string | null;
   is_demo: boolean;
   created_at: string;
 }
@@ -908,7 +911,7 @@ export const SHOP_STATUSES = [
   'approved', 'design_pending', 'designing', 'design_ready', 'in_review',
   'design_approved', 'production_pending', 'in_production', 'production_ready',
   'production_hold', 'production_done', 'dispatched', 'installation_pending',
-  'installing', 'installation_review', 'installed', 'billed', 'cancelled'
+  'installing', 'installation_review', 'installed', 'billed', 'cancelled', 'rejected'
 ] as const;
 
 export const STATUS_LABELS: Record<string, string> = {
@@ -935,6 +938,7 @@ export const STATUS_LABELS: Record<string, string> = {
   installed: 'Installed',
   billed: 'Billed',
   cancelled: 'Cancelled',
+  rejected: 'Rejected',
 };
 
 export const STATUS_COLORS: Record<string, string> = {

@@ -878,6 +878,8 @@ export function ShopsPage() {
   const [bulkRemoveConfirmOpen, setBulkRemoveConfirmOpen] = useState(false);
   const [statusChangeShops, setStatusChangeShops] = useState<Shop[] | null>(null);
   const [nextShopStatus, setNextShopStatus] = useState('');
+  const [rejectTargets, setRejectTargets] = useState<Shop[] | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
 
   // Bulk Upload (Excel) — every client hands over their shop list in a
   // different layout (different column order/names, a title row above
@@ -1390,7 +1392,7 @@ export function ShopsPage() {
       const poEmbed = campaignFilter ? 'purchase_orders!inner(po_number, campaign_id)' : 'purchase_orders(po_number)';
       let query = supabase
         .from('shops')
-        .select(`*, clients(name), projects(name), zones(name), ${poEmbed}`, { count: 'exact' })
+        .select(`*, clients(name), projects(name), zones(name), ${poEmbed}, rejected_profile:profiles!shops_rejected_by_fkey(full_name)`, { count: 'exact' })
         .eq('organization_id', orgId);
 
       if (poFilter) query = query.eq('purchase_order_id', poFilter);
@@ -1863,6 +1865,7 @@ export function ShopsPage() {
   const shopStageMutation = useMutation({
     mutationFn: async ({ targets, status }: { targets: Shop[]; status: string }) => {
       if (!targets.length || !status) throw new Error('Select shop(s) and a stage.');
+      if (status === 'rejected' || targets.some((shop) => shop.status === 'rejected')) throw new Error('Use Reject action for final rejection; rejected shops cannot be moved back to a work stage.');
       const ids = targets.map((s) => s.id);
       const { error } = await supabase.from('shops').update({ status }).in('id', ids).select('id');
       if (error) throw new Error(error.message);
@@ -1897,6 +1900,32 @@ export function ShopsPage() {
     },
   });
 
+  // Final shop rejection is separate from reviewer "redo". Persist who/why/when
+  // and preserve the linked PO on the shop for the Rejected Shops filter.
+  const rejectShopsMutation = useMutation({
+    mutationFn: async () => {
+      const targets = rejectTargets || [];
+      if (!targets.length || !rejectReason.trim()) throw new Error('Select shops and enter a rejection reason.');
+      if (!profile?.id) throw new Error('Sign in to reject shops.');
+      const { data, error } = await supabase.from('shops').update({
+        status: 'rejected', rejected_reason: rejectReason.trim(), rejected_by: profile.id,
+        rejected_at: new Date().toISOString(),
+      }).in('id', targets.map((shop) => shop.id)).neq('status', 'rejected').select('id');
+      if (error) throw error;
+      if ((data || []).length !== targets.filter((shop) => shop.status !== 'rejected').length) throw new Error('Some shops were not updated. Refresh the list before retrying.');
+      for (const shop of targets) await logAudit('shops', shop.id, 'update', 'status', shop.status, 'rejected', `Rejected: ${rejectReason.trim()} · PO ${shop.purchase_orders?.po_number || 'unlinked'}`);
+      return data?.length || 0;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shops'] });
+      queryClient.invalidateQueries({ queryKey: ['shop'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['surveyor-assignments'] });
+      queryClient.invalidateQueries({ queryKey: ['installer-assignments'] });
+      setRejectTargets(null); setRejectReason(''); setSelectedShopIds(new Set()); setSelectMode(false);
+    },
+  });
+
   function openStatusChange(targets: Shop[]) {
     if (!targets.length) return;
     setStatusChangeShops(targets);
@@ -1927,7 +1956,7 @@ export function ShopsPage() {
     { value: 'city_asc', label: 'City (A–Z)' },
     { value: 'status_asc', label: 'Status' },
   ];
-  const SHOP_STATUS_OPTIONS: Record<string, string> = { pending:'Pending', assigned:'Assigned', survey_started:'Survey Started', surveyed:'Surveyed', approval_pending:'Survey Approval Pending', approved:'Survey Approved', design_pending:'Design Pending', designing:'Designing', design_ready:'Design Ready', in_review:'Design Review', design_approved:'Design Approved', production_pending:'Production Pending', in_production:'In Production', production_ready:'Production Ready', production_hold:'Production Hold', production_done:'Production Done', dispatched:'Dispatched', installation_pending:'Installation Pending', installing:'Installing', installation_review:'Installation Review', installed:'Installed', billed:'Billed', cancelled:'Cancelled' };
+  const SHOP_STATUS_OPTIONS: Record<string, string> = { pending:'Pending', assigned:'Assigned', survey_started:'Survey Started', surveyed:'Surveyed', approval_pending:'Survey Approval Pending', approved:'Survey Approved', design_pending:'Design Pending', designing:'Designing', design_ready:'Design Ready', in_review:'Design Review', design_approved:'Design Approved', production_pending:'Production Pending', in_production:'In Production', production_ready:'Production Ready', production_hold:'Production Hold', production_done:'Production Done', dispatched:'Dispatched', installation_pending:'Installation Pending', installing:'Installing', installation_review:'Installation Review', installed:'Installed', billed:'Billed', rejected:'Rejected', cancelled:'Cancelled' };
 
   return (
     <div>
@@ -2015,6 +2044,7 @@ export function ShopsPage() {
             >
               <UserPlus className="w-3.5 h-3.5" /> Bulk Assign
             </button>
+            {canBulkRemove && <button onClick={() => { setRejectReason(''); setRejectTargets(filteredShops.filter((shop) => selectedShopIds.has(shop.id) && shop.status !== 'rejected')); }} disabled={!Array.from(selectedShopIds).some((id) => filteredShops.some((shop) => shop.id === id && shop.status !== 'rejected'))} className="flex items-center gap-1.5 bg-red-600 text-white px-3 py-1.5 rounded-lg text-xs disabled:opacity-50"><XCircle className="w-3.5 h-3.5"/> Reject Selected</button>}
             {canBulkRemove && (
               <button
                 onClick={() => setBulkRemoveConfirmOpen(true)}
@@ -2178,6 +2208,7 @@ export function ShopsPage() {
                           <p className="text-xs text-slate-500 truncate">{shop.clients?.name || 'No client'}</p>
                         </Link>
                       )}
+                      {shop.status === 'rejected' && <div className="mt-1 rounded bg-red-50 p-1.5 text-xs text-red-700 space-y-0.5"><p><b>Rejected:</b> {shop.rejected_reason || 'Reason unavailable'}</p><p>By: {(shop as Shop & { rejected_profile?: {full_name?: string} }).rejected_profile?.full_name || shop.rejected_by || 'Unknown'} · {shop.rejected_at ? new Date(shop.rejected_at).toLocaleString('en-IN') : 'Date unavailable'}</p></div>}
                       {shop.purchase_orders?.po_number && (
                         <span className="inline-flex items-center gap-1 mt-1 text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
                           <FileText className="w-3 h-3" /> {shop.purchase_orders.po_number}
@@ -2224,6 +2255,7 @@ export function ShopsPage() {
                         <Link to={`/shops/${shop.id}`} onClick={(e) => e.stopPropagation()} className="text-slate-400 hover:text-blue-600" title="View details">
                           <ChevronRight className="w-4 h-4" />
                         </Link>
+                        {!selectMode && canBulkRemove && shop.status !== 'rejected' && <button onClick={(e) => { e.stopPropagation(); setRejectReason(''); setRejectTargets([shop]); }} className="text-red-600 hover:text-red-800 text-xs font-semibold" title="Reject this shop">Reject</button>}
                         {!selectMode && (
                           <>
                             <button onClick={(e) => { e.stopPropagation(); openEdit(shop); }} className="text-slate-400 hover:text-blue-600" title="Edit">
@@ -2435,6 +2467,15 @@ export function ShopsPage() {
         </div>
       </Modal>
 
+      <Modal open={!!rejectTargets} onClose={() => { setRejectTargets(null); setRejectReason(''); }} title={`Reject ${rejectTargets?.length || 0} Shop(s)`} size="md">
+        <div className="space-y-3">
+          <p className="text-xs text-red-700">Final rejection, not redo. Rejected shops remain in a separate filter and are not returned to survey/installation queues.</p>
+          <div className="max-h-40 overflow-y-auto text-xs bg-slate-50 rounded p-2 space-y-1">{(rejectTargets || []).map((shop) => <p key={shop.id}>{shop.name} · Work Order: {shop.purchase_orders?.po_number || 'Not linked'}</p>)}</div>
+          <Textarea label="Rejection reason (required)" value={rejectReason} onChange={setRejectReason} rows={3}/>
+          {rejectShopsMutation.isError && <p className="text-xs text-red-700">{(rejectShopsMutation.error as Error).message}</p>}
+          <button type="button" disabled={!rejectReason.trim() || rejectShopsMutation.isPending} onClick={() => rejectShopsMutation.mutate()} className="w-full py-2.5 rounded-lg bg-red-600 text-white font-medium disabled:opacity-50">{rejectShopsMutation.isPending ? 'Rejecting...' : 'Confirm Rejection'}</button>
+        </div>
+      </Modal>
       <Modal open={bulkAssignOpen} onClose={() => setBulkAssignOpen(false)} title="Bulk Assign">
         <div className="space-y-4">
           <p className="text-sm text-slate-600">

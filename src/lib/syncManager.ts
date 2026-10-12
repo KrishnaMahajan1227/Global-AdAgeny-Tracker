@@ -71,6 +71,8 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
           storage_path: path,
           photo_url: urlData.publicUrl,
           photo_type: 'survey',
+          capture_lat: photo.captureLat ?? null, capture_lng: photo.captureLng ?? null,
+          capture_accuracy: photo.captureAccuracy ?? null, captured_at: photo.capturedAt ?? null,
         })
         .select()
         .single();

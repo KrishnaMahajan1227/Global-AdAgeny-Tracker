@@ -85,7 +85,9 @@ async function applySurveyDecision(params: {
     return;
   }
   if (decision === 'reject') {
-    await reviewApply({ stage: 'survey', shopId: survey.shop_id, refId: survey.id, decision: 'redo', note });
+    if (!note.trim()) throw new Error('Final rejection requires a reason.');
+    const { error } = await supabase.rpc('reject_survey_shop_final', { p_survey_id: survey.id, p_reason: note.trim() });
+    if (error) throw new Error(error.message);
     return;
   }
   const selected = Object.values(correctionTargets || {});
@@ -771,7 +773,7 @@ export default function SurveyReviewPage() {
                 Reject
               </button>
               <span className="text-slate-400">
-                {bulkAction === 'correction' ? '— surveyor can fix and resubmit the same shop' : '— sends it back to be resurveyed from scratch'}
+                {bulkAction === 'correction' ? '— surveyor can fix and resubmit the same shop' : '— final rejection; shop will not return to the surveyor queue'}
               </span>
             </div>
           )}
@@ -1041,6 +1043,10 @@ function ReviewMarkedPhotos({ surveyId }: { surveyId: string }) {
         Survey Photos{photos && photos.length > 0 ? ` (${photos.length})` : ''}
       </p>
       <MarkedPhotoGrid photos={photos || []} markings={markings || []} workItems={workItems || []} />
+      {(photos || []).map((photo, index) => {
+        const proof = photo as SurveyPhoto & { capture_lat?: number | null; capture_lng?: number | null; capture_accuracy?: number | null; captured_at?: string | null };
+        return <p key={photo.id} className="text-xs text-slate-500">Photo {index + 1} · Captured {proof.captured_at ? new Date(proof.captured_at).toLocaleString('en-IN') : 'time unavailable'} · Device GPS: {proof.capture_lat != null && proof.capture_lng != null ? `${proof.capture_lat.toFixed(5)}, ${proof.capture_lng.toFixed(5)} (±${Math.round(proof.capture_accuracy || 0)}m)` : 'unavailable'}</p>;
+      })}
     </div>
   );
 }

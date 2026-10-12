@@ -14,6 +14,7 @@ import { computeImageHash, hammingDistance, DUPLICATE_HASH_THRESHOLD } from '@/l
 import { haversineDistanceMeters, GPS_DISTANCE_FLAG_METERS } from '@/lib/geoDistance';
 import { reverseGeocode } from '@/lib/geocode';
 import { stampGeoTag, ensureLandscape } from '@/lib/geoStamp';
+import { capturePhotoLocation } from '@/lib/captureLocation';
 import { computePOVariance } from '@/lib/poVariance';
 import type { SurveyPhoto, BoardMarking, WorkItem, POWorkContext, POLineItemWorkContext } from '@/lib/types';
 import {
@@ -688,15 +689,17 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     // just a lat/lng column that only some screens bother to read.
     // Falls back to the plain photo if stamping fails for any reason —
     // never blocks a real installation photo from uploading.
+    const photoGps = await capturePhotoLocation(gps);
+    if (photoGps) { setGps(photoGps); setGpsStatus('captured'); }
     let uploadDataUrl = dataUrl;
     try {
       uploadDataUrl = await ensureLandscape(dataUrl);
       uploadDataUrl = await stampGeoTag(uploadDataUrl, {
         siteName: shop?.name,
         addressLine: [shop?.address, shop?.city, shop?.state].filter(Boolean).join(', ') || null,
-        lat: shop?.latitude ?? null,
-        lng: shop?.longitude ?? null,
-        accuracy: null,
+        lat: photoGps?.lat ?? null,
+        lng: photoGps?.lng ?? null,
+        accuracy: photoGps?.accuracy ?? null,
       });
     } catch (stampErr) {
       console.error('[handlePhotoCaptured] geo-tag stamp failed (non-fatal, uploading unstamped):', stampErr);
@@ -758,9 +761,9 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       phash,
       duplicate_flag: duplicateFlag,
       duplicate_of: duplicateOf,
-      gps_lat: gps?.lat || null,
-      gps_lng: gps?.lng || null,
-      gps_accuracy: gps?.accuracy || null,
+      gps_lat: photoGps?.lat ?? null,
+      gps_lng: photoGps?.lng ?? null,
+      gps_accuracy: photoGps?.accuracy ?? null,
     };
     let insertResult = await supabase.from('installation_proofs').insert(proofPayload).select('id').single();
     // Compatibility with deployments where the work_item_id migration has not
@@ -1781,14 +1784,16 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
       // Same geo-tag stamp as the normal Installation Wizard — the site
       // name and address the ground crew themselves just typed in, plus
       // GPS + timestamp, burned onto the photo itself.
+      const photoGps = await capturePhotoLocation(gps);
+      if (photoGps) { setGps(photoGps); setGpsStatus('captured'); }
       let uploadDataUrl = dataUrl;
       try {
         uploadDataUrl = await stampGeoTag(dataUrl, {
           siteName: shopName || siteName,
           addressLine: [address, city, state].filter(Boolean).join(', ') || null,
-          lat: gps?.lat ?? null,
-          lng: gps?.lng ?? null,
-          accuracy: gps?.accuracy ?? null,
+          lat: photoGps?.lat ?? null,
+          lng: photoGps?.lng ?? null,
+          accuracy: photoGps?.accuracy ?? null,
         });
       } catch (stampErr) {
         console.error('[DirectInstallWizard] geo-tag stamp failed (non-fatal, uploading unstamped):', stampErr);
@@ -1810,9 +1815,9 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
         photo_url: urlData.publicUrl,
         photo_type: 'installed',
         angle,
-        gps_lat: gps?.lat ?? null,
-        gps_lng: gps?.lng ?? null,
-        gps_accuracy: gps?.accuracy ?? null,
+        gps_lat: photoGps?.lat ?? null,
+        gps_lng: photoGps?.lng ?? null,
+        gps_accuracy: photoGps?.accuracy ?? null,
       });
       if (insertError) { alert('Could not save the photo record: ' + insertError.message); return; }
 

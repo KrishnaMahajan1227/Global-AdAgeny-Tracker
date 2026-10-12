@@ -13,6 +13,8 @@ import {
 import { syncAllPendingDrafts, syncDraft } from '@/lib/syncManager';
 import { SurveyCorrectionFixer } from '@/components/SurveyCorrectionFixer';
 import { CameraCapture } from '@/components/CameraCapture';
+import { stampGeoTag } from '@/lib/geoStamp';
+import { capturePhotoLocation } from '@/lib/captureLocation';
 import { VoiceMicButton, VoiceSizeButton } from '@/components/VoiceMicButton';
 import { BoardMarkerCanvas } from '@/components/BoardMarkerCanvas';
 import { fillMissingShopCoordinates, buildAddressQuery } from '@/lib/geocode';
@@ -746,6 +748,9 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   // change needed for this sum). Excludes this shop so a redo/correction
   // survey doesn't double-count its own earlier attempt.
   const lineItemIds = (poLineItemsForShop || []).map((li) => li.id);
+  const allowedWorkTypes = shop?.purchase_order_id
+    ? (workTypes || []).filter((wt) => poLineItemsForShop?.some((li) => li.work_type_id === wt.id))
+    : (workTypes || []);
   const { data: elsewhereSums } = useQuery({
     queryKey: ['survey-po-elsewhere', shopId, lineItemIds.join(',')],
     queryFn: async () => {
@@ -937,7 +942,16 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   // (see currentPhotoLocalId) — so marking a board happens right after
   // taking its photo, not as a separate step the surveyor has to remember
   // to come back and do for every photo.
-  function handlePhotoCaptured(dataUrl: string, fileName: string) {
+  async function handlePhotoCaptured(dataUrl: string, fileName: string) {
+    const photoGps = await capturePhotoLocation(gps);
+    if (photoGps) { setGps(photoGps); setGpsStatus('captured'); }
+    try {
+      dataUrl = await stampGeoTag(dataUrl, {
+        siteName: shop?.name,
+        addressLine: [shop?.address, shop?.city, shop?.state].filter(Boolean).join(', '),
+        lat: photoGps?.lat ?? null, lng: photoGps?.lng ?? null, accuracy: photoGps?.accuracy ?? null,
+      });
+    } catch (err) { console.warn('Survey photo stamping failed', err); }
     const draftPhoto: DraftPhoto = {
       localId: newLocalId(),
       dataUrl,
@@ -946,11 +960,13 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       uploaded: false,
     };
     const nextPhotos = [...photos, draftPhoto];
-    const nextWorkItems = [...workItems, { ...BLANK_WORK_ITEM, photoLocalId: draftPhoto.localId, points: [] }];
+    const singlePO = shop?.purchase_order_id && poLineItemsForShop?.length === 1 ? poLineItemsForShop[0] : null;
+    const defaultWt = !shop?.purchase_order_id && allowedWorkTypes.length === 1 ? allowedWorkTypes[0] : null;
+    const nextWorkItems = [...workItems, { ...BLANK_WORK_ITEM, photoLocalId: draftPhoto.localId, points: [], ...(singlePO ? { work_type_id: singlePO.work_type_id || '', work_type_name: singlePO.description, po_line_item_id: singlePO.id } : defaultWt ? { work_type_id: defaultWt.id, work_type_name: defaultWt.name, po_line_item_id: null } : {}) }];
     setPhotos(nextPhotos);
     setWorkItems(nextWorkItems);
     setCurrentPhotoLocalId(draftPhoto.localId);
-    persistDraft({ photos: nextPhotos, workItems: nextWorkItems });
+    persistDraft({ photos: nextPhotos, workItems: nextWorkItems, gps: photoGps, gpsStatus: photoGps ? 'captured' : gpsStatus });
   }
 
   // Adds another board (a fresh, independent set of corner points +
@@ -959,7 +975,9 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   // separate signboards visible in one shot.
   function addBoardToCurrentPhoto() {
     if (!currentPhotoLocalId) return;
-    setWorkItems([...workItems, { ...BLANK_WORK_ITEM, photoLocalId: currentPhotoLocalId, points: [] }]);
+    const singlePO = shop?.purchase_order_id && poLineItemsForShop?.length === 1 ? poLineItemsForShop[0] : null;
+    const defaultWt = !shop?.purchase_order_id && allowedWorkTypes.length === 1 ? allowedWorkTypes[0] : null;
+    setWorkItems([...workItems, { ...BLANK_WORK_ITEM, photoLocalId: currentPhotoLocalId, points: [], ...(singlePO ? { work_type_id: singlePO.work_type_id || '', work_type_name: singlePO.description, po_line_item_id: singlePO.id } : defaultWt ? { work_type_id: defaultWt.id, work_type_name: defaultWt.name, po_line_item_id: null } : {}) }]);
   }
 
   function removeBoard(idx: number) {
@@ -982,6 +1000,11 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       return;
     }
 
+    if (shop.purchase_order_id && (!poLineItemsForShop || poLineItemsForShop.length === 0 || workItems.some((item) => !item.po_line_item_id || !poLineItemsForShop.some((li) => li.id === item.po_line_item_id)))) {
+      setSubmitError('Every board must use a work type from this PO / Work Order. Check the line items before submitting.');
+      setStep(3);
+      return;
+    }
     setSubmitting(true);
     setSubmitError(null);
 
@@ -1118,7 +1141,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
     );
   }
 
-  const steps = ['Shop', 'Photos & Boards', 'Review', 'Submit'];
+  const steps = ['Shop', 'Capture & Mark', 'Review & Submit'];
 
   return (
     <div className="min-h-screen bg-slate-50 pb-24 max-w-md mx-auto">
@@ -1131,8 +1154,8 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       <div className="bg-white border-b border-slate-200 sticky top-0 z-30">
         <div className="flex items-center justify-between p-4">
           <button onClick={() => onExit()} className="text-sm text-slate-500">Cancel</button>
-          <p className="font-semibold text-slate-900">Step {step} of 4</p>
-          <span className="text-xs text-slate-400">{steps[step - 1]}</span>
+          <p className="font-semibold text-slate-900">{step === 1 ? 'Shop' : step === 2 ? 'Capture & Mark' : 'Review & Submit'}</p>
+          <span className="text-xs text-slate-400">{photos.length} photos</span>
         </div>
         {/* §9.3 — "Shop N of M today" so the surveyor always knows how much
             is left in their day, doubling as their own Work Ledger view. */}
@@ -1140,7 +1163,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
           <p className="px-4 pb-1 text-xs text-blue-600 font-medium">Shop {queuePosition + 1} of {queueTotal} today</p>
         )}
         <div className="flex px-4 pb-3 gap-1">
-          {[1, 2, 3, 4].map((s) => (
+          {[1, 2, 3].map((s) => (
             <div key={s} className={`h-1.5 flex-1 rounded-full ${s <= step ? 'bg-blue-600' : 'bg-slate-200'}`} />
           ))}
         </div>
@@ -1335,23 +1358,31 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                           <div>
                             <label className="block text-sm font-medium text-slate-700 mb-1.5">Work Type</label>
                             <div className="grid grid-cols-3 gap-2">
-                              {(workTypes || []).map((wt) => {
-                                const WtIcon = iconForWorkType(wt.name);
-                                const selected = item.work_type_id === wt.id;
+                              {(shop?.purchase_order_id ? (poLineItemsForShop || []).map((li) => ({
+                                id: li.id, typeId: li.work_type_id || '',
+                                name: li.description || workTypes?.find((wt) => wt.id === li.work_type_id)?.name || 'PO line item',
+                                lineItemId: li.id,
+                              })) : (workTypes || []).map((wt) => ({
+                                id: wt.id, typeId: wt.id, name: wt.name, lineItemId: null,
+                              }))).map((option) => {
+                                const WtIcon = iconForWorkType(option.name);
+                                const selected = shop?.purchase_order_id
+                                  ? item.po_line_item_id === option.lineItemId
+                                  : item.work_type_id === option.typeId;
                                 return (
                                   <button
-                                    key={wt.id}
+                                    key={option.id}
                                     type="button"
-                                    onClick={() => {
-                                      const matchedLineItem = findLineItemForWorkType(poLineItemsForShop || [], wt.id);
-                                      setWorkItems(workItems.map((w, i) => i === idx ? { ...w, work_type_id: wt.id, work_type_name: wt.name, po_line_item_id: matchedLineItem?.id || null } : w));
-                                    }}
+                                    onClick={() => setWorkItems(workItems.map((w, i) => i === idx ? {
+                                      ...w, work_type_id: option.typeId, work_type_name: option.name,
+                                      po_line_item_id: option.lineItemId,
+                                    } : w))}
                                     className={`flex flex-col items-center justify-center gap-1 py-3 rounded-xl border-2 text-center ${
                                       selected ? 'bg-blue-50 border-blue-500 text-blue-700' : 'bg-slate-50 border-slate-200 text-slate-600'
                                     }`}
                                   >
                                     <WtIcon className="w-5 h-5" />
-                                    <span className="text-[11px] font-medium leading-tight px-1">{wt.name}</span>
+                                    <span className="text-[11px] font-medium leading-tight px-1">{option.name}</span>
                                   </button>
                                 );
                               })}
@@ -1518,6 +1549,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                 </Card>
               )}
 
+              {submitError && <p className="text-sm text-red-700 bg-red-50 p-3 rounded-lg">{submitError}</p>}
               <p className="text-xs text-slate-400">Check each photo below — tap Edit if anything looks wrong.</p>
 
               {photos.map((p, i) => {
@@ -1566,8 +1598,8 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                 <button onClick={() => setStep(2)} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
                   <ChevronLeft className="w-4 h-4" /> Back
                 </button>
-                <button onClick={() => setStep(4)} className="bg-slate-900 text-white font-medium py-3 rounded-lg flex-1">
-                  Continue to Submit
+                <button onClick={submitSurvey} disabled={submitting || photos.length === 0 || workItems.length === 0} className="bg-green-600 text-white font-medium py-3 rounded-lg flex-1 disabled:opacity-50">
+                  {submitting ? 'Submitting…' : isOnline ? 'Submit Survey' : 'Save Offline'}
                 </button>
               </div>
             </div>

@@ -1,3 +1,4 @@
+import { fetchAllPages } from '@/lib/paginatedQuery';
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
@@ -130,7 +131,7 @@ export default function ReportsPage() {
   const { data: clients } = useQuery({
     queryKey: ['clients', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('clients').select('id, name').eq('organization_id', orgId).eq('is_active', true).order('name');
+      const data = await fetchAllPages<any>((a, b) => supabase.from('clients').select('id, name').eq('organization_id', orgId!).eq('is_active', true).order('id').range(a, b));
       return data as Client[];
     },
     enabled: !!orgId,
@@ -139,7 +140,7 @@ export default function ReportsPage() {
   const { data: campaigns } = useQuery({
     queryKey: ['projects-reports', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('projects').select('id, name, client_id').eq('organization_id', orgId).order('name');
+      const data = await fetchAllPages<any>((a, b) => supabase.from('projects').select('id, name, client_id').eq('organization_id', orgId!).order('id').range(a, b));
       return data as { id: string; name: string; client_id: string }[];
     },
     enabled: !!orgId,
@@ -148,7 +149,7 @@ export default function ReportsPage() {
   const { data: purchaseOrders } = useQuery({
     queryKey: ['purchase-orders-reports', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('purchase_orders').select('id, po_number, client_id, project_id').eq('organization_id', orgId).order('po_number');
+      const data = await fetchAllPages<any>((a, b) => supabase.from('purchase_orders').select('id, po_number, client_id, project_id').eq('organization_id', orgId!).order('id').range(a, b));
       return data as { id: string; po_number: string; client_id: string; project_id: string | null }[];
     },
     enabled: !!orgId,
@@ -161,8 +162,7 @@ export default function ReportsPage() {
       if (selectedClient) q = q.eq('client_id', selectedClient);
       if (selectedCampaign) q = q.eq('project_id', selectedCampaign);
       if (selectedPO) q = q.eq('purchase_order_id', selectedPO);
-      const { data } = await q.order('name');
-      return data || [];
+      return fetchAllPages<any>((a, b) => q.order('id').range(a, b));
     },
     enabled: !!orgId,
   });
@@ -170,8 +170,8 @@ export default function ReportsPage() {
   const { data: workItems } = useQuery({
     queryKey: ['work-items-reports', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('work_items').select('*').eq('organization_id', orgId);
-      return data || [];
+      const data = await fetchAllPages<any>((a, b) => supabase.from('work_items').select('*').eq('organization_id', orgId!).order('id').range(a, b));
+      return data;
     },
     enabled: !!orgId,
   });
@@ -181,9 +181,7 @@ export default function ReportsPage() {
     queryFn: async () => {
       // `surveys` has two FKs into `profiles` (surveyor_id, reviewed_by) — a
       // plain `profiles(full_name)` embed is ambiguous and errors out.
-      const { data, error } = await supabase.from('surveys').select('*, profiles:surveyor_id(full_name)').eq('organization_id', orgId);
-      if (error) throw new Error(`Could not load surveys: ${error.message}`);
-      return data || [];
+      return fetchAllPages<any>((a, b) => supabase.from('surveys').select('*, profiles:surveyor_id(full_name)').eq('organization_id', orgId!).order('id').range(a, b));
     },
     enabled: !!orgId,
   });
@@ -191,8 +189,8 @@ export default function ReportsPage() {
   const { data: surveyPhotos } = useQuery({
     queryKey: ['survey-photos-reports', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('survey_photos').select('*').eq('organization_id', orgId);
-      return data || [];
+      const data = await fetchAllPages<any>((a, b) => supabase.from('survey_photos').select('*').eq('organization_id', orgId!).order('id').range(a, b));
+      return data;
     },
     enabled: !!orgId,
   });
@@ -212,8 +210,8 @@ export default function ReportsPage() {
   const { data: boardMarkings } = useQuery({
     queryKey: ['board-markings-reports', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('board_markings').select('*').eq('organization_id', orgId);
-      return data || [];
+      const data = await fetchAllPages<any>((a, b) => supabase.from('board_markings').select('*').eq('organization_id', orgId!).order('id').range(a, b));
+      return data;
     },
     enabled: !!orgId,
   });
@@ -222,9 +220,7 @@ export default function ReportsPage() {
     queryKey: ['installations-reports', orgId],
     queryFn: async () => {
       // `installation_jobs` has two FKs into `profiles` — same ambiguous-embed issue as surveys.
-      const { data, error } = await supabase.from('installation_jobs').select('*, profiles:installer_id(full_name), installation_proofs(*)').eq('organization_id', orgId);
-      if (error) throw new Error(`Could not load installations: ${error.message}`);
-      return data || [];
+      return fetchAllPages<any>((a, b) => supabase.from('installation_jobs').select('*, profiles:installer_id(full_name), installation_proofs(*)').eq('organization_id', orgId!).order('id').range(a, b));
     },
     enabled: !!orgId,
   });
@@ -243,8 +239,8 @@ export default function ReportsPage() {
   const { data: designVersions } = useQuery({
     queryKey: ['design-versions-reports', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('design_versions').select('*').eq('organization_id', orgId);
-      return (data || []) as DesignVersion[];
+      const data = await fetchAllPages<any>((a, b) => supabase.from('design_versions').select('*').eq('organization_id', orgId!).order('id').range(a, b));
+      return data;
     },
     enabled: !!orgId,
   });
@@ -252,8 +248,8 @@ export default function ReportsPage() {
   const { data: designVersionItems } = useQuery({
     queryKey: ['design-version-items-reports', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('design_version_items').select('*').eq('organization_id', orgId);
-      return (data || []) as DesignVersionItem[];
+      const data = await fetchAllPages<any>((a, b) => supabase.from('design_version_items').select('*').eq('organization_id', orgId!).order('id').range(a, b));
+      return data;
     },
     enabled: !!orgId,
   });
@@ -263,9 +259,7 @@ export default function ReportsPage() {
     queryFn: async () => {
       let q = supabase.from('v_po_line_item_utilization').select('*');
       if (selectedClient) q = q.eq('client_id', selectedClient);
-      const { data, error } = await q.order('po_date', { ascending: false });
-      if (error) throw error;
-      return data as POLineItemUtilization[];
+      return fetchAllPages<POLineItemUtilization>((a, b) => q.order('po_date', { ascending: false }).range(a, b));
     },
     enabled: !!orgId,
   });

@@ -1,3 +1,4 @@
+import { fetchAllPages, validCoordinates } from '@/lib/paginatedQuery';
 import { useEffect, useState, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
@@ -54,11 +55,11 @@ export default function FieldMapPage() {
     .sort((a, b) => (b.assigned_open || 0) - (a.assigned_open || 0))
     .slice(0, 5);
 
-  const { data: shopList } = useQuery({
+  const { data: shopList, error: shopsError } = useQuery({
     queryKey: ['map-shops', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('shops').select('id, name, latitude, longitude, status, city').eq('organization_id', orgId).not('latitude', 'is', null);
-      return data;
+      const rows = await fetchAllPages<any>((a, b) => supabase.from('shops').select('id, name, latitude, longitude, status, city').eq('organization_id', orgId!).not('latitude', 'is', null).order('id').range(a, b));
+      return rows.filter((s) => validCoordinates(s.latitude, s.longitude));
     },
     enabled: !!orgId,
   });
@@ -71,14 +72,14 @@ export default function FieldMapPage() {
     queryKey: ['field-map-routes', orgId],
     queryFn: async () => {
       const today = new Date().toISOString().split('T')[0];
-      const { data } = await supabase
+      const data = await fetchAllPages<any>((a, b) => supabase
         .from('routes')
         .select('id, name, status, origin_lat, origin_lng, profiles:user_id(full_name), route_stops(stop_order, status, shops(name, latitude, longitude))')
         .eq('organization_id', orgId)
         .eq('route_date', today)
         .in('status', ['planned', 'active'])
-        .not('user_id', 'is', null);
-      return data || [];
+        .not('user_id', 'is', null).order('id').range(a, b));
+      return data;
     },
     enabled: !!orgId,
   });
@@ -192,7 +193,7 @@ export default function FieldMapPage() {
     });
 
     // Shop markers
-    (shopList || []).forEach((s) => {
+    (shopList || []).filter((s) => validCoordinates(s.latitude, s.longitude)).forEach((s) => {
       const colors: Record<string, string> = {
         pending: '#94a3b8', assigned: '#3b82f6', surveyed: '#06b6d4',
         approved: '#16a34a', installed: '#059669', billed: '#22c55e',
@@ -216,7 +217,7 @@ export default function FieldMapPage() {
       todaysRoutes.forEach(async (route: any, idx: number) => {
         const stops = (route.route_stops || [])
           .sort((a: any, b: any) => a.stop_order - b.stop_order)
-          .filter((s: any) => s.shops?.latitude != null)
+          .filter((s: any) => validCoordinates(s.shops?.latitude, s.shops?.longitude))
           .map((s: any) => ({ id: s.stop_order, name: s.shops.name, lat: s.shops.latitude, lng: s.shops.longitude }));
         if (stops.length === 0) return;
         const origin = route.origin_lat != null
@@ -247,6 +248,7 @@ export default function FieldMapPage() {
 
   return (
     <div>
+      {shopsError && <p role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Unable to load shop locations: {(shopsError as Error).message}</p>}
       <PageHeader
         title="Live Field Map"
         subtitle="Real-time worker locations, shop coverage, and today's planned routes"

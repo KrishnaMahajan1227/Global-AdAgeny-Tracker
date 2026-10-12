@@ -1,3 +1,4 @@
+import { fetchAllPages, validCoordinates } from '@/lib/paginatedQuery';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
@@ -98,15 +99,14 @@ export default function RoutePlanningPage() {
   const { data: candidates, isLoading: candidatesLoading } = useQuery({
     queryKey: ['route-planning-candidates', orgId, workerId],
     queryFn: async () => {
-      const { data, error: qErr } = await supabase
+      const data = await fetchAllPages<any>((a, b) => supabase
         .from('shop_assignments')
         .select('id, status, shops(id, name, latitude, longitude, city, zone_id, status)')
-        .eq('organization_id', orgId)
+        .eq('organization_id', orgId!)
         .eq('user_id', workerId)
-        .not('status', 'in', '("completed","declined")');
-      if (qErr) throw qErr;
+        .not('status', 'in', '("completed","declined")').order('id').range(a, b));
       return (data || [])
-        .filter((a: any) => a.shops && a.shops.latitude != null && a.shops.longitude != null)
+        .filter((a: any) => a.shops && validCoordinates(a.shops.latitude, a.shops.longitude) && !['rejected', 'cancelled'].includes(a.shops.status))
         .map((a: any) => ({
           id: a.shops.id, name: a.shops.name, latitude: a.shops.latitude, longitude: a.shops.longitude,
           city: a.shops.city, zone_id: a.shops.zone_id, status: a.shops.status,
@@ -140,14 +140,14 @@ export default function RoutePlanningPage() {
   const { data: existingRoutes } = useQuery({
     queryKey: ['route-planning-existing', orgId, workerId, routeDate],
     queryFn: async () => {
-      const { data } = await supabase
+      const data = await fetchAllPages<any>((a, b) => supabase
         .from('routes')
         .select('*, profiles:user_id(full_name), route_stops(id, shop_id, stop_order, status, leg_distance_meters, leg_duration_seconds, shops(name, latitude, longitude, city))')
         .eq('organization_id', orgId)
         .eq('route_date', routeDate)
         .not('user_id', 'is', null)
-        .order('created_at', { ascending: false });
-      return data || [];
+        .order('created_at', { ascending: false }).range(a, b));
+      return data;
     },
     enabled: !!orgId && !!routeDate,
   });
@@ -164,7 +164,7 @@ export default function RoutePlanningPage() {
   // it changes, unless the admin has switched to manual address mode.
   useEffect(() => {
     if (originMode !== 'live') return;
-    if (latestLocation) {
+    if (latestLocation && validCoordinates(latestLocation.latitude, latestLocation.longitude)) {
       const ageMs = Date.now() - new Date(latestLocation.recorded_at).getTime();
       const stale = ageMs > 12 * 60 * 60 * 1000; // 12h
       setResolvedOrigin({

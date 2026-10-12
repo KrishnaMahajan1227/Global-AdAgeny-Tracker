@@ -6,7 +6,7 @@ import { useAuth } from '@/lib/auth';
 import { Card, PageHeader } from '@/components/ui';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 
-type Stage = 'not_started' | 'survey' | 'design' | 'production' | 'installation' | 'install_review' | 'done' | 'cancelled';
+type Stage = 'not_started' | 'survey' | 'design' | 'production' | 'installation' | 'install_review' | 'done' | 'rejected' | 'cancelled';
 const STAGES: { key: Stage; label: string; tone: string }[] = [
   { key: 'not_started', label: 'Survey Pending', tone: 'bg-slate-100 text-slate-700' },
   { key: 'survey', label: 'Survey / Survey review', tone: 'bg-sky-100 text-sky-800' },
@@ -14,9 +14,11 @@ const STAGES: { key: Stage; label: string; tone: string }[] = [
   { key: 'production', label: 'Production', tone: 'bg-orange-100 text-orange-800' },
   { key: 'installation', label: 'Installation Pending', tone: 'bg-amber-100 text-amber-800' },
   { key: 'install_review', label: 'Installation review', tone: 'bg-blue-100 text-blue-800' },
-  { key: 'done', label: 'Complete', tone: 'bg-emerald-100 text-emerald-800' },
+  { key: 'done', label: 'Completed', tone: 'bg-emerald-100 text-emerald-800' },
+  { key: 'rejected', label: 'Rejected', tone: 'bg-rose-100 text-rose-800' },
 ];
 function stageOf(status: string): Stage {
+  if (status === 'rejected') return 'rejected';
   if (['pending', 'assigned'].includes(status)) return 'not_started';
   if (['survey_started', 'surveyed', 'approval_pending', 'approved'].includes(status)) return 'survey';
   if (['design_pending', 'designing', 'design_ready', 'in_review', 'design_approved'].includes(status)) return 'design';
@@ -140,11 +142,12 @@ export default function WorkProgressPage() {
     <div className="space-y-5">
       <PageHeader title="Work Progress" subtitle="Live overview of work completed, pending tasks, blocked sites, and assigned teams." />
 
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-semibold text-slate-800">Operational overview</p><p className="text-xs text-slate-500 mt-1">Portfolio-wide shop completion and installation quantities</p></div><span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">Updated automatically</span></div><div className="mt-4 h-2.5 rounded-full bg-slate-100 overflow-hidden"><div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${totals.pct}%` }} /></div><p className="mt-2 text-xs text-slate-500">{totals.complete.toLocaleString('en-IN')} of {totals.shops.toLocaleString('en-IN')} shops completed ({totals.pct}%)</p></div>
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <Card className="p-4"><p className="text-xs text-slate-500">Total shops</p><p className="text-2xl font-bold text-slate-900">{totals.shops}</p></Card>
         <Card className="p-4"><p className="text-xs text-slate-500">Complete (installed)</p><p className="text-2xl font-bold text-emerald-700">{totals.complete}</p><p className="text-[11px] text-slate-400">{totals.pct}% shops · {totals.shops - totals.complete} pending</p></Card>
         <Card className="p-4"><p className="text-xs text-slate-500">Installed sq.ft</p><p className="text-2xl font-bold text-slate-900">{fmt(totals.done)}</p><p className="text-[11px] text-slate-400">planned {fmt(totals.planned)}</p></Card>
-        <Card className="p-4"><p className="text-xs text-slate-500">Baaki sq.ft</p><p className="text-2xl font-bold text-amber-700">{fmt(totals.remaining)}</p></Card>
+        <Card className="p-4"><p className="text-xs text-slate-500">Remaining area (sq.ft)</p><p className="text-2xl font-bold text-amber-700">{fmt(totals.remaining)}</p></Card>
         <Card className="p-4"><p className="text-xs text-slate-500">Unavailable Items</p><p className="text-2xl font-bold text-slate-700">{totals.unavailableItems}</p><p className="text-[11px] text-slate-400">{fmt(totals.unavailableArea)} sq.ft excluded</p></Card>
       </div>
 
@@ -162,9 +165,9 @@ export default function WorkProgressPage() {
 
       <div className="flex flex-wrap gap-2">
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Shop / city search" className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white" />
-        <select value={clientFilter} onChange={(e) => setClientFilter(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="all">Sab clients</option>{clients.map(([id, n]) => <option key={id} value={id}>{n}</option>)}</select>
-        <select value={personFilter} onChange={(e) => setPersonFilter(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="all">Sab log</option>{people.map((p) => <option key={p.id} value={p.id}>{p.name} ({[...p.roles].join('/')})</option>)}</select>
-        <select value={sort} onChange={(e) => setSort(e.target.value as any)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="remaining">Sort: sabse zyada pending</option><option value="progress">Sort: progress %</option><option value="name">Sort: naam</option></select>
+        <select value={clientFilter} onChange={(e) => setClientFilter(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="all">All clients</option>{clients.map(([id, n]) => <option key={id} value={id}>{n}</option>)}</select>
+        <select value={personFilter} onChange={(e) => setPersonFilter(e.target.value)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="all">All team members</option>{people.map((p) => <option key={p.id} value={p.id}>{p.name} ({[...p.roles].join('/')})</option>)}</select>
+        <select value={sort} onChange={(e) => setSort(e.target.value as any)} className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="remaining">Sort: Highest remaining area</option><option value="progress">Sort: Completion percentage</option><option value="name">Sort: Shop name</option></select>
         {(stageFilter !== 'all' || clientFilter !== 'all' || personFilter !== 'all' || search) && <button onClick={() => { setStageFilter('all'); setClientFilter('all'); setPersonFilter('all'); setSearch(''); }} className="text-sm text-blue-700 font-medium px-2">Clear filters</button>}
       </div>
 
@@ -182,7 +185,7 @@ export default function WorkProgressPage() {
                   <td className="px-3 py-2.5"><p className="font-medium text-slate-900">{r.s.name}</p><p className="text-[11px] text-slate-400">{r.s.clients?.name}{r.s.city ? ` · ${r.s.city}` : ''}</p></td>
                   <td className="px-3 py-2.5"><span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${st?.tone}`}>{st?.label}</span></td>
                   <td className="px-3 py-2.5 text-xs text-slate-700">{r.installedCount}/{r.active.length} installed{r.unavailable.length > 0 && <span className="block text-[11px] text-amber-700">{r.unavailable.length} not available{r.unavailable[0]?.execution_reason ? ` — ${r.unavailable[0].execution_reason}` : ''}</span>}</td>
-                  <td className="px-3 py-2.5 text-xs text-slate-700">{fmt(r.done)} / {fmt(r.planned)}<span className="block text-[11px] text-slate-400">baaki {fmt(r.remaining)}</span></td>
+                  <td className="px-3 py-2.5 text-xs text-slate-700">{fmt(r.done)} / {fmt(r.planned)}<span className="block text-[11px] text-slate-400">Remaining {fmt(r.remaining)}</span></td>
                   <td className="px-3 py-2.5 w-36"><div className="h-2 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full ${r.pct === 100 ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{ width: `${r.pct}%` }} /></div><p className="text-[11px] text-slate-500 mt-0.5">{r.pct}%</p></td>
                   <td className="px-3 py-2.5 text-xs text-slate-600">{r.surveyor || '—'}</td>
                   <td className="px-3 py-2.5 text-xs text-slate-600">{r.installer || '—'}</td>
@@ -195,9 +198,9 @@ export default function WorkProgressPage() {
       </Card>
 
       <Card className="p-0 overflow-x-auto">
-        <p className="px-4 pt-4 pb-2 text-sm font-semibold text-slate-900">Kiska kitna kaam hua</p>
+        <p className="px-4 pt-4 pb-2 text-sm font-semibold text-slate-900">Team performance</p>
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="text-left px-3 py-2.5">Naam</th><th className="text-left px-3 py-2.5">Role</th><th className="text-left px-3 py-2.5">Assigned shops</th><th className="text-left px-3 py-2.5">Complete</th><th className="text-left px-3 py-2.5">Baaki</th><th className="text-left px-3 py-2.5">Installed sq.ft</th></tr></thead>
+          <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="text-left px-3 py-2.5">Team member</th><th className="text-left px-3 py-2.5">Role</th><th className="text-left px-3 py-2.5">Assigned shops</th><th className="text-left px-3 py-2.5">Complete</th><th className="text-left px-3 py-2.5">Pending</th><th className="text-left px-3 py-2.5">Installed sq.ft</th></tr></thead>
           <tbody className="divide-y">
             {perPerson.map((p) => <tr key={p.name + p.role}><td className="px-3 py-2 font-medium text-slate-900">{p.name}</td><td className="px-3 py-2 capitalize text-slate-600">{p.role}</td><td className="px-3 py-2">{p.shops}</td><td className="px-3 py-2 text-emerald-700 font-semibold">{p.complete}</td><td className="px-3 py-2 text-amber-700">{p.pending}</td><td className="px-3 py-2">{p.role === 'installer' ? fmt(p.sqft) : '—'}</td></tr>)}
             {perPerson.length === 0 && <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-400 text-sm">No assignments found.</td></tr>}

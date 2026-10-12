@@ -126,8 +126,8 @@ export default function WorkProgressPage() {
       const key = `${a.user_id}:${a.role}`;
       const e = m.get(key) || { name: a.profiles.full_name, role: a.role, shops: 0, complete: 0, sqft: 0, pending: 0 };
       e.shops += 1;
-      const finished = a.role === 'installer' ? r.stage === 'done' : a.status === 'completed';
-      if (finished) { e.complete += 1; if (a.role === 'installer') e.sqft += r.done; } else e.pending += 1;
+      const finished = a.status === 'completed';
+      if (finished) { e.complete += 1; /* Shop area is not an individual payment entitlement. */ } else e.pending += 1;
       m.set(key, e);
     });
     return [...m.values()].filter((p) => ['surveyor', 'installer', 'designer'].includes(p.role)).sort((a, b) => a.role.localeCompare(b.role) || b.complete - a.complete);
@@ -198,11 +198,11 @@ export default function WorkProgressPage() {
       </Card>
 
       <Card className="p-0 overflow-x-auto">
-        <p className="px-4 pt-4 pb-2 text-sm font-semibold text-slate-900">Team performance</p>
+        <div className="px-4 pt-4 pb-3 border-b border-slate-100"><p className="text-sm font-semibold text-slate-900">Team delivery overview</p><p className="text-xs text-slate-500 mt-1">Assignment status across the current shop selection. For period-wise performance and payment reconciliation, use Owner Console → Team Performance.</p></div>
         <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="text-left px-3 py-2.5">Team member</th><th className="text-left px-3 py-2.5">Role</th><th className="text-left px-3 py-2.5">Assigned shops</th><th className="text-left px-3 py-2.5">Complete</th><th className="text-left px-3 py-2.5">Pending</th><th className="text-left px-3 py-2.5">Installed sq.ft</th></tr></thead>
+          <thead className="bg-slate-50 text-xs text-slate-500"><tr><th className="text-left px-3 py-2.5">Team member</th><th className="text-left px-3 py-2.5">Role</th><th className="text-left px-3 py-2.5">Assigned shops</th><th className="text-left px-3 py-2.5">Complete</th><th className="text-left px-3 py-2.5">Pending</th><th className="text-left px-3 py-2.5">Completion rate</th></tr></thead>
           <tbody className="divide-y">
-            {perPerson.map((p) => <tr key={p.name + p.role}><td className="px-3 py-2 font-medium text-slate-900">{p.name}</td><td className="px-3 py-2 capitalize text-slate-600">{p.role}</td><td className="px-3 py-2">{p.shops}</td><td className="px-3 py-2 text-emerald-700 font-semibold">{p.complete}</td><td className="px-3 py-2 text-amber-700">{p.pending}</td><td className="px-3 py-2">{p.role === 'installer' ? fmt(p.sqft) : '—'}</td></tr>)}
+            {perPerson.map((p) => <tr key={p.name + p.role}><td className="px-3 py-2 font-medium text-slate-900">{p.name}</td><td className="px-3 py-2 capitalize text-slate-600">{p.role}</td><td className="px-3 py-2">{p.shops}</td><td className="px-3 py-2 text-emerald-700 font-semibold">{p.complete}</td><td className="px-3 py-2 text-amber-700">{p.pending}</td><td className="px-3 py-2"><span className="font-medium">{p.shops ? Math.round(p.complete / p.shops * 100) : 0}%</span><div className="mt-1 h-1.5 w-24 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-blue-500" style={{ width: `${p.shops ? Math.round(p.complete / p.shops * 100) : 0}%` }} /></div></td></tr>)}
             {perPerson.length === 0 && <tr><td colSpan={6} className="px-3 py-6 text-center text-slate-400 text-sm">No assignments found.</td></tr>}
           </tbody>
         </table>

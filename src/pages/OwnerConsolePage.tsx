@@ -340,7 +340,7 @@ function TeamWorkloadTab() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
 
-  const { data: rows, isLoading } = useQuery({
+  const { data: rows, isLoading, error: workloadError } = useQuery({
     queryKey: ['team-workload', orgId],
     queryFn: async () => {
       const { data, error } = await supabase.from('v_team_workload').select('*');
@@ -395,7 +395,7 @@ function TeamWorkloadTab() {
 
   return (
     <div>
-      <p className="text-sm text-slate-500 mb-4">Who has how much work, and how much is done — pulled live from Survey/Design/Installation assignments. Refreshes automatically every minute.</p>
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm mb-5"><div className="flex items-center gap-2"><Gauge className="h-5 w-5 text-blue-600" /><h2 className="text-base font-semibold text-slate-900">Team capacity and workload</h2></div><p className="mt-2 text-sm text-slate-600">Current assignments, delivery progress, overdue work and turnaround time, grouped by team member. Data refreshes automatically.</p><p className="mt-2 text-xs text-slate-500">Workload indicates operational capacity; payment eligibility must be checked separately against approved deliverables.</p></div>
 
       {/* Org-wide summary strip — the numbers this tab exists to answer. */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-5">
@@ -446,13 +446,14 @@ function TeamWorkloadTab() {
         </div>
       </div>
 
-      {isLoading && <p className="text-sm text-slate-400">Loading...</p>}
+      {isLoading && <p className="text-sm text-slate-500">Loading team workload…</p>}
+      {workloadError && <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Unable to load team workload: {(workloadError as Error).message}</p>}
 
-      {!isLoading && filteredRows.length === 0 && (
+      {!isLoading && !workloadError && filteredRows.length === 0 && (
         <EmptyState icon={<Gauge className="w-10 h-10" />} title="No active assignments" subtitle="Once shops or boards are assigned to surveyors, designers, or installers, their workload shows up here." />
       )}
 
-      {!isLoading && filteredRows.length > 0 && (
+      {!isLoading && !workloadError && filteredRows.length > 0 && (
         <Card className="overflow-x-auto p-0">
           <table className="w-full text-sm">
             <thead>
@@ -631,6 +632,19 @@ function countBy(rows: Record<string, any>[], key: string): Map<string, number> 
   return map;
 }
 
+/** Fetch every page: default PostgREST response limits must not truncate payroll review data. */
+async function fetchPerformanceRows(build: (from: number, to: number) => any): Promise<Record<string, any>[]> {
+  const output: Record<string, any>[] = [];
+  const batchSize = 500;
+  for (let offset = 0; ; offset += batchSize) {
+    const { data, error } = await build(offset, offset + batchSize - 1);
+    if (error) throw new Error(`Could not load performance data: ${error.message}`);
+    output.push(...(data || []));
+    if (!data || data.length < batchSize) break;
+  }
+  return output;
+}
+
 function TeamPerformanceTab() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
@@ -655,10 +669,11 @@ function TeamPerformanceTab() {
   const rangeLabel = preset === 'custom'
     ? `${formatDate(range.start, 'dd MMM yyyy')} – ${formatDate(range.end, 'dd MMM yyyy')}`
     : PERF_PRESETS.find((p) => p.id === preset)?.label || '';
+  const invalidRange = range.start.getTime() > range.end.getTime();
   const startIso = range.start.toISOString();
   const endIso = range.end.toISOString();
 
-  const { data: people } = useQuery({
+  const { data: people, error: peopleError, isLoading: peopleLoading } = useQuery({
     queryKey: ['perf-people', orgId],
     queryFn: async () => {
       const { data, error } = await supabase
@@ -672,61 +687,49 @@ function TeamPerformanceTab() {
     enabled: !!orgId,
   });
 
-  const { data: counts, isLoading } = useQuery({
+  const { data: counts, isLoading, error: countsError } = useQuery({
     queryKey: ['team-performance', orgId, startIso, endIso],
     queryFn: async () => {
       const [
-        surveysCompletedRes, surveysSentBackRes,
-        installsCompletedRes, installsSentBackRes,
-        designsCompletedRes, designsRejectedRes,
-        productionCompletedRes,
+        surveysCompletedRows, surveysSentBackRows,
+        installsCompletedRows, installsSentBackRows,
+        designsCompletedRows, designsRejectedRows,
+        productionCompletedRows,
       ] = await Promise.all([
-        // Surveyor "completed" = their own assignment closed out — the
-        // same field shop_assignments.completed_at already gets stamped
-        // with when a survey is actually submitted (syncManager.ts).
-        supabase.from('shop_assignments').select('user_id')
+        fetchPerformanceRows((from, to) => supabase.from('shop_assignments').select('user_id')
           .eq('organization_id', orgId).eq('role', 'surveyor').eq('status', 'completed')
-          .gte('completed_at', startIso).lte('completed_at', endIso),
-        // Quality signal: how many of their submissions got sent back,
-        // dated by when the REVIEW happened (not the original submission).
-        supabase.from('surveys').select('surveyor_id')
+          .gte('completed_at', startIso).lte('completed_at', endIso).order('completed_at').order('id').range(from, to)),
+        fetchPerformanceRows((from, to) => supabase.from('surveys').select('surveyor_id')
           .eq('organization_id', orgId).in('status', ['rejected', 'correction_requested'])
-          .gte('reviewed_at', startIso).lte('reviewed_at', endIso),
-        supabase.from('shop_assignments').select('user_id')
+          .gte('reviewed_at', startIso).lte('reviewed_at', endIso).order('reviewed_at').order('id').range(from, to)),
+        fetchPerformanceRows((from, to) => supabase.from('shop_assignments').select('user_id')
           .eq('organization_id', orgId).eq('role', 'installer').eq('status', 'completed')
-          .gte('completed_at', startIso).lte('completed_at', endIso),
-        supabase.from('installation_jobs').select('installer_id')
+          .gte('completed_at', startIso).lte('completed_at', endIso).order('completed_at').order('id').range(from, to)),
+        fetchPerformanceRows((from, to) => supabase.from('installation_jobs').select('installer_id')
           .eq('organization_id', orgId).eq('review_status', 'rejected')
-          .gte('reviewed_at', startIso).lte('reviewed_at', endIso),
-        supabase.from('design_tasks').select('designer_id')
+          .gte('reviewed_at', startIso).lte('reviewed_at', endIso).order('reviewed_at').order('id').range(from, to)),
+        fetchPerformanceRows((from, to) => supabase.from('design_tasks').select('designer_id')
           .eq('organization_id', orgId).eq('status', 'approved').not('designer_id', 'is', null)
-          .gte('completed_at', startIso).lte('completed_at', endIso),
-        supabase.from('design_tasks').select('designer_id')
+          .gte('completed_at', startIso).lte('completed_at', endIso).order('completed_at').order('id').range(from, to)),
+        fetchPerformanceRows((from, to) => supabase.from('design_tasks').select('designer_id')
           .eq('organization_id', orgId).eq('status', 'rejected').not('designer_id', 'is', null)
-          .gte('updated_at', startIso).lte('updated_at', endIso),
-        // Production has no "sent back" concept in this pipeline (no
-        // review/approval gate on production_orders beyond completed) —
-        // only a completed count.
-        supabase.from('production_orders').select('assigned_to')
+          .gte('updated_at', startIso).lte('updated_at', endIso).order('updated_at').order('id').range(from, to)),
+        fetchPerformanceRows((from, to) => supabase.from('production_orders').select('assigned_to')
           .eq('organization_id', orgId).eq('status', 'completed').not('assigned_to', 'is', null)
-          .gte('updated_at', startIso).lte('updated_at', endIso),
+          .gte('updated_at', startIso).lte('updated_at', endIso).order('updated_at').order('id').range(from, to)),
       ]);
 
-      for (const res of [surveysCompletedRes, surveysSentBackRes, installsCompletedRes, installsSentBackRes, designsCompletedRes, designsRejectedRes, productionCompletedRes]) {
-        if (res.error) throw new Error(`Could not load performance data: ${res.error.message}`);
-      }
-
       return {
-        surveysCompleted: countBy(surveysCompletedRes.data || [], 'user_id'),
-        surveysSentBack: countBy(surveysSentBackRes.data || [], 'surveyor_id'),
-        installsCompleted: countBy(installsCompletedRes.data || [], 'user_id'),
-        installsSentBack: countBy(installsSentBackRes.data || [], 'installer_id'),
-        designsCompleted: countBy(designsCompletedRes.data || [], 'designer_id'),
-        designsRejected: countBy(designsRejectedRes.data || [], 'designer_id'),
-        productionCompleted: countBy(productionCompletedRes.data || [], 'assigned_to'),
+        surveysCompleted: countBy(surveysCompletedRows, 'user_id'),
+        surveysSentBack: countBy(surveysSentBackRows, 'surveyor_id'),
+        installsCompleted: countBy(installsCompletedRows, 'user_id'),
+        installsSentBack: countBy(installsSentBackRows, 'installer_id'),
+        designsCompleted: countBy(designsCompletedRows, 'designer_id'),
+        designsRejected: countBy(designsRejectedRows, 'designer_id'),
+        productionCompleted: countBy(productionCompletedRows, 'assigned_to'),
       };
     },
-    enabled: !!orgId,
+    enabled: !!orgId && !invalidRange,
   });
 
   const allRows: TeamPerformanceRow[] = (people || []).map((p) => {
@@ -746,7 +749,8 @@ function TeamPerformanceTab() {
     people: allRows.length,
     totalCompleted: allRows.reduce((sum, r) => sum + r.completed, 0),
     totalSentBack: allRows.reduce((sum, r) => sum + (r.sentBack || 0), 0),
-    topPerformer: allRows.slice().sort((a, b) => b.completed - a.completed)[0] || null,
+    // Cross-role counts are not comparable; don't rank different units of work.
+    withRework: allRows.filter((r) => (r.sentBack || 0) > 0).length,
   };
 
   const filteredRows = allRows
@@ -772,12 +776,13 @@ function TeamPerformanceTab() {
     const data = filteredRows.map((r) => ({
       'Name': r.full_name,
       'Role': ROLE_LABELS[r.role] || r.role,
-      'Completed': r.completed,
+      'Completed (operational)': r.completed,
       'Sent Back / Rejected': r.sentBack ?? '—',
       'Period': rangeLabel,
+      'Payment status': 'Not reconciled — verify approval and rates',
     }));
     const ws = XLSX.utils.json_to_sheet(data);
-    ws['!cols'] = [{ wch: 22 }, { wch: 18 }, { wch: 12 }, { wch: 18 }, { wch: 22 }];
+    ws['!cols'] = [{ wch: 22 }, { wch: 18 }, { wch: 25 }, { wch: 22 }, { wch: 22 }, { wch: 42 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Team Performance');
     const safeLabel = rangeLabel.replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '');
@@ -786,9 +791,13 @@ function TeamPerformanceTab() {
 
   return (
     <div>
-      <p className="text-sm text-slate-500 mb-4">
-        How much work each person actually completed in a period you pick — Weekly, Monthly, Yearly, or any custom date range. "Sent Back / Rejected" is the same-period quality signal: how much of that output needed rework.
-      </p>
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 mb-5 shadow-sm">
+        <div className="flex items-center gap-2 mb-2"><BarChart3 className="h-5 w-5 text-blue-600" /><h2 className="text-base font-semibold text-slate-900">Team delivery and quality</h2></div>
+        <p className="text-sm text-slate-600">Track recorded completions and work returned for correction by role and reporting period. Different job roles are shown separately because their completion units are not equivalent.</p>
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <strong>Payment control:</strong> These are operational counts, not an approved payroll statement. Confirm approved work evidence, PO line items, agreed unit rates, adjustments and any prior payments before releasing a payment.
+        </div>
+      </div>
 
       {/* Date range picker */}
       <Card className="p-4 mb-5">
@@ -828,6 +837,8 @@ function TeamPerformanceTab() {
         </div>
       </Card>
 
+      {invalidRange && <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">The start date must not be later than the end date.</p>}
+      {(peopleError || countsError) && <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Unable to load team performance: {((peopleError || countsError) as Error).message}</p>}
       {/* Org-wide summary strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
         <Card className="p-3.5">
@@ -835,7 +846,7 @@ function TeamPerformanceTab() {
           <p className="text-2xl font-semibold text-slate-900">{summary.people}</p>
         </Card>
         <Card className="p-3.5">
-          <div className="flex items-center gap-2 text-slate-400 mb-1"><Check className="w-3.5 h-3.5" /><span className="text-xs font-medium">Completed</span></div>
+          <div className="flex items-center gap-2 text-slate-400 mb-1"><Check className="w-3.5 h-3.5" /><span className="text-xs font-medium">Recorded completions</span></div>
           <p className="text-2xl font-semibold text-slate-900">{summary.totalCompleted}</p>
         </Card>
         <Card className="p-3.5">
@@ -843,9 +854,9 @@ function TeamPerformanceTab() {
           <p className={`text-2xl font-semibold ${summary.totalSentBack > 0 ? 'text-amber-600' : 'text-slate-900'}`}>{summary.totalSentBack}</p>
         </Card>
         <Card className="p-3.5">
-          <div className="flex items-center gap-2 text-slate-400 mb-1"><TrendingUp className="w-3.5 h-3.5" /><span className="text-xs font-medium">Top performer</span></div>
+          <div className="flex items-center gap-2 text-slate-400 mb-1"><TrendingUp className="w-3.5 h-3.5" /><span className="text-xs font-medium">Members with rework</span></div>
           <p className="text-sm font-semibold text-slate-900 truncate">
-            {summary.topPerformer && summary.topPerformer.completed > 0 ? `${summary.topPerformer.full_name} (${summary.topPerformer.completed})` : '—'}
+            {summary.withRework.toLocaleString('en-IN')}
           </p>
         </Card>
       </div>
@@ -884,13 +895,13 @@ function TeamPerformanceTab() {
         </div>
       </div>
 
-      {isLoading && <p className="text-sm text-slate-400">Loading...</p>}
+      {(isLoading || peopleLoading) && <p className="text-sm text-slate-500">Loading team records…</p>}
 
-      {!isLoading && filteredRows.length === 0 && (
+      {!isLoading && !peopleLoading && !countsError && !peopleError && !invalidRange && filteredRows.length === 0 && (
         <EmptyState icon={<BarChart3 className="w-10 h-10" />} title="No matching team members" subtitle="Try a different period, role, or search term." />
       )}
 
-      {!isLoading && filteredRows.length > 0 && (
+      {!isLoading && !peopleLoading && !countsError && !peopleError && !invalidRange && filteredRows.length > 0 && (
         <Card className="overflow-x-auto p-0">
           <table className="w-full text-sm">
             <thead>
@@ -906,13 +917,13 @@ function TeamPerformanceTab() {
                   onClick={() => toggleSort('completed')}
                   className="text-left px-4 py-3 font-medium text-slate-600 cursor-pointer select-none hover:text-slate-900 whitespace-nowrap"
                 >
-                  Completed {sortKey === 'completed' && <span className="ml-1 text-slate-400">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+                  Recorded completions {sortKey === 'completed' && <span className="ml-1 text-slate-400">{sortDir === 'asc' ? '↑' : '↓'}</span>}
                 </th>
                 <th
                   onClick={() => toggleSort('sentBack')}
                   className="text-left px-4 py-3 font-medium text-slate-600 cursor-pointer select-none hover:text-slate-900 whitespace-nowrap"
                 >
-                  Sent Back / Rejected {sortKey === 'sentBack' && <span className="ml-1 text-slate-400">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+                  Returned for correction {sortKey === 'sentBack' && <span className="ml-1 text-slate-400">{sortDir === 'asc' ? '↑' : '↓'}</span>}
                 </th>
               </tr>
             </thead>

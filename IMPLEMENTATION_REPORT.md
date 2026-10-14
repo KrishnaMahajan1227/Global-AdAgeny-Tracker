@@ -1,39 +1,34 @@
-# Agency Progress Update — 2026-10-14
+# AdRoute — Dashboard correction (14 October 2026)
 
-## Existing flow
-Agency owner/admin -> agency clients (`clients`) -> agency campaigns (`projects`) or client-created campaigns (`campaigns`) -> Work Orders (`purchase_orders`) -> operational team queues (surveyor, designer, printing, installer). The client portal is separate and has client-owned campaigns. These are distinct models and must not be merged or relabeled in the database.
+## Scope and source mapping
+- `src/App.tsx`: existing admin, field and client portal routes; UI-level role guards.
+- `src/components/AdminLayout.tsx`: existing sidebar; no new section added.
+- `src/pages/DashboardPage.tsx`: redesigned in place; no new hierarchy module.
+- `src/pages/ShopsPages.tsx`: existing Clients/Campaigns CRUD and inline detail views retained unchanged in this correction.
+- `src/pages/PurchaseOrdersPage.tsx`: existing Work Orders module retained unchanged.
+- `src/lib/agencyProgress.ts`: shared order progress/date helpers retained.
+- `supabase/migrations`: existing policies; no new migration added.
 
-## Changed files and purposes
-- `src/lib/agencyProgress.ts` — shared completion, order status, date, overdue helpers.
-- `src/pages/DashboardPage.tsx` — progress-first owner dashboard and URL-persisted filters; no monetary widgets.
-- `src/pages/AgencyHierarchyPage.tsx` — client/campaign overview and work-order tables.
-- `src/pages/ShopsPages.tsx` — live progress on client cards, direct client links and agency campaign detail links.
-- `src/components/AdminLayout.tsx` — remove redundant Work Progress nav entry, retain `/progress` route.
-- `src/App.tsx` — guarded client and campaign detail routes.
-- `src/pages/PurchaseOrdersPage.tsx` — deep-link into existing work-order details via `?order=ID`.
+## Updated files
+1. `src/pages/DashboardPage.tsx`: dashboard KPIs, priorities, work-order status overview, short client health list, approaching deadlines and period trend controls. Real data from existing tables; no assignee feature or extra management screens.
+2. `src/App.tsx`: route-level client/campaign role checks; retired duplicate `/progress` destination redirects to existing dashboard.
 
-## Gaps and data limitations
-- `purchase_orders` does not expose an authoritative PO-level due date, priority, assignee or completed timestamp in the inspected schema. Fields are explicitly displayed as unavailable, rather than manufactured. Overdue totals and on-time rating cannot be computed without a migration and authoritative data. Campaign deadlines are separate, tracked at campaign level.
-- Team leaderboard is not fabricated: the app uses role-specific assignment in surveys/design/production/install flows. Those records are not equivalent to one unified Work Order assignee.
-- Client-created campaigns have no agency-owned `client_id`; they can be related to agency clients only through connected orders, rather than assuming an invalid FK.
-- The campaign completion measure is completed Work Orders / total Work Orders; active orders count as 0%, completed orders as 100%, because no authoritative per-PO progress value was present in this model.
-- Work Progress remains routable at `/progress` for old deep links. The requested unnamed sidebar item was interpreted as the duplicate Work Progress link.
+## Important security and data caveats
+- URL access is restricted by the React auth/role guards for protected routes. Strong per-record authorization *depends on the deployed Supabase Row Level Security policies*, which cannot be verified offline. Do not claim that a client can never bypass access until deployed policies are audited and tested using separate accounts.
+- The existing `campaigns` table is cross-organization and visibility relies on existing RLS. Only campaigns linked to agency-visible work orders contribute to the dashboard.
+- Deadline counts use campaign/project end dates because work orders have no reliable per-order due date.
+- Period statistics are grouped by **creation date**, not completion date.
+- No production browser verification or TypeScript build was possible in this environment because the package dependencies were not available and installation failed/timed out.
 
-## Navigation click count
-- Dashboard -> Client: click the client name (1)
-- Client -> Work Order: click the order title in the client's work-order list (2)
-- Optional campaign drilldown: Dashboard -> Client -> Campaign -> Work Order requires 3 clicks, so the client direct link is the 2-click shortcut.
+## Developer validation
+- `npm ci`
+- `npm run typecheck`
+- `npm run lint`
+- `npm run build`
+- `npm run dev`
+- Test dashboard, clients, campaigns and work orders with real records (including >1000 clients), zero records and null dates.
+- Test direct URL entry with agency owner/admin, client manager, designer, printing, client portal and signed-out identities.
+- Verify RLS policies using different organization accounts; never trust a UI redirect as a database security boundary.
+- Check existing create/edit/delete functions and mobile overflow before deploying.
 
-## Manual checks (deployment needed)
-- [ ] Owner/admin: dashboard loads organization-scoped data; progress counts match actual POs.
-- [ ] Team roles: direct URL navigation to owner detail pages redirects; team queues show only assigned items per existing RLS.
-- [ ] Client role: `/client` remains read-only where already enforced; owner detail URLs denied.
-- [ ] Clients with zero campaigns and zero work orders render empty states and 0%.
-- [ ] Clients/campaigns display overdue/date accurately when those data are available; missing values never imply known deadline.
-- [ ] View/range/metric filter changes update without reload and persist in URL after refresh.
-- [ ] Purchase orders create/edit/delete and `?order=ID` details flow.
-- [ ] Tablet/mobile layouts and keyboard selection.
-- [ ] Supabase RLS policies with test users from separate agencies.
-
-## Validation
-Automated TypeScript/build validation was not completed: the ZIP did not include `node_modules`, and `npm ci` was unable to complete in the sandbox. Do not deploy the archive as a pre-tested production build. Install dependencies and run `npm run typecheck` and `npm run build` in an environment with npm registry access.
+No SQL change is included. Preserve your existing `.env` securely (not included in ZIP).

@@ -20,7 +20,6 @@ import ReportsPage from '@/pages/ReportsPage';
 import BillingPage from '@/pages/BillingPage';
 import FieldMapPage from '@/pages/FieldMapPage';
 import RoutePlanningPage from '@/pages/RoutePlanningPage';
-import WorkProgressPage from '@/pages/WorkProgressPage';
 import SurveyorPage from '@/pages/SurveyorPage';
 import InstallerPage from '@/pages/InstallerPage';
 import ClientPortalPage from '@/pages/ClientPortalPage';
@@ -184,11 +183,11 @@ function AppRoutes() {
           <ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'accounts', 'demo']}><DashboardPage /></ProtectedRoute>
         } />
         <Route path="/account" element={<AccountSettingsPage />} />
-        <Route path="/clients" element={<ClientsPage />} />
+        <Route path="/clients" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'demo']}><ClientsPage /></ProtectedRoute>} />
         <Route path="/clients/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="clients" /></ProtectedRoute>} />
         <Route path="/campaigns/project/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" kind="project" /></ProtectedRoute>} />
         <Route path="/campaigns/client/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" kind="campaign" /></ProtectedRoute>} />
-        <Route path="/campaigns" element={<CampaignsPage />} />
+        <Route path="/campaigns" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'demo']}><CampaignsPage /></ProtectedRoute>} />
         <Route path="/projects" element={<Navigate to="/campaigns" replace />} />
         <Route path="/purchase-orders" element={
           <ProtectedRoute allowedRoles={FINANCIAL_ROLES}><PurchaseOrdersPage /></ProtectedRoute>
@@ -203,7 +202,7 @@ function AppRoutes() {
           <ProtectedRoute allowedRoles={FINANCIAL_ROLES}><ShopDetailPageWrapper /></ProtectedRoute>
         } />
         <Route path="/progress" element={
-          <ProtectedRoute allowedRoles={['agency_owner', 'admin', 'accounts', 'demo']}><WorkProgressPage /></ProtectedRoute>
+          <Navigate to="/dashboard" replace />
         } />
         <Route path="/survey-review" element={<SurveyReviewPage />} />
         <Route path="/design" element={<DesignerPage />} />

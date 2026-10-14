@@ -76,6 +76,10 @@ function UsersTab() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editUser, setEditUser] = useState<Profile | null>(null);
   const [deleteUser, setDeleteUser] = useState<Profile | null>(null);
+  const [passwordUser, setPasswordUser] = useState<Profile | null>(null);
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [confirmUserPassword, setConfirmUserPassword] = useState('');
+  const [passwordConfirmName, setPasswordConfirmName] = useState('');
   const [form, setForm] = useState({ full_name: '', email: '', phone: '', role: 'surveyor' as Role, password: '', client_id: '' });
 
   const { data: clients } = useQuery({
@@ -155,6 +159,19 @@ function UsersTab() {
     },
   });
 
+  const resetPasswordMutation = useMutation({
+   mutationFn: async (user: Profile) => {
+     if (newUserPassword.length < 12) throw new Error('Use at least 12 characters for the new password.');
+     if (newUserPassword !== confirmUserPassword) throw new Error('Password confirmation does not match.');
+     if (passwordConfirmName.trim() !== user.full_name.trim()) throw new Error('Enter the user’s full name to confirm.');
+     const { error } = await supabase.rpc('owner_reset_team_password', { p_user_id: user.id, p_new_password: newUserPassword });
+     if (error) throw error;
+     // Passwords must never be included in audit logs.
+     await logAudit('profiles', user.id, 'update', 'password', null, null, `Agency owner reset credentials for ${user.full_name}`);
+   },
+   onSuccess: () => { setPasswordUser(null); setNewUserPassword(''); setConfirmUserPassword(''); setPasswordConfirmName(''); },
+ });
+
   const toggleActiveMutation = useMutation({
     mutationFn: async (user: Profile) => {
       const { error } = await supabase.from('profiles').update({ is_active: !user.is_active }).eq('id', user.id);
@@ -230,7 +247,8 @@ function UsersTab() {
                   <button onClick={() => openEdit(user)} className="p-1.5 text-slate-400 hover:text-blue-600">
                     <Pencil className="w-4 h-4" />
                   </button>
-                  <button onClick={() => toggleActiveMutation.mutate(user)} className="text-xs text-slate-500 hover:text-slate-700 px-2 py-1 border border-slate-200 rounded">
+                  <button onClick={() => { setPasswordUser(user); setNewUserPassword(''); setConfirmUserPassword(''); setPasswordConfirmName(''); resetPasswordMutation.reset(); }} className="text-xs text-blue-700 hover:bg-blue-50 px-2 py-1.5 border border-blue-200 rounded-lg" title="Set a new password">Reset Password</button>
+                 <button onClick={() => toggleActiveMutation.mutate(user)} className="text-xs text-slate-500 hover:text-slate-700 px-2 py-1 border border-slate-200 rounded">
                     {user.is_active ? 'Deactivate' : 'Activate'}
                   </button>
                   <button onClick={() => setDeleteUser(user)} className="p-1.5 text-slate-400 hover:text-red-600">
@@ -257,7 +275,7 @@ function UsersTab() {
           ) : (
             <>
               <Input label="Phone" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} placeholder="+91 90000 00000" />
-              <p className="text-xs text-slate-400 -mt-2">Login email and password aren't changed here — use "Reset Password" flows from the login screen if needed.</p>
+              <p className="text-xs text-slate-400 -mt-2">Existing passwords cannot be viewed. Use Reset Password in the user list to securely set a new password.</p>
             </>
           )}
           <Select
@@ -287,6 +305,17 @@ function UsersTab() {
           )}
         </div>
       </Modal>
+
+      <Modal open={!!passwordUser} onClose={() => { if (!resetPasswordMutation.isPending) setPasswordUser(null); }} title={`Reset password — ${passwordUser?.full_name || ''}`}>
+       <div className="space-y-4">
+         <p className="text-sm text-slate-600">Existing passwords are never displayed. The new password will replace this user’s login password. This action is restricted to the agency owner and is audited.</p>
+         <Input label="New Password (12+ characters)" type="password" value={newUserPassword} onChange={setNewUserPassword} />
+         <Input label="Confirm New Password" type="password" value={confirmUserPassword} onChange={setConfirmUserPassword} />
+         <Input label={`Type ${passwordUser?.full_name || 'the user’s full name'} to confirm`} value={passwordConfirmName} onChange={setPasswordConfirmName} />
+         {resetPasswordMutation.isError && <p role="alert" className="text-sm text-red-600">{(resetPasswordMutation.error as Error).message}</p>}
+         <button type="button" disabled={resetPasswordMutation.isPending || newUserPassword.length < 12 || newUserPassword !== confirmUserPassword || passwordConfirmName.trim() !== passwordUser?.full_name.trim()} onClick={() => passwordUser && resetPasswordMutation.mutate(passwordUser)} className="w-full rounded-lg bg-blue-700 px-4 py-3 text-sm font-semibold text-white disabled:opacity-50">{resetPasswordMutation.isPending ? 'Updating password…' : 'Confirm Password Reset'}</button>
+       </div>
+     </Modal>
 
       <ConfirmDialog
         open={!!deleteUser}

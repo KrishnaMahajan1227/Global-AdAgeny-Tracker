@@ -8,6 +8,7 @@ import LandingPage from '@/pages/LandingPage';
 import PublicInfoPage from '@/pages/PublicInfoPage';
 import AdminLayout from '@/components/AdminLayout';
 import DashboardPage from '@/pages/DashboardPage';
+import AgencyHierarchyPage from '@/pages/AgencyHierarchyPage';
 import OwnerConsolePage from '@/pages/OwnerConsolePage';
 import { ClientsPage, CampaignsPage, ShopsPage, ShopDetailPage } from '@/pages/ShopsPages';
 import PurchaseOrdersPage from '@/pages/PurchaseOrdersPage';
@@ -178,6 +179,9 @@ function AppRoutes() {
         } />
         <Route path="/account" element={<AccountSettingsPage />} />
         <Route path="/clients" element={<ClientsPage />} />
+        <Route path="/clients/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><AgencyHierarchyPage kind="client" /></ProtectedRoute>} />
+        <Route path="/campaigns/project/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><AgencyHierarchyPage kind="project" /></ProtectedRoute>} />
+        <Route path="/campaigns/client/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><AgencyHierarchyPage kind="campaign" /></ProtectedRoute>} />
         <Route path="/campaigns" element={<CampaignsPage />} />
         <Route path="/projects" element={<Navigate to="/campaigns" replace />} />
         <Route path="/purchase-orders" element={

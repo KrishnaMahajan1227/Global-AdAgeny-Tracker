@@ -7,9 +7,8 @@ import { ROLE_LABELS } from '@/lib/types';
 import { NotificationBell } from '@/components/NotificationBell';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
-import { BarChart3,
-  LayoutDashboard, Building2, ShoppingCart, FileCheck, Palette,
-  Printer, Wrench, FileText, IndianRupee, Settings, LogOut, Menu, X,
+import { LayoutDashboard, Building2, ShoppingCart, FileCheck, Palette,
+  Printer, Wrench, FileText, IndianRupee, Settings, LogOut, Menu, X, PanelLeftClose, PanelLeftOpen,
   Map as MapIcon, ClipboardCheck, ClipboardList, Truck, Route as RouteIcon, User,
 } from 'lucide-react';
 
@@ -26,6 +25,7 @@ export default function AdminLayout() {
   // breaks the sidebar-navigation recovery path too.
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const orgId = profile?.organization_id;
 
   const isOwner = profile?.role === 'agency_owner';
@@ -88,7 +88,6 @@ export default function AdminLayout() {
 
   const navItems = [
     { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, show: isAdmin || isAccounts },
-    { to: '/progress', label: 'Work Progress', icon: BarChart3, show: isAdmin || isAccounts },
     { to: '/clients', label: 'Clients', icon: Building2, show: isAdmin },
     { to: '/campaigns', label: 'Campaigns', icon: ShoppingCart, show: isAdmin },
     { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts, badge: pendingCounts?.clientRequests },
@@ -113,9 +112,10 @@ export default function AdminLayout() {
   return (
     <div className="min-h-screen bg-slate-50">
       {/* Sidebar - Desktop */}
-      <aside className={`fixed inset-y-0 left-0 w-64 bg-slate-900 text-white z-40 transform transition-transform lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-        <div className="flex items-center justify-between p-4 border-b border-slate-700">
-          <div>
+      <aside className={`fixed inset-y-0 left-0 ${sidebarCollapsed ? 'lg:w-[76px]' : 'lg:w-64'} w-64 bg-slate-900 text-white z-40 transform transition-all duration-200 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="flex items-center justify-between gap-2 p-4 border-b border-slate-700">
+          <button type="button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="hidden lg:inline-flex rounded-lg p-2 hover:bg-slate-800" aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'} title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}>{sidebarCollapsed ? <PanelLeftOpen className="w-5 h-5" /> : <PanelLeftClose className="w-5 h-5" />}</button>
+          <div className={sidebarCollapsed ? 'lg:hidden' : ''}>
             <h1 className="font-bold text-lg">Darshan Ad Agency</h1>
             <p className="text-xs text-slate-400">Operations Platform</p>
           </div>
@@ -133,6 +133,8 @@ export default function AdminLayout() {
                 to={item.to}
                 end={item.to === '/dashboard'}
                 onClick={() => setSidebarOpen(false)}
+                title={item.label}
+                aria-label={item.label}
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition ${
                     isActive ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-800'
@@ -140,9 +142,9 @@ export default function AdminLayout() {
                 }
               >
                 <Icon className="w-5 h-5" />
-                <span className="flex-1">{item.label}</span>
+                <span className={`flex-1 ${sidebarCollapsed ? 'lg:hidden' : ''}`}>{item.label}</span>
                 {!!item.badge && (
-                  <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 text-white text-[11px] font-bold flex items-center justify-center">
+                  <span className={`${sidebarCollapsed ? 'lg:absolute lg:ml-8 lg:mt-[-20px]' : ''} min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 text-white text-[11px] font-bold flex items-center justify-center`}>
                     {item.badge}
                   </span>
                 )}
@@ -156,13 +158,13 @@ export default function AdminLayout() {
             <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center text-white font-semibold">
               {profile?.full_name?.charAt(0)}
             </div>
-            <div className="flex-1 min-w-0">
+            <div className={`flex-1 min-w-0 ${sidebarCollapsed ? 'lg:hidden' : ''}`}>
               <p className="text-sm font-medium truncate">{profile?.full_name}</p>
               <p className="text-xs text-slate-400">{ROLE_LABELS[profile?.role || ''] || profile?.role}</p>
             </div>
           </div>
           <button onClick={handleSignOut} className="flex items-center gap-2 text-sm text-slate-400 hover:text-white transition">
-            <LogOut className="w-4 h-4" /> Sign Out
+            <LogOut className="w-4 h-4" /> <span className={sidebarCollapsed ? 'lg:hidden' : ''}>Sign Out</span>
           </button>
         </div>
       </aside>
@@ -171,7 +173,7 @@ export default function AdminLayout() {
       {sidebarOpen && <div className="fixed inset-0 bg-black/50 z-30 lg:hidden" onClick={() => setSidebarOpen(false)} />}
 
       {/* Main content */}
-      <div className="lg:ml-64">
+      <div className={`${sidebarCollapsed ? 'lg:ml-[76px]' : 'lg:ml-64'} transition-all duration-200`}>
         {/* Top bar */}
         <header className="bg-white border-b border-slate-200 sticky top-0 z-20">
           <div className="flex items-center justify-between px-4 py-3">

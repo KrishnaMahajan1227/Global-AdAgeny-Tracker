@@ -1,3 +1,4 @@
+import { FieldNavigation } from '@/components/FieldNavigation';
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
@@ -153,13 +154,7 @@ export default function SurveyorPage() {
 
       {/* Always mounted — same bar on every screen, including mid-survey,
           so the surveyor never loses their place in the app. */}
-      <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-slate-200 flex items-center justify-around py-2 px-2 z-40">
-        <TabButton icon={Home} label="Home" active={!activeSurvey && tab === 'home'} onClick={() => goToTab('home')} />
-        <TabButton icon={Briefcase} label="My Work" active={!activeSurvey && tab === 'work'} onClick={() => goToTab('work')} />
-        <TabButton icon={MapIcon} label="Map" active={!activeSurvey && tab === 'map'} onClick={() => goToTab('map')} />
-        <TabButton icon={Bell} label="Alerts" active={!activeSurvey && tab === 'notifications'} onClick={() => goToTab('notifications')} />
-        <TabButton icon={User} label="Profile" active={!activeSurvey && tab === 'profile'} onClick={() => goToTab('profile')} />
-      </div>
+      <FieldNavigation tab={tab} onChange={goToTab} activeWork={!!activeSurvey} />
     </div>
   );
 }

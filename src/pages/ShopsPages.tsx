@@ -4,6 +4,8 @@ import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { Link, useSearchParams } from 'react-router-dom';
+import { ProgressBar } from '@/components/ui';
+import { completion, isDone, type Order } from '@/lib/agencyProgress';
 import {
   Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, PageHeader,
   FilterButton, FilterDrawer, FilterSection, Combobox,
@@ -67,6 +69,19 @@ export function ClientsPage() {
       return data as Client[];
     },
     enabled: !!orgId,
+  });
+
+  const { data: clientProgress } = useQuery({
+    queryKey: ['client-progress', orgId], enabled: !!orgId,
+    queryFn: async () => {
+      const [projects, orders] = await Promise.all([
+        supabase.from('projects').select('id,client_id,status').eq('organization_id', orgId),
+        supabase.from('purchase_orders').select('id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,created_at').eq('organization_id', orgId),
+      ]);
+      if (projects.error) throw projects.error;
+      if (orders.error) throw orders.error;
+      return { projects: projects.data || [], orders: (orders.data || []) as Order[] };
+    },
   });
 
   // Counts of everything that hangs off this client — fetched only once
@@ -249,9 +264,8 @@ export function ClientsPage() {
               {client.contact_phone && <p>{client.contact_phone}</p>}
               {client.gst_number && <p className="text-xs text-slate-400">GST: {client.gst_number}</p>}
             </div>
-            <Link to={`/projects?client=${client.id}`} className="mt-3 inline-block text-sm text-blue-600 hover:underline">
-              View Projects →
-            </Link>
+            {(() => { const orders = clientProgress?.orders.filter(o => o.client_id === client.id) || []; const active = clientProgress?.projects.filter(p => p.client_id === client.id && p.status === 'active').length || 0; return <div className="mt-3 text-sm space-y-2"><p>{active} active campaigns · {orders.filter(isDone).length}/{orders.length} work orders done</p><ProgressBar pct={completion(orders)} /><p>{completion(orders)}% complete · {orders.length && !orders.every(isDone) ? 'In Progress' : 'On Track'} · Next deadline: Not set</p></div>; })()}
+            <Link to={`/clients/${client.id}`} className="mt-3 inline-block text-sm text-blue-600 hover:underline">Open client →</Link>
           </Card>
         ))}
         {clients?.length === 0 && (
@@ -674,7 +688,7 @@ export function CampaignsPage() {
                   <td className="px-4 py-3 text-slate-500 text-xs">{r.project.start_date ? new Date(r.project.start_date).toLocaleDateString('en-IN') : '—'}</td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      <Link to={`/purchase-orders?project=${r.project.id}`} className="text-xs text-blue-600 hover:underline flex items-center gap-1">
+                      <Link to={`/campaigns/project/${r.project.id}`} className="text-xs text-blue-600 hover:underline flex items-center gap-1">
                         <ListOrdered className="w-3.5 h-3.5" /> Work Orders
                       </Link>
                       <button onClick={() => openEdit(r.project!)} className="p-1 text-slate-400 hover:text-blue-600">

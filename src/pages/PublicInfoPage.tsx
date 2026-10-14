@@ -22,7 +22,7 @@ const pages: Record<string, PageData> = {
     lead: 'Connect survey, creative context, production, installation, proof and campaign progress while preserving site-level accountability between field and office teams.',
     titleTag: 'AdRoute for Outdoor Advertising & Signage Agencies',
     description: 'Manage outdoor advertising and signage operations from site survey through production, installation proof, client reporting and billing readiness with AdRoute.',
-    image: `${A}/07_AdRoute_Agency_Live_Operations.png`,
+    image: `${A}/07_AdRoute_Agency_Live_Operations.webp`,
     imageAlt: 'AdRoute agency operations team reviewing live multi-site campaign activity',
     sections: [
       { title: 'Control the handoffs', body: 'Keep each site attached to the information required by the next team instead of rebuilding context at every stage.', points: ['Site-linked survey records', 'Design and production context', 'Installation progress', 'Verified photo proof'] },
@@ -36,7 +36,7 @@ const pages: Record<string, PageData> = {
     lead: 'See verified progress across locations, review completed-site proof and understand campaign status through a client-facing view grounded in real field activity.',
     titleTag: 'AdRoute Client Visibility for Outdoor Branding Campaigns',
     description: 'Give clients clear visibility into outdoor branding campaign progress, completed sites, verified installation photos and reporting with AdRoute.',
-    image: `${A}/09_AdRoute_Client_Campaign_Review.png`,
+    image: `${A}/09_AdRoute_Client_Campaign_Review.webp`,
     imageAlt: 'Client team reviewing verified outdoor branding campaign progress in AdRoute',
     sections: [
       { title: 'Know what is complete', body: 'Review progress across campaign locations without depending on manually assembled update messages.', points: ['Campaign overview', 'Completed-site status', 'Verified installations', 'Progress visibility'] },
@@ -50,7 +50,7 @@ const pages: Record<string, PageData> = {
     lead: 'AdRoute follows the real sequence of outdoor branding work, connecting the physical site, the agency teams executing the job and the client reviewing the outcome.',
     titleTag: 'How AdRoute Works | Outdoor Branding Operations Workflow',
     description: 'See how AdRoute connects field survey, design, signage production, installation, proof verification, live operations, client visibility and reporting.',
-    image: `${A}/10_AdRoute_Connected_Operations_Final_CTA.png`,
+    image: `${A}/10_AdRoute_Connected_Operations_Final_CTA.webp`,
     imageAlt: 'Connected AdRoute city showing field site, agency operations and client visibility',
     sections: [
       { title: '01 — Field survey', body: 'Capture measurements, photos, location context and installation requirements at the physical site.', points: ['Measurements', 'Site photos', 'Location context', 'Installation area'] },

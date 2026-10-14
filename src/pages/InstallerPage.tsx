@@ -1,3 +1,4 @@
+import { FieldNavigation } from '@/components/FieldNavigation';
 import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
@@ -58,13 +59,7 @@ export default function InstallerPage() {
       {tab === 'notifications' && <NotificationsView />}
       {tab === 'profile' && <ProfileView onSignOut={signOut} />}
 
-      <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-slate-200 flex items-center justify-around py-2 px-2 z-40">
-        <TabBtn icon={Home} label="Home" active={tab === 'home'} onClick={() => setTab('home')} />
-        <TabBtn icon={Briefcase} label="My Work" active={tab === 'work'} onClick={() => setTab('work')} />
-        <TabBtn icon={MapIcon} label="Map" active={tab === 'map'} onClick={() => setTab('map')} />
-        <TabBtn icon={Bell} label="Alerts" active={tab === 'notifications'} onClick={() => setTab('notifications')} />
-        <TabBtn icon={User} label="Profile" active={tab === 'profile'} onClick={() => setTab('profile')} />
-      </div>
+      <FieldNavigation tab={tab} onChange={setTab} />
     </div>
   );
 }

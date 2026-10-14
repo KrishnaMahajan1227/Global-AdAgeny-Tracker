@@ -49,7 +49,7 @@ export default function LoginPage() {
   return (
     <main className="signin-page">
       <section className="signin-visual" aria-label="AdRoute connected operations">
-        <img src="/landing/cinematic/10_AdRoute_Connected_Operations_Final_CTA.png" alt="" className="signin-visual-image" />
+        <img src="/landing/cinematic/10_AdRoute_Connected_Operations_Final_CTA.webp" alt="" className="signin-visual-image" />
         <div className="signin-visual-vignette" />
         <div className="signin-visual-grain" />
 

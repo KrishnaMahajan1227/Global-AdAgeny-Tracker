@@ -133,7 +133,7 @@ export default function PurchaseOrdersPage() {
   const [pageSize, setPageSize] = useState(PO_PAGE_SIZES[1]);
 
   const [lineItemsPo, setLineItemsPo] = useState<PurchaseOrder | null>(null);
-  const [detailPoId, setDetailPoId] = useState<string | null>(null);
+  const [detailPoId, setDetailPoId] = useState<string | null>(() => new URLSearchParams(window.location.search).get('order'));
   const [notice, setNotice] = useState<{ kind: 'error' | 'success'; message: string } | null>(null);
 
   useEffect(() => {

@@ -26,16 +26,16 @@ gsap.registerPlugin(ScrollTrigger, ScrollToPlugin);
 const A = '/landing/cinematic';
 
 const images = {
-  city: `${A}/01_AdRoute_Master_City_Hero.png`,
-  survey: `${A}/02_AdRoute_Shop_Field_Survey.png`,
-  agency: `${A}/03_AdRoute_Agency_Exterior.png`,
-  production: `${A}/04_AdRoute_Agency_Design_Production_Fabrication.png`,
-  installation: `${A}/05_AdRoute_Active_Installation.png`,
-  proof: `${A}/06_AdRoute_Nova_Living_Installation_Verified.png`,
-  ops: `${A}/07_AdRoute_Agency_Live_Operations.png`,
-  client: `${A}/08_AdRoute_Client_Office_Exterior.png`,
-  reporting: `${A}/09_AdRoute_Client_Campaign_Review.png`,
-  final: `${A}/10_AdRoute_Connected_Operations_Final_CTA.png`,
+  city: `${A}/01_AdRoute_Master_City_Hero.webp`,
+  survey: `${A}/02_AdRoute_Shop_Field_Survey.webp`,
+  agency: `${A}/03_AdRoute_Agency_Exterior.webp`,
+  production: `${A}/04_AdRoute_Agency_Design_Production_Fabrication.webp`,
+  installation: `${A}/05_AdRoute_Active_Installation.webp`,
+  proof: `${A}/06_AdRoute_Nova_Living_Installation_Verified.webp`,
+  ops: `${A}/07_AdRoute_Agency_Live_Operations.webp`,
+  client: `${A}/08_AdRoute_Client_Office_Exterior.webp`,
+  reporting: `${A}/09_AdRoute_Client_Campaign_Review.webp`,
+  final: `${A}/10_AdRoute_Connected_Operations_Final_CTA.webp`,
 };
 
 type Chapter = {
@@ -474,22 +474,7 @@ function LandingPage() {
           <div className="journey-scene journey-scene--intro" data-scene="intro">
             <img className="intro-city-bg" src={images.city} alt="" aria-hidden="true" />
             <div className="intro-city-depth" aria-hidden="true" />
-            <video
-              className="cloud-video cloud-video--base"
-              autoPlay
-              muted
-              loop
-              playsInline
-              preload="auto"
-              poster={images.city}
-              aria-hidden="true"
-              onEnded={(event) => {
-                event.currentTarget.currentTime = 0;
-                void event.currentTarget.play();
-              }}
-            >
-              <source src={`${A}/clouds.mp4`} type="video/mp4" />
-            </video>
+            <div className="cloud-video cloud-video--base" aria-hidden="true" style={{ display: "none" }} />
             <div className="intro-shade" />
             <div className="intro-content">
               <p className="intro-eyebrow intro-reveal">OUTDOOR BRANDING OPERATIONS <i /> CONNECTED END TO END</p>

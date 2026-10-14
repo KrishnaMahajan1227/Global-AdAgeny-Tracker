@@ -1,90 +1,84 @@
-import { Link, useSearchParams } from 'react-router-dom';
+import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
-import { Card, ProgressBar } from '@/components/ui';
-import { completion, dateLabel, isDone, isOverdue, type Order } from '@/lib/agencyProgress';
-import type { Project, Client, Campaign } from '@/lib/types';
+import { ProgressBar } from '@/components/ui';
+import { completion, isDone, type Order } from '@/lib/agencyProgress';
+import type { Client } from '@/lib/types';
 
-const fmt = (n:number) => n.toLocaleString('en-IN');
-const startOfPeriod = (period:string, from:string|null) => {
-  const d = new Date();d.setHours(0,0,0,0);
-  if(period==='week') d.setDate(d.getDate()-((d.getDay()+6)%7));
-  if(period==='month') d.setDate(1);
-  if(period==='30days') d.setDate(d.getDate()-29);
-  if(period==='custom' && from && !Number.isNaN(Date.parse(from))) return new Date(`${from}T00:00:00`);
-  return d;
-};
+const fmt = (value: number) => value.toLocaleString('en-IN');
+const isOpen = (order: Order) => !isDone(order) && order.status !== 'cancelled' && order.assignment_status !== 'rejected';
+
 export default function DashboardPage() {
-  const {profile}=useAuth();const orgId=profile?.organization_id;
-  const [params,setParams]=useSearchParams();
-  const range=['week','month','30days','custom'].includes(params.get('range')||'')?params.get('range')!:'month';
-  const setFilter=(key:string,value:string)=>{setParams(p=>{const next=new URLSearchParams(p);next.set(key,value);return next;},{replace:true});};
-  const {data,isLoading,isError,refetch}=useQuery({queryKey:['agency-owner-overview',orgId],enabled:!!orgId,queryFn:async()=>{
-    if(!orgId)throw new Error('Organization unavailable');
-    // Every large table is fetched in pages; Supabase/PostgREST defaults to a 1000-row limit.
-    async function all(table:'clients'|'projects'|'campaigns'|'purchase_orders',columns:string,scoped:boolean) {
-      const rows:Record<string,unknown>[]=[];
-      for(let start=0;;start+=500){
-        let q=supabase.from(table).select(columns).order('id').range(start,start+499);
-        if(scoped) q=q.eq('organization_id',orgId!);
-        const {data:batch,error}=await q;if(error)throw error;
-        rows.push(...(batch||[]) as Record<string,unknown>[]);
-        if(!batch||batch.length<500)break;
+  const { profile } = useAuth();
+  const orgId = profile?.organization_id;
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState<'attention' | 'name' | 'completion'>('attention');
+  const [page, setPage] = useState(0);
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: ['agency-dashboard-delivery', orgId], enabled: !!orgId,
+    queryFn: async () => {
+      if (!orgId) throw new Error('Missing organization');
+      async function fetchAll(table: 'clients' | 'purchase_orders', columns: string) {
+        const output: Record<string, unknown>[] = [];
+        for (let offset = 0; ; offset += 500) {
+          const { data: batch, error } = await supabase.from(table).select(columns).eq('organization_id', orgId!).order('id').range(offset, offset + 499);
+          if (error) throw error;
+          output.push(...(batch || []) as Record<string, unknown>[]);
+          if (!batch || batch.length < 500) break;
+        }
+        return output;
       }
-      return rows;
-    }
-    const [clients,projects,campaigns,orders]=await Promise.all([
-      all('clients','id,name,is_active',true),
-      all('projects','id,name,client_id,status,start_date,end_date,created_at',true),
-      all('campaigns','id,name,status,start_date,end_date,created_at',false),
-      all('purchase_orders','id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,created_at',true),
-    ]);
-    return {clients:clients as unknown as Pick<Client,'id'|'name'|'is_active'>[],projects:projects as unknown as Pick<Project,'id'|'name'|'client_id'|'status'|'start_date'|'end_date'|'created_at'>[],campaigns:campaigns as unknown as Pick<Campaign,'id'|'name'|'status'|'start_date'|'end_date'|'created_at'>[],orders:orders as unknown as Order[]};
-  }});
-  const view=['client','campaign','member'].includes(params.get('view')||'')?params.get('view')!:'client';
-  const metric=['completion','completed','ontime'].includes(params.get('metric')||'')?params.get('metric')!:'completion';
-  const start=startOfPeriod(range,params.get('from'));
-  const end=range==='custom'&&params.get('to')&&!Number.isNaN(Date.parse(params.get('to')!))?new Date(`${params.get('to')}T23:59:59`):new Date();
-  const validRange=range!=='custom'||!!(params.get('from')&&params.get('to')&&start<=end);
-  if(isLoading)return <p role="status" className="p-8 text-slate-600">Loading dashboard…</p>;
-  if(isError)return <Card className="p-6"><p role="alert" className="text-red-700">Could not load dashboard. <button className="underline" onClick={()=>refetch()}>Retry</button></p></Card>;
-  if(!data)return null;
-  const orders=data.orders.filter(o=>o.status!=='cancelled'&&o.assignment_status!=='rejected');
-  const scoped=orders.filter(o=>{const d=new Date(o.created_at);return d>=start&&d<=end;});
-  const activeProjects=data.projects.filter(p=>p.status==='active');
-  const clientCampaigns=data.campaigns.filter(c=>c.status==='active'&&orders.some(o=>o.campaign_id===c.id));
-  const group=(rows:Order[])=>({all:rows,done:rows.filter(isDone).length,pct:completion(rows)});
-  const rows=view==='client'?data.clients.filter(c=>c.is_active).map(c=>{
-    const own=scoped.filter(o=>o.client_id===c.id);
-    const campaigns=[...activeProjects.filter(p=>p.client_id===c.id),...clientCampaigns.filter(p=>orders.some(o=>o.client_id===c.id&&o.campaign_id===p.id))];
-    const due=campaigns.map(p=>p.end_date).filter((d):d is string=>!!d).sort()[0]||null;
-    return {id:c.id,label:c.name,to:`/clients?detail=${encodeURIComponent(c.id)}`,due,...group(own)};
-  }):view==='campaign'?[...activeProjects.map(p=>({id:`project:${p.id}`,label:p.name,client:p.client_id,due:p.end_date,...group(scoped.filter(o=>o.project_id===p.id))})),...clientCampaigns.map(c=>({id:`campaign:${c.id}`,label:c.name,client:orders.find(o=>o.campaign_id===c.id)?.client_id||null,due:c.end_date,...group(scoped.filter(o=>o.campaign_id===c.id))}))].map(c=>({...c,to:c.client?`/clients?detail=${encodeURIComponent(c.client)}&campaign=${encodeURIComponent(c.id)}`:'/clients'})):[];
-  const overdueCampaigns=[...activeProjects,...clientCampaigns].filter(c=>{const linked=orders.filter(o=>'client_id' in c?o.project_id===c.id:o.campaign_id===c.id);return isOverdue(c.end_date,linked.length>0&&linked.every(isDone));});
-  const ungrouped=orders.filter(o=>!o.project_id&&!o.campaign_id);
-  const scoreLabel=(r:{all:Order[];pct:number;due:string|null})=>isOverdue(r.due,r.all.length>0&&r.all.every(isDone))?'Delayed':r.pct<50&&r.all.length>0?'At Risk':'On Track';
-  const displayRows=rows.slice().sort((a,b)=>a.pct-b.pct||a.label.localeCompare(b.label));
-  const [pageRaw]=[Number(params.get('page')||0)];const page=Number.isFinite(pageRaw)?Math.max(0,Math.min(Math.floor(pageRaw),Math.max(0,Math.ceil(displayRows.length/20)-1))):0;
-  return <main className="mx-auto max-w-[1480px] space-y-4 pb-10">
-    <section aria-label="Dashboard filters" className="rounded-xl border border-slate-200 bg-white px-4 py-3 flex flex-wrap items-end gap-3">
-      <label className="text-xs font-semibold text-slate-600">View by<select aria-label="View by" value={view} onChange={e=>{setFilter('view',e.target.value);setFilter('page','0');}} className="block mt-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"><option value="client">Client</option><option value="campaign">Campaign</option><option value="member">Team Member</option></select></label>
-      <label className="text-xs font-semibold text-slate-600">Time range<select aria-label="Time range" value={range} onChange={e=>setFilter('range',e.target.value)} className="block mt-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"><option value="week">This week</option><option value="month">This month</option><option value="30days">Last 30 days</option><option value="custom">Custom</option></select></label>
-      <label className="text-xs font-semibold text-slate-600">Metric<select aria-label="Metric" value={metric} onChange={e=>setFilter('metric',e.target.value)} className="block mt-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"><option value="completion">Completion %</option><option value="completed">Work orders completed</option><option value="ontime">On-time rate</option></select></label>
-      {range==='custom'&&<><label className="text-xs text-slate-600">From<input aria-label="Start date" type="date" value={params.get('from')||''} onChange={e=>setFilter('from',e.target.value)} className="block mt-1 rounded-lg border p-2 text-sm"/></label><label className="text-xs text-slate-600">To<input aria-label="End date" type="date" value={params.get('to')||''} onChange={e=>setFilter('to',e.target.value)} className="block mt-1 rounded-lg border p-2 text-sm"/></label></>}
-      <span className="ml-auto text-xs text-slate-500">Created in selected period; current completion state</span>
+      const [clients, orders] = await Promise.all([
+        fetchAll('clients', 'id,name,is_active'),
+        fetchAll('purchase_orders', 'id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,created_at'),
+      ]);
+      return { clients: clients as unknown as Pick<Client, 'id' | 'name' | 'is_active'>[], orders: orders as unknown as Order[] };
+    },
+  });
+  const summary = useMemo(() => {
+    if (!data) return null;
+    const orders = data.orders.filter(o => o.status !== 'cancelled' && o.assignment_status !== 'rejected');
+    const activeClients = data.clients.filter(c => c.is_active);
+    const rows = activeClients.map(client => {
+      const own = orders.filter(o => o.client_id === client.id);
+      const done = own.filter(isDone).length;
+      const pending = own.filter(o => o.assignment_status === 'pending_acceptance').length;
+      const open = own.filter(isOpen).length;
+      return { ...client, done, pending, open, total: own.length, pct: completion(own) };
+    });
+    const awaiting = orders.filter(o => o.assignment_status === 'pending_acceptance');
+    const needsAction = rows.filter(r => r.pending > 0 || (r.total > 0 && r.pct < 25));
+    return { orders, rows, awaiting, needsAction, activeClients, open: orders.filter(isOpen).length, done: orders.filter(isDone).length };
+  }, [data]);
+  if (isLoading) return <p role="status" className="p-5 text-sm text-slate-600">Loading agency dashboard…</p>;
+  if (isError || !summary) return <div role="alert" className="rounded-lg bg-white border p-5 text-sm text-red-700">Dashboard could not be loaded. <button onClick={() => refetch()} className="underline">Retry</button></div>;
+  const kpis = [
+    { label: 'Active clients', value: summary.activeClients.length, href: '/clients', sub: 'Currently active' },
+    { label: 'Open work orders', value: summary.open, href: '/purchase-orders', sub: 'Awaiting completion' },
+    { label: 'Completed orders', value: summary.done, href: '/purchase-orders', sub: 'All-time' },
+    { label: 'Pending acceptance', value: summary.awaiting.length, href: '/purchase-orders', sub: 'Review required' },
+    { label: 'Delivery completion', value: `${completion(summary.orders)}%`, href: '/purchase-orders', sub: `${fmt(summary.done)} of ${fmt(summary.orders.length)} orders` },
+  ];
+  const filtered = summary.rows.filter(r => r.name.toLowerCase().includes(search.trim().toLowerCase())).sort((a,b) => sort === 'name' ? a.name.localeCompare(b.name) : sort === 'completion' ? b.pct-a.pct : b.pending-a.pending || a.pct-b.pct);
+  const lastPage = Math.max(0, Math.ceil(filtered.length / 12) - 1);
+  const safePage = Math.min(page, lastPage);
+  return <main className="mx-auto max-w-[1500px] space-y-4 pb-8 text-slate-800">
+    <section aria-label="Agency delivery indicators" className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+      {kpis.map(k => <Link key={k.label} to={k.href} className="rounded-lg border border-slate-200 bg-white px-4 py-3 transition-colors hover:border-blue-300 focus-visible:outline-2 focus-visible:outline-blue-600"><div className="text-xs font-medium text-slate-500">{k.label}</div><div className="mt-1 text-[23px] font-semibold tabular-nums tracking-tight text-slate-900">{typeof k.value === 'number' ? fmt(k.value) : k.value}</div><div className="mt-1 text-[11px] text-slate-500">{k.sub}</div></Link>)}
     </section>
-    <section aria-label="Agency KPIs" className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">{[
-      ['Active Clients',data.clients.filter(c=>c.is_active).length,'/clients'],
-      ['Active Campaigns',activeProjects.length+clientCampaigns.length,'/clients'],
-      ['Open Work Orders',orders.filter(o=>!isDone(o)).length,'/purchase-orders'],
-      ['Overdue Work Orders','—','/purchase-orders'],
-      ['Avg Completion',`${completion(orders)}%`,'/purchase-orders'],
-    ].map(([label,value,to])=><Link key={String(label)} to={String(to)} className="rounded-xl border border-slate-200 bg-white px-4 py-4 hover:border-blue-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><p className="text-xs font-semibold text-slate-500">{label}</p><p className="mt-2 text-2xl font-bold tabular-nums text-slate-900">{typeof value==='number'?fmt(value):value}</p>{label==='Overdue Work Orders'&&<p className="mt-1 text-xs text-slate-500">Due dates unavailable</p>}</Link>)}</section>
-    <section className="rounded-xl border border-slate-200 bg-white overflow-hidden"><div className="flex items-center justify-between gap-3 px-4 py-3 border-b"><h2 className="text-base font-semibold text-slate-900">{view==='client'?'Client progress':view==='campaign'?'Campaign progress':'Team progress'}</h2><span className="text-xs text-slate-500">{rows.length} records</span></div>
-      {!validRange?<p role="alert" className="p-5 text-red-700">Enter a valid date range.</p>:view==='member'?<p className="p-5 text-sm text-slate-600">Team-member assignments are not recorded on work orders. Member-level progress is unavailable.</p>:metric==='ontime'?<p className="p-5 text-sm text-slate-600">On-time completion cannot be calculated without work-order due dates and completion timestamps.</p>:!rows.length?<p className="p-5 text-sm text-slate-600">No records available for this view.</p>:<><div className="overflow-x-auto"><table className="w-full min-w-[660px] text-sm"><thead className="bg-slate-50 text-left text-slate-600"><tr><th className="p-3">{view==='client'?'Client':'Campaign'}</th><th className="p-3">Progress</th><th className="p-3">Done / Total</th><th className="p-3">On time</th><th className="p-3">Status</th><th className="p-3">Next deadline</th></tr></thead><tbody className="divide-y divide-slate-100">{displayRows.slice(page*20,(page+1)*20).map(r=><tr key={r.id} className="hover:bg-slate-50"><td className="p-3"><Link to={r.to} className="font-semibold text-blue-700 hover:underline">{r.label}</Link></td><td className="p-3 w-40"><ProgressBar pct={r.pct}/><span className="text-xs">{metric==='completed'?`${r.done} completed`:`${r.pct}%`}</span></td><td className="p-3 tabular-nums">{r.done} / {r.all.length}</td><td className="p-3 text-slate-500">—</td><td className="p-3"><span className={`text-xs font-semibold ${scoreLabel(r)==='Delayed'?'text-red-700':scoreLabel(r)==='At Risk'?'text-amber-700':'text-emerald-700'}`}>{scoreLabel(r)}</span></td><td className="p-3 whitespace-nowrap">{dateLabel(r.due)}</td></tr>)}</tbody></table></div><div className="flex justify-between items-center p-3 border-t text-sm text-slate-600"><span>{page*20+1}–{Math.min((page+1)*20,rows.length)} of {rows.length}</span><div className="flex gap-2"><button disabled={page===0} onClick={()=>setFilter('page',String(page-1))} className="border rounded px-3 py-1 disabled:opacity-40">Previous</button><button disabled={(page+1)*20>=rows.length} onClick={()=>setFilter('page',String(page+1))} className="border rounded px-3 py-1 disabled:opacity-40">Next</button></div></div></>}
-    </section>
-    <section className="rounded-xl border border-slate-200 bg-white p-4"><h2 className="text-base font-semibold">Team leaderboard</h2><p className="mt-2 text-sm text-slate-600">Not available: work orders have no team-member assignment or completion timestamps. No scores or rankings are fabricated.</p>{/* Score formula once data exists: (on-time completed / due completed) * 70 + min(completed / 20, 1) * 30. Do not rank without source dates. */}</section>
-    <section className="rounded-xl border border-slate-200 bg-white overflow-hidden"><h2 className="p-4 border-b text-base font-semibold">Needs Attention</h2><div className="divide-y divide-slate-100 text-sm">{overdueCampaigns.slice(0,10).map(c=><Link key={c.id} to="/clients" className="flex justify-between gap-3 p-3 hover:bg-slate-50"><span className="font-medium">Campaign deadline passed: {c.name}</span><span className="text-red-700">{dateLabel(c.end_date)} →</span></Link>)}{ungrouped.slice(0,10).map(o=><Link key={o.id} to={`/purchase-orders?order=${o.id}`} className="flex justify-between p-3 hover:bg-slate-50"><span>Work order without campaign: {o.name||o.po_number}</span><span className="text-blue-700">Open →</span></Link>)}{!overdueCampaigns.length&&!ungrouped.length&&<p className="p-4 text-slate-600">No campaign deadline alerts or ungrouped work orders.</p>}<p className="p-3 text-xs text-slate-500">Order-level overdue, inactivity and unassigned-member alerts require fields not present in the current data model.</p></div></section>
+    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px] items-start">
+      <section className="min-w-0 rounded-lg border border-slate-200 bg-white">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3"><div><h2 className="text-sm font-semibold text-slate-900">Client delivery</h2><p className="text-xs text-slate-500">Progress across current work orders · {summary.rows.length} active clients</p></div><div className="flex flex-wrap gap-2"><label className="sr-only" htmlFor="dashboard-client-search">Search clients</label><input id="dashboard-client-search" value={search} onChange={e=>{setSearch(e.target.value);setPage(0);}} placeholder="Find client" className="w-36 sm:w-44 rounded-md border border-slate-200 px-2.5 py-1.5 text-xs focus-visible:outline-blue-600"/><label className="sr-only" htmlFor="dashboard-sort">Sort clients</label><select id="dashboard-sort" value={sort} onChange={e=>{setSort(e.target.value as typeof sort);setPage(0);}} className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs"><option value="attention">Needs attention</option><option value="name">Client name</option><option value="completion">Highest completion</option></select></div></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[580px] text-xs"><thead className="bg-slate-50 text-left text-slate-500"><tr><th className="px-4 py-2.5 font-medium">Client</th><th className="px-3 py-2.5 font-medium">Delivery progress</th><th className="px-3 py-2.5 font-medium">Work orders</th><th className="px-3 py-2.5 font-medium">Pending review</th><th className="px-3 py-2.5 font-medium"><span className="sr-only">Open</span></th></tr></thead><tbody className="divide-y divide-slate-100">{filtered.slice(safePage*12,(safePage+1)*12).map(r=><tr key={r.id} className="hover:bg-slate-50"><td className="px-4 py-3 font-medium text-slate-800"><Link to={`/clients?detail=${encodeURIComponent(r.id)}`} className="hover:text-blue-700 hover:underline">{r.name}</Link></td><td className="px-3 py-3"><div className="flex items-center gap-2"><div className="w-24 sm:w-36"><ProgressBar pct={r.pct}/></div><span className="tabular-nums text-slate-600">{r.pct}%</span></div></td><td className="px-3 py-3 tabular-nums">{r.done}/{r.total} done</td><td className="px-3 py-3"><span className={r.pending ? 'font-medium text-amber-700' : 'text-slate-400'}>{r.pending || '—'}</span></td><td className="px-3 py-3 text-right"><Link to={`/clients?detail=${encodeURIComponent(r.id)}`} className="text-blue-700 hover:underline">Open →</Link></td></tr>)}</tbody></table>{!filtered.length&&<p className="p-6 text-center text-sm text-slate-500">{search ? 'No clients match your search.' : 'No active clients yet.'}</p>}</div>
+        {filtered.length > 12 && <div className="flex items-center justify-between border-t px-4 py-2.5 text-xs text-slate-600"><span>{safePage*12+1}–{Math.min((safePage+1)*12,filtered.length)} of {filtered.length}</span><div className="flex gap-2"><button className="rounded border px-2 py-1 disabled:opacity-40" disabled={safePage===0} onClick={()=>setPage(safePage-1)}>Previous</button><button className="rounded border px-2 py-1 onClick={()=>setPage(safePage+1)} style={{visibility:safePage===lastPage?'hidden':'visible'}}>Next</button></div></div>}
+      </section>
+      <aside className="space-y-4">
+        <section className="rounded-lg border border-slate-200 bg-white"><div className="border-b border-slate-100 px-4 py-3"><h2 className="text-sm font-semibold text-slate-900">Action required</h2><p className="text-xs text-slate-500">Items waiting on your team</p></div><div className="divide-y divide-slate-100">{summary.awaiting.slice(0,6).map(o=><Link key={o.id} to={`/purchase-orders?order=${encodeURIComponent(o.id)}`} className="block px-4 py-3 hover:bg-slate-50"><p className="truncate text-xs font-medium text-slate-800">{o.name?.trim() || o.po_number || 'Untitled work order'}</p><p className="mt-1 text-[11px] text-amber-700">Pending acceptance · Open order →</p></Link>)}{!summary.awaiting.length&&<p className="px-4 py-5 text-xs text-slate-500">No work orders pending acceptance.</p>}</div>{summary.awaiting.length>6&&<Link to="/purchase-orders" className="block border-t px-4 py-2.5 text-xs font-medium text-blue-700">View all work orders →</Link>}</section>
+        <section className="rounded-lg border border-slate-200 bg-white"><div className="border-b border-slate-100 px-4 py-3"><h2 className="text-sm font-semibold text-slate-900">Clients to monitor</h2><p className="text-xs text-slate-500">Pending review or low completion</p></div><div className="divide-y divide-slate-100">{summary.needsAction.slice(0,6).map(r=><Link key={r.id} to={`/clients?detail=${encodeURIComponent(r.id)}`} className="flex justify-between gap-2 px-4 py-3 text-xs hover:bg-slate-50"><span className="truncate font-medium">{r.name}</span><span className="shrink-0 tabular-nums text-amber-700">{r.pending ? `${r.pending} review` : `${r.pct}% done`} →</span></Link>)}{!summary.needsAction.length&&<p className="px-4 py-5 text-xs text-slate-500">No clients currently flagged by these checks.</p>}</div></section>
+      </aside>
+    </div>
+    <p className="text-[11px] text-slate-500">Progress uses recorded work-order completion states. Order-level overdue and on-time rates are not shown because this database has no reliable work-order due/completion timestamps.</p>
   </main>;
 }

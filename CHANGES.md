@@ -1,37 +1,12 @@
-# CHANGES
+# CHANGES — agency dashboard / Campaigns UI removal
 
-## Modified
-- `src/App.tsx`: redirect duplicate Campaigns routes to Clients and keep route role guards.
-- `src/components/AdminLayout.tsx`: remove Campaigns navigation item.
-- `src/pages/DashboardPage.tsx`: remove page title and duplicate widgets; add persisted filter-based table and compact KPI/attention layout.
-- `src/pages/AgencyHierarchyPage.tsx`: client campaign accordion with inline order links and shared rendering on bookmarked campaign details.
+- `src/pages/DashboardPage.tsx`: Replace large filter/leaderboard display with compact operational KPIs, searchable client delivery table, action queue, and client monitoring. No monetary panels.
+- `src/pages/AgencyHierarchyPage.tsx`: Existing client detail now shows direct work-order list; campaign grouping UI removed. Historical campaign detail component retained in source for compatibility, not exposed in navigation.
+- `src/App.tsx`: Old agency campaign detail URLs redirect to Clients; client bookmarked detail URLs still resolve. Client portal campaign routes remain unchanged for existing client users.
 
-## Deleted files
-None. Legacy `CampaignsPage` remains inside `ShopsPages.tsx` because deleting it safely also requires migrating agency-owned campaign CRUD into the Clients screen; that workflow was not fully implemented here. `WorkProgressPage.tsx` remains unreferenced.
+Deleted files: none. Dependencies: none. Database migrations/SQL: **none**. No tables, foreign keys, campaigns, projects, or work orders are deleted or modified.
 
-## Dependencies and database
-None changed. No SQL migration. **Do not run db push/reset** without RLS migration review.
+## Safety and testing
+This patch changes only frontend display/navigation. It cannot migrate or destroy Supabase records. Never delete campaign/project tables or cascade their foreign keys. Always backup code and database before deployment. Build and authenticated browser/RLS tests must be completed on your machine before production deployment.
 
-## Verification
-- Reviewed uploaded src.zip and three screenshots.
-- Build: NOT VERIFIED (project's pre-existing `node_modules` is incomplete).
-- Type-check: BLOCKED (`TS2688` missing Babel/React type definitions in existing project install).
-- Lint: NOT VERIFIED (dependencies unavailable).
-- Live owner/member/client QA and Supabase RLS: NOT VERIFIED.
-- Completion timestamp, per-work-order due date, and PO assignee data missing from inspected PO schema: team leaderboard, on-time rate and overdue-work-order count cannot honestly be implemented from current columns.
-
-## PowerShell (from actual project root)
-```
-$project = 'C:\PATH\TO\EXISTING\ADROUTE'
-$zip = "$env:USERPROFILE\Downloads\AdRoute_source_patch.zip"
-Set-Location $project
-git status
-git switch -c backup-before-client-folder-redesign
-Expand-Archive -LiteralPath $zip -DestinationPath $project -Force
-npm ci
-npm run typecheck
-npm run lint
-npm run build
-npm run dev
-```
-Do not commit/push/deploy if any check fails. Verify live role access and work-order drawer first.
+Unchanged: Work Orders canonical list/drawer; Clients CRUD; client portal; billing and all operational pages.

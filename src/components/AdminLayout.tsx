@@ -7,7 +7,7 @@ import { ROLE_LABELS } from '@/lib/types';
 import { NotificationBell } from '@/components/NotificationBell';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
-import { LayoutDashboard, Building2, ShoppingCart, FileCheck, Palette,
+import { LayoutDashboard, Building2, FileCheck, Palette,
   Printer, Wrench, FileText, IndianRupee, Settings, LogOut, Menu, X, PanelLeftClose, PanelLeftOpen,
   Map as MapIcon, ClipboardCheck, ClipboardList, Truck, Route as RouteIcon, User,
 } from 'lucide-react';
@@ -89,7 +89,6 @@ export default function AdminLayout() {
   const navItems = [
     { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, show: isAdmin || isAccounts },
     { to: '/clients', label: 'Clients', icon: Building2, show: isAdmin },
-    { to: '/campaigns', label: 'Campaigns', icon: ShoppingCart, show: isAdmin },
     { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts, badge: pendingCounts?.clientRequests },
     { to: '/supply-orders', label: 'Supply Orders', icon: Truck, show: isAdmin || isAccounts },
     { to: '/survey-review', label: 'Survey Review', icon: FileCheck, show: isAdmin, badge: pendingCounts?.survey },

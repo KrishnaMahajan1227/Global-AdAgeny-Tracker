@@ -9,7 +9,7 @@ import PublicInfoPage from '@/pages/PublicInfoPage';
 import AdminLayout from '@/components/AdminLayout';
 import DashboardPage from '@/pages/DashboardPage';
 import OwnerConsolePage from '@/pages/OwnerConsolePage';
-import { ClientsPage, CampaignsPage, ShopsPage, ShopDetailPage } from '@/pages/ShopsPages';
+import { ClientsPage, ShopsPage, ShopDetailPage } from '@/pages/ShopsPages';
 import PurchaseOrdersPage from '@/pages/PurchaseOrdersPage';
 import SupplyOrdersPage from '@/pages/SupplyOrdersPage';
 import SurveyReviewPage from '@/pages/SurveyReviewPage';
@@ -95,7 +95,7 @@ function homeRouteForRole(role: Role) {
 function DetailRedirect({ section, kind }: { section: 'clients' | 'campaigns'; kind?: 'project' | 'campaign' }) {
   const { id } = useParams();
   const detail = section === 'clients' ? id : `${kind}:${id}`;
-  return <Navigate to={`/${section}?detail=${encodeURIComponent(detail || '')}`} replace />;
+  return <Navigate to={section === 'clients' ? `/clients?detail=${encodeURIComponent(detail || '')}` : `/clients?campaign=${encodeURIComponent(detail || '')}`} replace />;
 }
 
 function RoleRedirect() {
@@ -187,8 +187,8 @@ function AppRoutes() {
         <Route path="/clients/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="clients" /></ProtectedRoute>} />
         <Route path="/campaigns/project/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" kind="project" /></ProtectedRoute>} />
         <Route path="/campaigns/client/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" kind="campaign" /></ProtectedRoute>} />
-        <Route path="/campaigns" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'demo']}><CampaignsPage /></ProtectedRoute>} />
-        <Route path="/projects" element={<Navigate to="/campaigns" replace />} />
+        <Route path="/campaigns" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'demo']}><Navigate to="/clients" replace /></ProtectedRoute>} />
+        <Route path="/projects" element={<Navigate to="/clients" replace />} />
         <Route path="/purchase-orders" element={
           <ProtectedRoute allowedRoles={FINANCIAL_ROLES}><PurchaseOrdersPage /></ProtectedRoute>
         } />

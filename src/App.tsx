@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { Role } from '@/lib/types';
@@ -8,7 +8,6 @@ import LandingPage from '@/pages/LandingPage';
 import PublicInfoPage from '@/pages/PublicInfoPage';
 import AdminLayout from '@/components/AdminLayout';
 import DashboardPage from '@/pages/DashboardPage';
-import AgencyHierarchyPage from '@/pages/AgencyHierarchyPage';
 import OwnerConsolePage from '@/pages/OwnerConsolePage';
 import { ClientsPage, CampaignsPage, ShopsPage, ShopDetailPage } from '@/pages/ShopsPages';
 import PurchaseOrdersPage from '@/pages/PurchaseOrdersPage';
@@ -91,6 +90,13 @@ function homeRouteForRole(role: Role) {
   if (role === 'designer') return '/design';
   if (role === 'printing') return '/production';
   return '/dashboard';
+}
+
+// Preserve existing bookmarked detail URLs while showing details in their original list screens.
+function DetailRedirect({ section, kind }: { section: 'clients' | 'campaigns'; kind?: 'project' | 'campaign' }) {
+  const { id } = useParams();
+  const detail = section === 'clients' ? id : `${kind}:${id}`;
+  return <Navigate to={`/${section}?detail=${encodeURIComponent(detail || '')}`} replace />;
 }
 
 function RoleRedirect() {
@@ -179,9 +185,9 @@ function AppRoutes() {
         } />
         <Route path="/account" element={<AccountSettingsPage />} />
         <Route path="/clients" element={<ClientsPage />} />
-        <Route path="/clients/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><AgencyHierarchyPage kind="client" /></ProtectedRoute>} />
-        <Route path="/campaigns/project/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><AgencyHierarchyPage kind="project" /></ProtectedRoute>} />
-        <Route path="/campaigns/client/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><AgencyHierarchyPage kind="campaign" /></ProtectedRoute>} />
+        <Route path="/clients/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="clients" /></ProtectedRoute>} />
+        <Route path="/campaigns/project/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" kind="project" /></ProtectedRoute>} />
+        <Route path="/campaigns/client/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" kind="campaign" /></ProtectedRoute>} />
         <Route path="/campaigns" element={<CampaignsPage />} />
         <Route path="/projects" element={<Navigate to="/campaigns" replace />} />
         <Route path="/purchase-orders" element={

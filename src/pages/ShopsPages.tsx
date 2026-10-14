@@ -6,6 +6,7 @@ import { useAuth } from '@/lib/auth';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ProgressBar } from '@/components/ui';
 import { completion, isDone, type Order } from '@/lib/agencyProgress';
+import AgencyHierarchyPage from '@/pages/AgencyHierarchyPage';
 import {
   Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, PageHeader,
   FilterButton, FilterDrawer, FilterSection, Combobox,
@@ -54,6 +55,10 @@ export function ClientsPage() {
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
   const canHardDelete = profile?.role === 'agency_owner' || profile?.role === 'admin';
+  const [clientParams, setClientParams] = useSearchParams();
+  const selectedClientId = clientParams.get('detail');
+  const [clientSearch, setClientSearch] = useState('');
+  const [clientPage, setClientPage] = useState(1);
   const [modalOpen, setModalOpen] = useState(false);
   const [editClient, setEditClient] = useState<Client | null>(null);
   const [deactivateClient, setDeactivateClient] = useState<Client | null>(null);
@@ -62,11 +67,17 @@ export function ClientsPage() {
   const [notice, setNotice] = useState<{ kind: 'error' | 'success'; message: string } | null>(null);
   const [form, setForm] = useState({ name: '', contact_person: '', contact_phone: '', contact_email: '', address: '', city: '', state: '', gst_number: '' });
 
-  const { data: clients } = useQuery({
+  const { data: clients, isLoading: clientsLoading, isError: clientsError, refetch: retryClients } = useQuery({
     queryKey: ['clients', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('clients').select('*').eq('organization_id', orgId).order('name');
-      return data as Client[];
+      const rows: Client[] = [];
+      for (let from = 0; ; from += 500) {
+        const { data, error } = await supabase.from('clients').select('*').eq('organization_id', orgId).order('name').range(from, from + 499);
+        if (error) throw error;
+        rows.push(...((data || []) as Client[]));
+        if (!data || data.length < 500) break;
+      }
+      return rows;
     },
     enabled: !!orgId,
   });
@@ -204,6 +215,10 @@ export function ClientsPage() {
     setHardDeleteClient(client);
   }
 
+  const visibleClients = (clients || []).filter(c => `${c.name} ${c.city || ''} ${c.contact_person || ''}`.toLowerCase().includes(clientSearch.toLowerCase()));
+  const totalClientPages = Math.max(1, Math.ceil(visibleClients.length / 20));
+  const clientPageSafe = Math.min(clientPage, totalClientPages);
+  const pagedClients = visibleClients.slice((clientPageSafe - 1) * 20, clientPageSafe * 20);
   const hardDeleteReady = confirmName.trim().toLowerCase() === (hardDeleteClient?.name || '').trim().toLowerCase();
 
   return (
@@ -226,54 +241,16 @@ export function ClientsPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {clients?.map((client) => (
-          <Card key={client.id} className={`p-5 ${!client.is_active ? 'opacity-70' : ''}`}>
-            <div className="flex items-start justify-between mb-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="font-semibold text-slate-900">{client.name}</h3>
-                  {!client.is_active && (
-                    <span className="text-[10px] font-semibold uppercase tracking-wide bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">Inactive</span>
-                  )}
-                </div>
-                <p className="text-sm text-slate-500">{client.contact_person || 'No contact'}</p>
-              </div>
-              <div className="flex gap-1 shrink-0">
-                <button onClick={() => openEdit(client)} title="Edit" className="p-1.5 text-slate-400 hover:text-blue-600">
-                  <Pencil className="w-4 h-4" />
-                </button>
-                {client.is_active ? (
-                  <button onClick={() => setDeactivateClient(client)} title="Deactivate (keeps all data, reversible)" className="p-1.5 text-slate-400 hover:text-amber-600">
-                    <Ban className="w-4 h-4" />
-                  </button>
-                ) : (
-                  <button onClick={() => deactivateMutation.mutate({ client, active: true })} title="Reactivate" className="p-1.5 text-slate-400 hover:text-emerald-600">
-                    <RotateCcw className="w-4 h-4" />
-                  </button>
-                )}
-                {canHardDelete && (
-                  <button onClick={() => openHardDelete(client)} title="Delete permanently — removes all its campaigns, work orders, shops and invoices" className="p-1.5 text-slate-400 hover:text-red-600">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-            </div>
-            <div className="text-sm text-slate-600 space-y-1">
-              {client.city && <p>{client.city}, {client.state}</p>}
-              {client.contact_phone && <p>{client.contact_phone}</p>}
-              {client.gst_number && <p className="text-xs text-slate-400">GST: {client.gst_number}</p>}
-            </div>
-            {(() => { const orders = clientProgress?.orders.filter(o => o.client_id === client.id) || []; const active = clientProgress?.projects.filter(p => p.client_id === client.id && p.status === 'active').length || 0; return <div className="mt-3 text-sm space-y-2"><p>{active} active campaigns · {orders.filter(isDone).length}/{orders.length} work orders done</p><ProgressBar pct={completion(orders)} /><p>{completion(orders)}% complete · {orders.length && !orders.every(isDone) ? 'In Progress' : 'On Track'} · Next deadline: Not set</p></div>; })()}
-            <Link to={`/clients/${client.id}`} className="mt-3 inline-block text-sm text-blue-600 hover:underline">Open client →</Link>
-          </Card>
-        ))}
-        {clients?.length === 0 && (
-          <Card className="col-span-full">
-            <EmptyState icon={<Store className="w-12 h-12" />} title="No clients yet" subtitle="Add your first client to get started" />
-          </Card>
-        )}
+      {selectedClientId ? <div className="mb-5"><button className="text-sm font-medium text-blue-700 mb-4" onClick={() => setClientParams(p => {const q = new URLSearchParams(p);q.delete('detail');return q;})}>← All clients</button><AgencyHierarchyPage kind="client" selectedId={selectedClientId}/></div> : <>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <input aria-label="Search clients" value={clientSearch} onChange={e => {setClientSearch(e.target.value);setClientPage(1);}} placeholder="Search clients by name, city or contact" className="rounded-lg border border-slate-300 px-4 py-2 w-full sm:w-80 text-sm" />
+        <span className="text-sm text-slate-500">{visibleClients.length.toLocaleString('en-IN')} clients</span>
       </div>
+      {clientsLoading ? <p role="status" className="p-6">Loading clients…</p> : clientsError ? <p role="alert" className="p-6 text-red-700">Unable to load clients. <button className="underline" onClick={() => retryClients()}>Retry</button></p> : <Card className="overflow-x-auto"><table className="w-full min-w-[730px] text-sm"><thead className="bg-slate-50 text-left text-slate-600"><tr><th className="p-3">Client</th><th className="p-3">Campaigns</th><th className="p-3">Work orders</th><th className="p-3">Completion</th><th className="p-3">Status</th><th className="p-3">Actions</th></tr></thead><tbody>
+      {pagedClients.map(client => {const orders = clientProgress?.orders.filter(o=>o.client_id===client.id)||[];const active=clientProgress?.projects.filter(p=>p.client_id===client.id&&p.status==='active').length||0;return <tr className="border-t border-slate-100 hover:bg-slate-50" key={client.id}><td className="p-3"><Link className="font-semibold text-blue-700 hover:underline" to={`/clients?detail=${client.id}`}>{client.name}</Link><p className="text-xs text-slate-500">{client.city || client.contact_person || '—'}</p></td><td className="p-3">{active} active</td><td className="p-3">{orders.filter(isDone).length}/{orders.length} done</td><td className="p-3 min-w-36"><ProgressBar pct={completion(orders)}/><span className="text-xs">{completion(orders)}%</span></td><td className="p-3">{!client.is_active?'Inactive':orders.length&&!orders.every(isDone)?'In progress':'On track'}</td><td className="p-3"><div className="flex gap-2"><button className="text-blue-700" onClick={()=>openEdit(client)} aria-label={`Edit ${client.name}`}><Pencil className="w-4 h-4"/></button><button className="text-amber-700" onClick={()=> client.is_active ? setDeactivateClient(client) : deactivateMutation.mutate({client,active:true})} aria-label={`${client.is_active?'Deactivate':'Reactivate'} ${client.name}`}><Ban className="w-4 h-4"/></button>{canHardDelete&&<button className="text-red-700" onClick={()=>openHardDelete(client)} aria-label={`Delete ${client.name}`}><Trash2 className="w-4 h-4"/></button>}</div></td></tr>;})}
+      </tbody></table>{!pagedClients.length&&<p className="p-6 text-slate-500">{clientSearch?'No clients match this search.':'No clients yet. Use Add Client to begin.'}</p>}
+      {totalClientPages>1&&<div className="p-3 border-t flex items-center justify-end gap-3 text-sm"><button className="text-blue-700 disabled:opacity-40" disabled={clientPageSafe===1} onClick={()=>setClientPage(n=>n-1)}>Previous</button><span>Page {clientPageSafe} of {totalClientPages}</span><button className="text-blue-700 disabled:opacity-40" disabled={clientPageSafe===totalClientPages} onClick={()=>setClientPage(n=>n+1)}>Next</button></div>}</Card>}
+      </>}
 
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editClient ? 'Edit Client' : 'Add Client'}>
         <div className="space-y-4">
@@ -403,6 +380,8 @@ export function CampaignsPage() {
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
   const canDelete = profile?.role === 'agency_owner' || profile?.role === 'admin';
+  const [campaignParams, setCampaignParams] = useSearchParams();
+  const campaignDetail = campaignParams.get('detail');
   const [modalOpen, setModalOpen] = useState(false);
   const [editProject, setEditProject] = useState<Project | null>(null);
   const [deleteProject, setDeleteProject] = useState<Project | null>(null);
@@ -589,8 +568,12 @@ export function CampaignsPage() {
     { value: 'date_asc', label: 'Start Date (Oldest first)' },
   ];
 
+  if (campaignDetail && /^(project|campaign):[a-f0-9-]+$/i.test(campaignDetail)) {
+    return <div><button className="text-blue-700 text-sm mb-4" onClick={()=>setCampaignParams(p=>{const q=new URLSearchParams(p);q.delete('detail');return q;})}>← All campaigns</button><AgencyHierarchyPage kind={campaignDetail.startsWith('project:')?'project':'campaign'} selectedId={campaignDetail.split(':')[1]}/></div>;
+  }
   return (
     <div>
+
       <PageHeader
         title="Campaigns"
         subtitle="Your own campaigns, plus every client campaign a Work Order has been assigned to you under"
@@ -688,7 +671,7 @@ export function CampaignsPage() {
                   <td className="px-4 py-3 text-slate-500 text-xs">{r.project.start_date ? new Date(r.project.start_date).toLocaleDateString('en-IN') : '—'}</td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      <Link to={`/campaigns/project/${r.project.id}`} className="text-xs text-blue-600 hover:underline flex items-center gap-1">
+                      <Link to={`/campaigns?detail=project:${r.project.id}`} className="text-xs text-blue-600 hover:underline flex items-center gap-1">
                         <ListOrdered className="w-3.5 h-3.5" /> Work Orders
                       </Link>
                       <button onClick={() => openEdit(r.project!)} className="p-1 text-slate-400 hover:text-blue-600">

@@ -1,0 +1,1 @@
+Targeted correction for existing AdRoute app. Only the four listed files changed. No Supabase schema changes. Back up these files before overwriting. Preserve existing app assets, .env and all other files. Run npm ci, npm run typecheck, npm run build; test owner/client/field permissions before deploying. Note dependency installation/build were not verified in this environment.

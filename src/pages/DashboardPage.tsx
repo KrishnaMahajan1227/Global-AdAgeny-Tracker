@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth';
@@ -7,51 +7,85 @@ import { Card, ProgressBar } from '@/components/ui';
 import { completion, dateLabel, isDone, isOverdue, percent, type Order } from '@/lib/agencyProgress';
 import type { Project, Client, Campaign } from '@/lib/types';
 
-const periods = ['week', 'month', '30days', 'custom'];
-const views = ['client','campaign','team'];
-const metrics = ['completion','completed','ontime'];
-const dateKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-
+type ClientRow = {id:string;name:string;active:boolean;activeCampaigns:number;orders:Order[];due:string|null;late:boolean};
+const fmt = (n:number) => n.toLocaleString('en-IN');
+const startOfPeriod = (period:string, from:string|null) => {
+  const d = new Date();d.setHours(0,0,0,0);
+  if(period==='week') d.setDate(d.getDate()-((d.getDay()+6)%7));
+  if(period==='month') d.setDate(1);
+  if(period==='30days') d.setDate(d.getDate()-29);
+  if(period==='custom' && from && !Number.isNaN(Date.parse(from))) return new Date(`${from}T00:00:00`);
+  return d;
+};
 export default function DashboardPage() {
-  const { profile } = useAuth();
-  const orgId = profile?.organization_id;
-  const [params, setParams] = useSearchParams();
-  const view = views.includes(params.get('view') || '') ? params.get('view')! : 'client';
-  const period = periods.includes(params.get('range') || '') ? params.get('range')! : 'month';
-  const metric = metrics.includes(params.get('metric') || '') ? params.get('metric')! : 'completion';
-  const setFilter = (key:string, value:string) => setParams(p => { const next = new URLSearchParams(p); next.set(key,value); return next; }, {replace:true});
-  const {data, isLoading, isError, refetch} = useQuery({queryKey:['agency-progress-dashboard',orgId],enabled:!!orgId,queryFn:async()=>{
-    if (!orgId) throw new Error('Organization missing');
-    const [clients, projects, campaigns, orders] = await Promise.all([
-      supabase.from('clients').select('id,name,is_active').eq('organization_id',orgId),
-      supabase.from('projects').select('id,name,client_id,status,start_date,end_date,created_at').eq('organization_id',orgId),
-      supabase.from('campaigns').select('id,name,status,start_date,end_date,created_at'),
-      supabase.from('purchase_orders').select('id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,created_at').eq('organization_id',orgId),
+  const {profile}=useAuth();const orgId=profile?.organization_id;
+  const [params,setParams]=useSearchParams();
+  const [search,setSearch]=useState('');const [page,setPage]=useState(1);
+  const view=params.get('view')==='campaign'?'campaign':'client';
+  const range=['week','month','30days','custom'].includes(params.get('range')||'')?params.get('range')!:'month';
+  const metric=params.get('metric')==='completed'?'completed':'completion';
+  const setFilter=(key:string,value:string)=>{setPage(1);setParams(p=>{const next=new URLSearchParams(p);next.set(key,value);return next;},{replace:true});};
+  const {data,isLoading,isError,refetch}=useQuery({queryKey:['agency-owner-overview',orgId],enabled:!!orgId,queryFn:async()=>{
+    if(!orgId)throw new Error('Organization unavailable');
+    // Every large table is fetched in pages; Supabase/PostgREST defaults to a 1000-row limit.
+    async function all(table:'clients'|'projects'|'campaigns'|'purchase_orders',columns:string,scoped:boolean) {
+      const rows:Record<string,unknown>[]=[];
+      for(let start=0;;start+=500){
+        let q=supabase.from(table).select(columns).order('id').range(start,start+499);
+        if(scoped) q=q.eq('organization_id',orgId!);
+        const {data:batch,error}=await q;if(error)throw error;
+        rows.push(...(batch||[]) as Record<string,unknown>[]);
+        if(!batch||batch.length<500)break;
+      }
+      return rows;
+    }
+    const [clients,projects,campaigns,orders]=await Promise.all([
+      all('clients','id,name,is_active',true),
+      all('projects','id,name,client_id,status,start_date,end_date,created_at',true),
+      all('campaigns','id,name,status,start_date,end_date,created_at',false),
+      all('purchase_orders','id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,created_at',true),
     ]);
-    for (const r of [clients,projects,campaigns,orders]) if(r.error) throw r.error;
-    return {clients: (clients.data||[]) as Pick<Client,'id'|'name'|'is_active'>[],projects:(projects.data||[]) as Pick<Project,'id'|'name'|'client_id'|'status'|'start_date'|'end_date'|'created_at'>[],campaigns:(campaigns.data||[]) as Pick<Campaign,'id'|'name'|'status'|'start_date'|'end_date'|'created_at'>[],orders:(orders.data||[]) as Order[]};
+    return {clients:clients as unknown as Pick<Client,'id'|'name'|'is_active'>[],projects:projects as unknown as Pick<Project,'id'|'name'|'client_id'|'status'|'start_date'|'end_date'|'created_at'>[],campaigns:campaigns as unknown as Pick<Campaign,'id'|'name'|'status'|'start_date'|'end_date'|'created_at'>[],orders:orders as unknown as Order[]};
   }});
-  const now = new Date();
-  const start = useMemo(()=> { const d = new Date(); d.setHours(0,0,0,0); if(period==='week') d.setDate(d.getDate()-((d.getDay()+6)%7)); else if(period==='month') d.setDate(1); else if(period==='30days') d.setDate(d.getDate()-29); else if(params.get('from')) return new Date(`${params.get('from')}T00:00:00`); return d; },[period,params]);
-  const end = period==='custom' && params.get('to') ? new Date(`${params.get('to')}T23:59:59`) : now;
-  if(isLoading) return <p role="status" className="p-8">Loading agency performance…</p>;
-  if(isError) return <div role="alert" className="p-6 text-red-700">Unable to load agency progress. <button className="underline" onClick={()=>refetch()}>Retry</button></div>;
-  if(!data) return null;
-  const scoped = data.orders.filter(o=>{const d=new Date(o.created_at);return d>=start && d<=end;});
-  const campaigns = [...data.projects.map(p=>({...p,kind:'project' as const})),...data.campaigns.map(c=>({...c,client_id:undefined,kind:'client' as const}))];
-  const relevant = (c:typeof campaigns[number])=>data.orders.filter(o=>c.kind==='project'?o.project_id===c.id:o.campaign_id===c.id);
-  const clientRows = data.clients.map(c=>{const orders=data.orders.filter(o=>o.client_id===c.id);const active=data.projects.filter(p=>p.client_id===c.id&&p.status==='active').length + data.campaigns.filter(p=>p.status==='active'&&data.orders.some(o=>o.client_id===c.id&&o.campaign_id===p.id)).length;const due = data.projects.filter(p=>p.client_id===c.id&&p.end_date&&p.status==='active').map(p=>p.end_date!).sort()[0];const delayed = !!due && isOverdue(due,orders.length>0&&orders.every(isDone));return {client:c,orders,active,due,status:delayed?'Delayed':orders.length&&!orders.every(isDone)&&due&&new Date(due).getTime()-Date.now()<7*86400000?'At Risk':'On Track'};});
-  const list = view==='client' ? data.clients.map(c=>({id:c.id,name:c.name,orders:scoped.filter(o=>o.client_id===c.id),to:`/clients/${c.id}`})) : view==='campaign' ? campaigns.map(c=>({id:`${c.kind}-${c.id}`,name:c.name,orders:scoped.filter(o=>c.kind==='project'?o.project_id===c.id:o.campaign_id===c.id),to:`/campaigns/${c.kind}/${c.id}`})) : [];
-  const activeCampaigns = campaigns.filter(c=>c.status==='active');
-  const runningOrders = data.orders.filter(o=>!isDone(o)&&o.status!=='cancelled'&&o.assignment_status!=='rejected');
-  return <main className="max-w-7xl mx-auto space-y-7">
-    <div><h1 className="text-2xl font-bold text-slate-900">Agency dashboard</h1><p className="text-sm text-slate-600 mt-1">Live progress across clients, campaigns and work orders</p></div>
-    <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">{[
-      ['Active clients',data.clients.filter(c=>c.is_active).length],['Active campaigns',activeCampaigns.length],['Open work orders',runningOrders.length],['Overdue work orders','—'],['Average completion',`${completion(data.orders)}%`]
-    ].map(([label,num])=><Card key={label} className="p-4"><p className="text-xs text-slate-500">{label}</p><p className="text-2xl font-bold mt-2">{num}</p>{label==='Overdue work orders'&&<p className="text-xs text-slate-500">No per-order due dates recorded</p>}</Card>)}</div>
-    <section><h2 className="text-lg font-semibold mb-3">Client-wise progress</h2><Card className="overflow-x-auto"><table className="min-w-[700px] w-full text-sm"><thead><tr className="text-left border-b text-slate-600"><th className="p-3">Client</th><th className="p-3">Active campaigns</th><th className="p-3">Done / total</th><th className="p-3">Progress</th><th className="p-3">Status</th><th className="p-3">Next deadline</th></tr></thead><tbody>{clientRows.map(r=><tr key={r.client.id} className="border-b hover:bg-slate-50"><td className="p-3"><Link to={`/clients/${r.client.id}`} className="font-semibold text-blue-700">{r.client.name}</Link></td><td className="p-3">{r.active}</td><td className="p-3">{r.orders.filter(isDone).length} / {r.orders.length}</td><td className="p-3 w-44"><ProgressBar pct={completion(r.orders)}/><span>{completion(r.orders)}%</span></td><td className="p-3">{r.status}</td><td className="p-3">{dateLabel(r.due)}</td></tr>)}</tbody></table>{!clientRows.length&&<p className="p-5">No clients yet. <Link className="text-blue-700" to="/clients">Add a client</Link></p>}</Card></section>
-    <section><h2 className="text-lg font-semibold mb-3">Campaign progress</h2><div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">{activeCampaigns.map(c=><Link key={`${c.kind}-${c.id}`} to={`/campaigns/${c.kind}/${c.id}`} className="rounded-xl border bg-white p-4 hover:border-blue-400"><strong>{c.name}</strong><div className="mt-3"><ProgressBar pct={completion(relevant(c))}/></div><p className="text-xs mt-2 text-slate-600">{relevant(c).filter(isDone).length}/{relevant(c).length} work orders · {completion(relevant(c))}%</p></Link>)}{!activeCampaigns.length&&<p className="text-sm text-slate-600">No active campaigns.</p>}</div></section>
-    <section><h2 className="text-lg font-semibold mb-3">Progression filters</h2><Card><div className="flex flex-wrap gap-3 mb-4"><label className="text-sm">View by <select aria-label="View by" className="block mt-1 border rounded p-2" value={view} onChange={e=>setFilter('view',e.target.value)}><option value="client">Client</option><option value="campaign">Campaign</option><option value="team">Team Member</option></select></label><label className="text-sm">Time range <select aria-label="Time range" className="block mt-1 border rounded p-2" value={period} onChange={e=>setFilter('range',e.target.value)}><option value="week">This week</option><option value="month">This month</option><option value="30days">Last 30 days</option><option value="custom">Custom</option></select></label><label className="text-sm">Metric <select aria-label="Metric" className="block mt-1 border rounded p-2" value={metric} onChange={e=>setFilter('metric',e.target.value)}><option value="completion">Completion %</option><option value="completed">Work orders completed</option><option value="ontime">On-time rate</option></select></label>{period==='custom'&&<><label className="text-sm">From <input aria-label="From date" type="date" className="block mt-1 border rounded p-2" value={params.get('from')||dateKey(start)} onChange={e=>setFilter('from',e.target.value)}/></label><label className="text-sm">To <input aria-label="To date" type="date" className="block mt-1 border rounded p-2" value={params.get('to')||dateKey(now)} onChange={e=>setFilter('to',e.target.value)}/></label></>}</div>{view==='team'||metric==='ontime' ? <p className="text-sm text-slate-600">{view==='team'?'Team-member assignment data is not stored on these work orders.':'On-time completion cannot be computed without work-order due and completion dates.'} No scores have been estimated.</p>:<div className="space-y-4">{list.map(row=><div key={row.id}><div className="flex items-center justify-between text-sm mb-2"><Link to={row.to} className="text-blue-700 font-medium">{row.name}</Link><span>{metric==='completed'?`${row.orders.filter(isDone).length} completed`:`${percent(row.orders.filter(isDone).length,row.orders.length)}%`}</span></div><ProgressBar pct={completion(row.orders)}/></div>)}{!list.length&&<p className="text-sm text-slate-600">Nothing to display for this view.</p>}</div>}</Card></section>
-    <div className="grid md:grid-cols-2 gap-4"><section><h2 className="text-lg font-semibold mb-3">Team performance</h2><Card><p className="text-sm text-slate-600">Leaderboard unavailable: purchase orders do not have a reliable assignee or task completion timestamp. Scores and Top Performer are hidden until those records exist.</p></Card></section><section><h2 className="text-lg font-semibold mb-3">Needs attention</h2><Card><p className="text-sm mb-2">{data.orders.filter(o=>o.assignment_status==='pending_acceptance').length} work orders awaiting review</p><p className="text-sm mb-2">{activeCampaigns.filter(c=>relevant(c).length===0).length} active campaigns without work orders</p><p className="text-sm text-slate-600">Per-order overdue and unassigned counts are unavailable without their source fields.</p><Link className="text-blue-700 text-sm inline-block mt-3" to="/purchase-orders">Review work orders →</Link></Card></section></div>
+  const start=useMemo(()=>startOfPeriod(range,params.get('from')),[range,params]);
+  const to=params.get('to');const end=range==='custom'&&to&&!Number.isNaN(Date.parse(to))?new Date(`${to}T23:59:59`):new Date();
+  if(isLoading)return <p role="status" className="p-8 text-slate-600">Loading agency overview…</p>;
+  if(isError)return <Card className="p-6"><p role="alert" className="text-red-700">Could not load your agency overview. <button className="underline" onClick={()=>refetch()}>Retry</button></p></Card>;
+  if(!data)return null;
+  const projects=data.projects;
+  const activeProjects=projects.filter(p=>p.status==='active');
+  const visibleCampaigns=data.campaigns.filter(c=>data.orders.some(o=>o.campaign_id===c.id));
+  const activeCampaigns=activeProjects.length+visibleCampaigns.filter(c=>c.status==='active').length;
+  const open=data.orders.filter(o=>!isDone(o)&&o.status!=='cancelled'&&o.assignment_status!=='rejected');
+  const orderByClient=new Map<string,Order[]>();data.orders.forEach(o=>{if(!o.client_id)return;const arr=orderByClient.get(o.client_id)||[];arr.push(o);orderByClient.set(o.client_id,arr);});
+  const clientRows:ClientRow[]=data.clients.map(c=>{
+    const orders=orderByClient.get(c.id)||[];
+    const ownProjects=projects.filter(p=>p.client_id===c.id);
+    const linked=visibleCampaigns.filter(camp=>orders.some(o=>o.campaign_id===camp.id));
+    const dates=[...ownProjects,...linked].filter(p=>p.status==='active'&&p.end_date).map(p=>p.end_date!).sort();
+    const due=dates[0]||null;
+    return {id:c.id,name:c.name,active:c.is_active,activeCampaigns:ownProjects.filter(p=>p.status==='active').length+linked.filter(p=>p.status==='active').length,orders,due,late:isOverdue(due,orders.length>0&&orders.every(isDone))};
+  });
+  const deadlineIssues=clientRows.filter(r=>r.late).length;
+  const pendingReview=open.filter(o=>o.assignment_status==='pending_acceptance');
+  const unstartedCampaigns=activeProjects.filter(p=>!data.orders.some(o=>o.project_id===p.id));
+  const periodOrders=data.orders.filter(o=>{const d=new Date(o.created_at);return d>=start&&d<=end;});
+  const groups=view==='client' ? clientRows.map(r=>({key:r.id,name:r.name,href:`/clients?detail=${r.id}`,orders:periodOrders.filter(o=>o.client_id===r.id),extra:r.activeCampaigns})) : [...projects.map(p=>({key:`p-${p.id}`,name:p.name,href:`/campaigns?detail=project:${p.id}`,orders:periodOrders.filter(o=>o.project_id===p.id),extra:0})),...visibleCampaigns.map(c=>({key:`c-${c.id}`,name:c.name,href:`/campaigns?detail=campaign:${c.id}`,orders:periodOrders.filter(o=>o.campaign_id===c.id),extra:0}))];
+  const filtered=groups.filter(r=>r.name.toLowerCase().includes(search.toLowerCase())).sort((a,b)=>b.orders.filter(isDone).length-a.orders.filter(isDone).length||a.name.localeCompare(b.name));
+  const pageCount=Math.max(1,Math.ceil(filtered.length/12));const currentPage=Math.min(page,pageCount);const pageRows=filtered.slice((currentPage-1)*12,currentPage*12);
+  return <main className="max-w-7xl mx-auto space-y-6 pb-8">
+    <header className="flex flex-wrap items-end justify-between gap-3"><div><h1 className="text-2xl font-bold tracking-tight text-slate-900">Agency overview</h1><p className="text-sm text-slate-600 mt-1">Clients, delivery and issues that need your attention</p></div><Link className="rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium text-white hover:bg-blue-800" to="/clients">Manage clients →</Link></header>
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">{[
+      ['Active clients',data.clients.filter(c=>c.is_active).length],['Running campaigns',activeCampaigns],['Open work orders',open.length],['Overall completion',`${completion(data.orders)}%`]
+    ].map(([label,num])=><Card key={label} className="p-4 sm:p-5"><p className="text-sm text-slate-600">{label}</p><p className="text-2xl sm:text-3xl font-bold mt-2 text-slate-900">{typeof num==='number'?fmt(num):num}</p></Card>)}</div>
+    <section aria-label="Attention required" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-4 sm:px-5"><div className="flex flex-wrap items-center gap-x-7 gap-y-2"><strong className="text-amber-950">Needs attention</strong><span className="text-sm text-amber-950"><b>{fmt(deadlineIssues)}</b> clients past campaign deadline</span><span className="text-sm text-amber-950"><b>{fmt(pendingReview.length)}</b> work orders awaiting acceptance</span><span className="text-sm text-amber-950"><b>{fmt(unstartedCampaigns.length)}</b> active campaigns without orders</span><Link className="text-sm font-semibold text-blue-800 underline ml-auto" to="/purchase-orders">Review work orders</Link></div></section>
+    <section><div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 mb-4"><div><h2 className="text-lg font-bold text-slate-900">Delivery progress</h2><p className="text-sm text-slate-500">Search, filter and open a client or campaign directly. Results are paginated.</p></div><div className="flex flex-wrap gap-2 text-sm">
+      <label>Group by<select aria-label="Group by" className="block mt-1 border border-slate-300 rounded-lg bg-white px-3 py-2" value={view} onChange={e=>setFilter('view',e.target.value)}><option value="client">Clients</option><option value="campaign">Campaigns</option></select></label>
+      <label>Period<select aria-label="Period" className="block mt-1 border border-slate-300 rounded-lg bg-white px-3 py-2" value={range} onChange={e=>setFilter('range',e.target.value)}><option value="week">This week</option><option value="month">This month</option><option value="30days">Last 30 days</option><option value="custom">Custom</option></select></label>
+      <label>Metric<select aria-label="Metric" className="block mt-1 border border-slate-300 rounded-lg bg-white px-3 py-2" value={metric} onChange={e=>setFilter('metric',e.target.value)}><option value="completion">Completion %</option><option value="completed">Orders completed</option></select></label>
+    </div></div>
+    {range==='custom'&&<div className="flex flex-wrap gap-3 mb-3 text-sm"><label>From <input type="date" className="ml-2 border rounded-lg px-2 py-1" value={params.get('from')||''} onChange={e=>setFilter('from',e.target.value)}/></label><label>To <input type="date" className="ml-2 border rounded-lg px-2 py-1" value={to||''} onChange={e=>setFilter('to',e.target.value)}/></label></div>}
+    <Card className="overflow-hidden"><div className="p-4 border-b"><input aria-label="Search progress" value={search} onChange={e=>{setSearch(e.target.value);setPage(1);}} placeholder={`Search ${view==='client'?'clients':'campaigns'}…`} className="border border-slate-300 rounded-lg px-3 py-2 text-sm w-full sm:w-80"/></div><div className="overflow-x-auto"><table className="w-full min-w-[620px] text-sm"><thead className="bg-slate-50 text-slate-600 text-left"><tr><th className="p-3">{view==='client'?'Client':'Campaign'}</th>{view==='client'&&<th className="p-3">Active campaigns</th>}<th className="p-3">Orders done / total</th><th className="p-3">Progress</th>{view==='client'&&<><th className="p-3">Health</th><th className="p-3">Next deadline</th></>}</tr></thead><tbody>{pageRows.map(r=>{const original=clientRows.find(c=>c.id===r.key);const done=r.orders.filter(isDone).length;return <tr key={r.key} className="border-t border-slate-100 hover:bg-slate-50"><td className="p-3"><Link className="font-semibold text-blue-700 hover:underline" to={r.href}>{r.name}</Link></td>{view==='client'&&<td className="p-3">{r.extra}</td>}<td className="p-3">{done}/{r.orders.length}</td><td className="p-3 min-w-40"><div className="flex items-center gap-3"><div className="w-28"><ProgressBar pct={completion(r.orders)}/></div><span>{metric==='completed'?fmt(done):`${percent(done,r.orders.length)}%`}</span></div></td>{view==='client'&&<><td className="p-3"><span className={original?.late?'text-red-700 font-medium':original?.orders.length&&!original.orders.every(isDone)?'text-blue-700':'text-emerald-700'}>{original?.late?'Delayed':original?.orders.length&&!original.orders.every(isDone)?'In progress':'On track'}</span></td><td className="p-3">{dateLabel(original?.due)}</td></>}</tr>;})}</tbody></table></div>{!pageRows.length&&<p className="p-6 text-slate-500">No records match these filters.</p>}{pageCount>1&&<div className="p-3 border-t flex justify-end items-center gap-3 text-sm"><button disabled={currentPage===1} className="text-blue-700 disabled:opacity-40" onClick={()=>setPage(n=>n-1)}>Previous</button><span>{currentPage} / {pageCount}</span><button disabled={currentPage===pageCount} className="text-blue-700 disabled:opacity-40" onClick={()=>setPage(n=>n+1)}>Next</button></div>}</Card>
+    <p className="mt-2 text-xs text-slate-500">Completion uses recorded work-order status. Period filters use order creation dates because historical completion timestamps are unavailable. Individual work-order overdue counts and team rankings are not shown without reliable source data.</p></section>
   </main>;
 }

@@ -106,7 +106,7 @@ export default function PurchaseOrdersPage() {
   // /purchase-orders?campaign=<client campaign id>  or  ?project=<agency campaign id>
   // — landed on from the Campaigns page's "Work Orders" link, so this list
   // opens pre-filtered to just that campaign's Work Orders.
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const campaignFilter = searchParams.get('campaign');
   const projectFilter = searchParams.get('project');
 
@@ -119,7 +119,19 @@ export default function PurchaseOrdersPage() {
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
-  const [clientFilter, setClientFilter] = useState('');
+  const [clientFilter, setClientFilter] = useState(() => new URLSearchParams(window.location.search).get('client') || '');
+  // Keep client-scoped navigation in sync with filter controls, refresh and browser Back.
+  const urlClientFilter = searchParams.get('client') || '';
+  useEffect(() => { setClientFilter(urlClientFilter); }, [urlClientFilter]);
+  const changeClientFilter = (nextId: string) => {
+    setClientFilter(nextId);
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous);
+      if (nextId) next.set('client', nextId);
+      else next.delete('client');
+      return next;
+    }, { replace: true });
+  };
   const [fulfillmentFilter, setFulfillmentFilter] = useState('');
   // Combined "Campaign" filter value — either `proj:<project id>` (this
   // agency's own campaign) or `camp:<client campaign id>` (a client's
@@ -536,6 +548,13 @@ export default function PurchaseOrdersPage() {
         </div>
       )}
 
+      {clientFilter && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
+          <span className="text-blue-900">Client filter: <strong>{clients?.find(c => c.id === clientFilter)?.name || 'Selected client'}</strong> · {scopedPos.filter(po => po.client_id === clientFilter).length} work orders</span>
+          <button type="button" onClick={() => changeClientFilter('')} className="font-medium text-blue-700 underline underline-offset-2 focus-visible:outline focus-visible:outline-2">Show all clients</button>
+        </div>
+      )}
+
       {/* Operational summary: counts come directly from the same fetched orders as the list. */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4" aria-label="Work order summary">
         {[
@@ -578,13 +597,13 @@ export default function PurchaseOrdersPage() {
       <FilterDrawer
         open={filterDrawerOpen}
         onClose={() => setFilterDrawerOpen(false)}
-        onClear={() => { setStatusFilter(''); setClientFilter(''); setFulfillmentFilter(''); setCampaignFilterValue(''); setZoneFilter(''); }}
+        onClear={() => { setStatusFilter(''); changeClientFilter(''); setFulfillmentFilter(''); setCampaignFilterValue(''); setZoneFilter(''); }}
         activeCount={activeFilterCount}
         resultCount={filteredPos.length}
         resultLabel="Work Orders"
       >
         <FilterSection label="Client">
-          <select value={clientFilter} onChange={(e) => setClientFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
+          <select value={clientFilter} onChange={(e) => changeClientFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">All Clients</option>
             {(clients || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>

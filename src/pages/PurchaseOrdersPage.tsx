@@ -164,7 +164,7 @@ export default function PurchaseOrdersPage() {
     enabled: !!orgId,
   });
 
-  const { data: pos } = useQuery({
+  const { data: pos, isLoading: ordersLoading, isError: ordersError, error: ordersErrorDetail, refetch: refetchOrders } = useQuery({
     queryKey: ['purchase_orders', orgId],
     queryFn: async () => {
       // client_org — hydrated so a Client-Assigned PO can show the client
@@ -190,7 +190,7 @@ export default function PurchaseOrdersPage() {
   // Also doubles as the source for the Zone filter below — same query,
   // just reading zone_id off the same narrow projection instead of a
   // second round-trip.
-  const { data: poShopLinks } = useQuery({
+  const { data: poShopLinks, isError: shopsError } = useQuery({
     queryKey: ['po-shop-links', orgId],
     queryFn: async () => {
       // PostgREST caps a single response (commonly 1,000 rows). Fetch each
@@ -360,7 +360,7 @@ export default function PurchaseOrdersPage() {
   // vs invoiced, per line item. Backed by v_po_line_item_utilization
   // (migration 0025), which does the rollup math in SQL so it stays in
   // sync with work_items/invoice_items without extra client-side joins.
-  const { data: utilization } = useQuery({
+  const { data: utilization, isError: utilizationError } = useQuery({
     queryKey: ['po-utilization', orgId],
     queryFn: async () => {
       const { data, error } = await supabase.from('v_po_line_item_utilization').select('*');
@@ -512,9 +512,9 @@ export default function PurchaseOrdersPage() {
     <div>
       <PageHeader
         title="Work Orders"
-        subtitle="Every Work Order (PO), its rates, and budgeted quantities per work type"
+        subtitle="Manage orders, delivery, line items and field execution in one place"
         action={
-          <button onClick={openAdd} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium text-sm transition">
+          <button onClick={openAdd} className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg font-medium text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600">
             <Plus className="w-4 h-4" /> Add Work Order
           </button>
         }
@@ -536,17 +536,39 @@ export default function PurchaseOrdersPage() {
         </div>
       )}
 
+      {/* Operational summary: counts come directly from the same fetched orders as the list. */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4" aria-label="Work order summary">
+        {[
+          { label: 'Total orders', count: scopedPos.length, tone: 'text-slate-900' },
+          { label: 'Active', count: scopedPos.filter(p => p.status === 'active').length, tone: 'text-blue-700' },
+          { label: 'Awaiting response', count: scopedPos.filter(p => p.origin === 'client_created' && p.assignment_status === 'pending_acceptance').length, tone: 'text-amber-700' },
+          { label: 'Closed', count: scopedPos.filter(p => p.status === 'closed').length, tone: 'text-emerald-700' },
+        ].map(item => (
+          <div key={item.label} className="rounded-lg border border-slate-200 bg-white px-4 py-3">
+            <p className="text-xs font-medium text-slate-500">{item.label}</p>
+            <p className={`mt-1 text-xl font-semibold tabular-nums ${item.tone}`}>{ordersLoading ? '—' : item.count}</p>
+          </div>
+        ))}
+      </div>
+      {(ordersError || shopsError || utilizationError) && (
+        <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          <p className="font-medium">Some Work Order information could not be loaded.</p>
+          <p className="mt-1">{ordersError ? (ordersErrorDetail instanceof Error ? ordersErrorDetail.message : 'Unable to load orders.') : 'Shop or progress data is temporarily unavailable.'}</p>
+          <button type="button" onClick={() => { void refetchOrders(); void queryClient.invalidateQueries({ queryKey: ['po-utilization', orgId] }); void queryClient.invalidateQueries({ queryKey: ['po-shop-links', orgId] }); }} className="mt-2 rounded border border-red-300 bg-white px-3 py-1.5 font-medium focus-visible:outline focus-visible:outline-2">Retry</button>
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <div className="relative flex-1 min-w-[220px]">
           <ShoppingCart className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search Work Order no. or client..."
+            placeholder="Search order name, PO number or client"
+            aria-label="Search work orders"
             className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
-        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
+        <select aria-label="Sort work orders" value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
           {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>Sort: {o.label}</option>)}
         </select>
         <FilterButton activeCount={activeFilterCount} onClick={() => setFilterDrawerOpen(true)} />
@@ -658,13 +680,12 @@ export default function PurchaseOrdersPage() {
           keeps the list itself scannable instead of every row trying to
           show everything at once. */}
       <Card className="overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[880px]">
+        <div className="overflow-x-auto" role="region" aria-label="Work orders list" tabIndex={0}>
+          <table className="w-full text-sm min-w-[720px]">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
               <tr>
                 <th className="text-left px-4 py-3 font-semibold">Work Order</th>
                 <th className="text-left px-4 py-3 font-semibold">Client</th>
-                <th className="text-left px-4 py-3 font-semibold">Campaign</th>
                 <th className="text-left px-4 py-3 font-semibold">Status</th>
                 <th className="text-left px-4 py-3 font-semibold w-40">Completion</th>
                 <th className="text-right px-4 py-3 font-semibold">Amount</th>
@@ -673,8 +694,8 @@ export default function PurchaseOrdersPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {pagedPos.map((po) => {
-                const { lineCount, hasBudget, anyVariance, completionPct, campaignName } = getPoMetrics(po, utilization || []);
+              {!ordersLoading && !ordersError && pagedPos.map((po) => {
+                const { lineCount, hasBudget, anyVariance, completionPct } = getPoMetrics(po, utilization || []);
                 const shopCount = shopCountByPo.get(po.id) || 0;
                 const primary = getPrimaryStatus(po);
 
@@ -682,7 +703,10 @@ export default function PurchaseOrdersPage() {
                   <tr
                     key={po.id}
                     onClick={() => setDetailPoId(po.id)}
-                    className="hover:bg-blue-50/50 cursor-pointer transition-colors group"
+                    onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setDetailPoId(po.id); } }}
+                    tabIndex={0}
+                    aria-label={`Open Work Order ${po.name || po.po_number}`}
+                    className="hover:bg-blue-50/50 cursor-pointer transition-colors group focus-visible:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
                   >
                     <td className="px-4 py-3.5">
                       {po.name && <p className="font-semibold text-slate-900">{po.name}</p>}
@@ -692,11 +716,6 @@ export default function PurchaseOrdersPage() {
                       </p>
                     </td>
                     <td className="px-4 py-3.5 text-slate-700">{po.clients?.name || <span className="text-slate-300">—</span>}</td>
-                    <td className="px-4 py-3.5 text-slate-600">
-                      {campaignName ? (
-                        <span className="inline-flex items-center gap-1"><Layers className="w-3.5 h-3.5 text-slate-300 shrink-0" />{campaignName}</span>
-                      ) : <span className="text-slate-300">—</span>}
-                    </td>
                     <td className="px-4 py-3.5">
                       <div className="flex items-center gap-1.5">
                         <StatusBadge status={primary.status} label={primary.label} />
@@ -727,9 +746,12 @@ export default function PurchaseOrdersPage() {
                   </tr>
                 );
               })}
-              {visiblePos.length === 0 && (
+              {ordersLoading && (
+                <tr><td colSpan={7} className="px-4 py-12 text-center text-sm text-slate-500"><Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin" />Loading work orders…</td></tr>
+              )}
+              {!ordersLoading && !ordersError && visiblePos.length === 0 && (
                 <tr>
-                  <td colSpan={8}>
+                  <td colSpan={7}>
                     <EmptyState
                       icon={<ShoppingCart className="w-12 h-12" />}
                       title={(pos || []).length === 0 ? 'No Work Orders yet' : 'No Work Orders match these filters'}
@@ -1050,7 +1072,7 @@ function WorkOrderDetailDrawer({
   onRespond?: (decision: 'accepted' | 'rejected') => void;
   isResponding?: boolean;
 }) {
-  const { hasBudget, anyVariance, budgetedAmount, invoicedAmount, balance, invoicedPct, completionPct, campaignName, stage } = getPoMetrics(po, utilization);
+  const { hasBudget, anyVariance, budgetedAmount, invoicedAmount, balance, invoicedPct, completionPct, stage } = getPoMetrics(po, utilization);
   const primary = getPrimaryStatus(po);
   const isPending = po.origin === 'client_created' && po.assignment_status === 'pending_acceptance';
 
@@ -1125,14 +1147,10 @@ function WorkOrderDetailDrawer({
             installer in the org seeing every Direct Install PO. */}
         {po.fulfillment_type === 'direct_install' && <DirectInstallTeamCard po={po} />}
 
-        <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-3">
           <div>
             <p className="text-xs text-slate-400 flex items-center gap-1 mb-0.5"><Building2 className="w-3 h-3" /> Client</p>
             <p className="text-sm font-medium text-slate-900">{po.clients?.name || '—'}</p>
-          </div>
-          <div>
-            <p className="text-xs text-slate-400 flex items-center gap-1 mb-0.5"><Layers className="w-3 h-3" /> Campaign</p>
-            <p className="text-sm font-medium text-slate-900">{campaignName || '—'}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 flex items-center gap-1 mb-0.5"><Calendar className="w-3 h-3" /> Order Date</p>
@@ -1140,7 +1158,7 @@ function WorkOrderDetailDrawer({
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="border border-slate-200 rounded-lg p-3">
             <p className="text-xs text-slate-400 mb-1">Total Amount</p>
             <p className="text-sm font-semibold text-slate-900">{po.total_amount != null ? formatRupees(po.total_amount) : '—'}</p>

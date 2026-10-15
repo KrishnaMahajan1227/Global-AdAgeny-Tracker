@@ -1,12 +1,19 @@
-# Agency dashboard correction
+# AdRoute Work Orders — targeted refinement
 
-- `src/pages/DashboardPage.tsx`: replaced repeated zero-percent/attention widgets with real agency operational snapshot: live orders, retail sites, shop-status delivery pipeline, pending acceptance, client delivery, and direct links to existing screens.
-- No migrations, data writes, route changes, or dependencies.
-- Preserves existing client, work-order, supply, survey, design, production and installation pages.
-- Stage counts represent *current shop statuses*, not exact pending task counts; unknown statuses shown separately, never silently counted as complete.
-- Due dates and on-time scores are intentionally omitted because purchase-order records do not provide reliable timestamps.
+## Modified files
+- `src/pages/PurchaseOrdersPage.tsx`: compact operational counters, clearer order lookup, keyboard-accessible existing order rows, loading/error/retry states, readable responsive drawer layout; removed redundant Campaign column from the order list while preserving underlying relationships, filter controls and CRUD.
 
-## Validation
-- Source reviewed against uploaded project and existing typed entities.
-- Build/lint/typecheck require installed dependencies; not certified as passing in this sandbox.
-- Apply on a clean Git branch, run checks, test with Supabase, then deploy.
+## Unchanged
+- No schema, migrations, payment, client, shop, campaign records, API or permissions changes.
+- Existing create/edit/delete, line-item management, shop links and client-request acceptance are preserved in place.
+
+## Verification
+- TypeScript transpile-module parse diagnostics: 0.
+- Full `npm run build`: blocked in provided environment (`vite: not found`). Must pass in the user's project before deployment.
+- Live Supabase interactions / cross-role browser tests: not performed.
+
+## Deployment
+1. Back up project and verify clean Git tree.
+2. Extract archive into project root, overwriting the one modified source file.
+3. Run `npm ci`, `npm run typecheck`, `npm run lint`, `npm run build`.
+4. Smoke-test all existing work-order actions before push. No SQL is required.

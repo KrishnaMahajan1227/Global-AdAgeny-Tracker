@@ -21,11 +21,13 @@ interface BoardMarkerCanvasProps {
    *  marked on the same photo (matches the color used in the burned-in
    *  review/export image). */
   colorIndex?: number;
+  /** Other boards on the same photo are visible, but cannot be edited until selected. */
+  otherPointsSets?: MarkPoint[][];
 }
 
 const POLYGON_COLORS = ['#2563eb', '#16a34a', '#d97706', '#db2777', '#7c3aed', '#0891b2'];
 
-export function BoardMarkerCanvas({ photoUrl, points, onChange, label, polygonLabel, colorIndex = 0 }: BoardMarkerCanvasProps) {
+export function BoardMarkerCanvas({ photoUrl, points, onChange, label, polygonLabel, colorIndex = 0, otherPointsSets = [] }: BoardMarkerCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const color = POLYGON_COLORS[colorIndex % POLYGON_COLORS.length];
@@ -92,6 +94,9 @@ export function BoardMarkerCanvas({ photoUrl, points, onChange, label, polygonLa
       >
         <img src={photoUrl} alt="Mark board" className="w-full pointer-events-none" draggable={false} />
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 w-full h-full pointer-events-none">
+          {otherPointsSets.filter((set) => set.length >= 3).map((set, index) => (
+            <polygon key={`other-${index}`} points={set.map((p) => `${p.x},${p.y}`).join(' ')} fill="rgba(148,163,184,.12)" stroke="#64748b" strokeDasharray="2 1" strokeWidth="0.55" vectorEffect="non-scaling-stroke" />
+          ))}
           {points.length >= 3 && (
             <polygon
               points={points.map((p) => `${p.x},${p.y}`).join(' ')}

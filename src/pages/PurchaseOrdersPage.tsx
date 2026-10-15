@@ -4,13 +4,14 @@ import { useSearchParams, Link } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import {
-  Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, PageHeader, ProgressBar,
+  Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, ProgressBar,
   FilterButton, FilterDrawer, FilterSection, Drawer, Pagination,
 } from '@/components/ui';
 import { PurchaseOrder, POLineItem, POLineItemUtilization, Campaign, Zone, RateCard, PoAssignment } from '@/lib/types';
 import { logAudit, notifyLinkedOrg, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
-import { computeUtilization, formatQty, formatRupees, isAreaUom, getActualForStage, UtilizationStage, fulfillmentTypeLabel, defaultUtilizationStage } from '@/lib/poUtilization';
+import { computeUtilization, calculatePoProgress, formatQty, formatRupees, isAreaUom, UtilizationStage, fulfillmentTypeLabel, defaultUtilizationStage } from '@/lib/poUtilization';
+import type { PoProgressSummary } from '@/lib/poUtilization';
 import { DonutChart } from '@/components/DonutChart';
 import {
   Plus, Pencil, Trash2, ShoppingCart, FileText, Upload, X, Loader2, IndianRupee, ListChecks, AlertTriangle, TrendingUp, ChevronDown,
@@ -56,34 +57,16 @@ function getPoMetrics(po: PoRow, utilization: POLineItemUtilization[]) {
   const lineCount = po.po_line_items?.length || 0;
   const poRows = utilization.filter((r) => r.purchase_order_id === po.id);
   const stage: UtilizationStage = defaultUtilizationStage(po.fulfillment_type);
-  let budgetedAmount = 0;
-  let invoicedAmount = 0;
-  let hasBudget = false;
-  let anyVariance = false;
-  let completionWeightedSum = 0;
-  let completionWeightBase = 0;
-  for (const row of poRows) {
-    const fig = computeUtilization(row, stage);
-    if (fig.budgetedAmount != null) {
-      budgetedAmount += fig.budgetedAmount;
-      hasBudget = true;
-      // Weight each line item's own % complete (installed/produced vs its
-      // budgeted qty) by that item's rupee value, so a PO mixing e.g.
-      // sqft foam sheet and piece-count poles still gets one meaningful
-      // "how much of this PO is done" number.
-      if (fig.utilizationPct != null) {
-        completionWeightedSum += fig.utilizationPct * fig.budgetedAmount;
-        completionWeightBase += fig.budgetedAmount;
-      }
-    }
-    invoicedAmount += fig.invoicedAmount;
-    if (fig.hasVariance) anyVariance = true;
-  }
-  const balance = hasBudget ? budgetedAmount - invoicedAmount : null;
-  const invoicedPct = hasBudget && budgetedAmount > 0 ? (invoicedAmount / budgetedAmount) * 100 : null;
-  const completionPct = completionWeightBase > 0 ? completionWeightedSum / completionWeightBase : null;
+  const summary = calculatePoProgress(poRows, stage, lineCount);
+  const anyVariance = poRows.some(row => computeUtilization(row, stage).hasVariance);
   const campaignName = po.projects?.name || po.campaigns?.name || null;
-  return { lineCount, poRows, stage, budgetedAmount, invoicedAmount, hasBudget, anyVariance, balance, invoicedPct, completionPct, campaignName };
+  return {
+    lineCount, poRows, stage, anyVariance, campaignName,
+    ...summary,
+    // Existing row and drawer consumers use the same physical completion.
+    completionPct: summary.workPct,
+    hasBudget: summary.budgetedAmount != null,
+  };
 }
 
 /** The single, primary status a row/drawer leads with — a client-assigned
@@ -129,6 +112,9 @@ export default function PurchaseOrdersPage() {
       const next = new URLSearchParams(previous);
       if (nextId) next.set('client', nextId);
       else next.delete('client');
+      next.delete('campaign');
+      next.delete('project');
+      next.delete('order');
       return next;
     }, { replace: true });
   };
@@ -141,31 +127,64 @@ export default function PurchaseOrdersPage() {
   const [zoneFilter, setZoneFilter] = useState('');
   const [sortBy, setSortBy] = useState('date_desc');
   const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
+  const [requestsExpanded, setRequestsExpanded] = useState(false);
+  const [clientOptionSearch, setClientOptionSearch] = useState('');
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(PO_PAGE_SIZES[1]);
 
   const [lineItemsPo, setLineItemsPo] = useState<PurchaseOrder | null>(null);
   const [detailPoId, setDetailPoId] = useState<string | null>(() => new URLSearchParams(window.location.search).get('order'));
+  useEffect(() => { setDetailPoId(searchParams.get('order')); }, [searchParams]);
+  const openWorkOrder = (id: string | null) => {
+    setDetailPoId(id);
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous);
+      if (id) next.set('order', id);
+      else next.delete('order');
+      return next;
+    }, { replace: true });
+  };
   const [notice, setNotice] = useState<{ kind: 'error' | 'success'; message: string } | null>(null);
 
   useEffect(() => {
     setPage(0);
   }, [search, statusFilter, clientFilter, fulfillmentFilter, campaignFilterValue, zoneFilter, sortBy, pageSize]);
 
-  useRealtimeInvalidate(['purchase_orders', 'po_line_items', 'work_items', 'invoice_items', 'shops'], orgId, [
+  useRealtimeInvalidate(['purchase_orders', 'po_line_items', 'work_items', 'invoices', 'invoice_items', 'shops'], orgId, [
     ['purchase_orders', orgId],
     ['po-utilization', orgId],
     ['po-shop-links', orgId],
+    ['po-billing-items', orgId],
   ]);
 
   const { data: clients } = useQuery({
-    queryKey: ['clients', orgId],
+    queryKey: ['clients', orgId, 'active-for-po'],
     queryFn: async () => {
-      const { data } = await supabase.from('clients').select('id, name').eq('organization_id', orgId).eq('is_active', true).order('name');
-      return data || [];
+      const result: { id: string; name: string }[] = [];
+      for (let from = 0; ; from += 500) {
+        const { data, error } = await supabase.from('clients').select('id, name')
+          .eq('organization_id', orgId).eq('is_active', true).order('name').range(from, from + 499);
+        if (error) throw error;
+        result.push(...(data || []));
+        if (!data || data.length < 500) break;
+      }
+      return result;
     },
     enabled: !!orgId,
   });
+  const { data: selectedClientRecord } = useQuery({
+    queryKey: ['selected-po-client', orgId, clientFilter],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('clients').select('id,name')
+        .eq('organization_id', orgId).eq('id', clientFilter).maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+    enabled: !!orgId && !!clientFilter,
+  });
+  const clientName = selectedClientRecord?.name || clients?.find(c => c.id === clientFilter)?.name || 'Selected client';
+  const clientOptions = (clients || []).filter(c => c.name.toLowerCase().includes(clientOptionSearch.toLowerCase())).slice(0, 75);
+  if (selectedClientRecord && !clientOptions.some(c => c.id === selectedClientRecord.id)) clientOptions.unshift(selectedClientRecord);
 
   const { data: projects } = useQuery({
     queryKey: ['projects', orgId, form.client_id],
@@ -177,20 +196,24 @@ export default function PurchaseOrdersPage() {
   });
 
   const { data: pos, isLoading: ordersLoading, isError: ordersError, error: ordersErrorDetail, refetch: refetchOrders } = useQuery({
-    queryKey: ['purchase_orders', orgId],
+    queryKey: ['purchase_orders', orgId, clientFilter],
     queryFn: async () => {
-      // client_org — hydrated so a Client-Assigned PO can show the client
-      // organization's name (Client Requests inbox + Origin badge below).
-      // Safe to select thanks to the orgs_select RLS branch added in
-      // migration 0038 (an agency can see the org on the other side of
-      // its own client_agency_links rows).
-      const { data, error } = await supabase
-        .from('purchase_orders')
-        .select('*, clients(name), projects(name), campaigns(name), po_line_items(id, budgeted_area, budgeted_qty), client_org:organizations!purchase_orders_client_org_id_fkey(name)')
-        .eq('organization_id', orgId)
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      return data as PoRow[];
+      // A client-scoped visit downloads only that client's POs. A general
+      // visit pages through Supabase's row limit rather than silently
+      // dropping orders after the first 1,000.
+      const result: PoRow[] = [];
+      for (let from = 0; ; from += 500) {
+        let request = supabase.from('purchase_orders')
+          .select('*, clients(name), projects(name), campaigns(name), po_line_items(id, budgeted_area, budgeted_qty), client_org:organizations!purchase_orders_client_org_id_fkey(name)')
+          .eq('organization_id', orgId);
+        if (clientFilter) request = request.eq('client_id', clientFilter);
+        const { data, error } = await request.order('created_at', { ascending: false })
+          .order('id', { ascending: true }).range(from, from + 499);
+        if (error) throw error;
+        result.push(...((data || []) as PoRow[]));
+        if (!data || data.length < 500) break;
+      }
+      return result;
     },
     enabled: !!orgId,
   });
@@ -203,18 +226,19 @@ export default function PurchaseOrdersPage() {
   // just reading zone_id off the same narrow projection instead of a
   // second round-trip.
   const { data: poShopLinks, isError: shopsError } = useQuery({
-    queryKey: ['po-shop-links', orgId],
+    queryKey: ['po-shop-links', orgId, clientFilter],
     queryFn: async () => {
       // PostgREST caps a single response (commonly 1,000 rows). Fetch each
       // page so Work Orders always show every linked shop, not only page one.
       const result: { purchase_order_id: string; zone_id: string | null }[] = [];
       const batchSize = 500;
       for (let start = 0; ; start += batchSize) {
-        const { data, error } = await supabase.from('shops')
+        let request = supabase.from('shops')
           .select('purchase_order_id, zone_id')
           .eq('organization_id', orgId)
-          .not('purchase_order_id', 'is', null)
-          .order('id', { ascending: true })
+          .not('purchase_order_id', 'is', null);
+        if (clientFilter) request = request.eq('client_id', clientFilter);
+        const { data, error } = await request.order('id', { ascending: true })
           .range(start, start + batchSize - 1);
         if (error) throw error;
         result.push(...(data || []));
@@ -285,7 +309,9 @@ export default function PurchaseOrdersPage() {
       const matches = po.po_number.toLowerCase().includes(term) || (po.name || '').toLowerCase().includes(term) || (po.clients?.name || '').toLowerCase().includes(term);
       if (!matches) return false;
     }
-    if (statusFilter && po.status !== statusFilter) return false;
+    if (statusFilter === 'awaiting_response') {
+      if (!(po.origin === 'client_created' && po.assignment_status === 'pending_acceptance')) return false;
+    } else if (statusFilter && po.status !== statusFilter) return false;
     if (clientFilter && po.client_id !== clientFilter) return false;
     if (fulfillmentFilter && po.fulfillment_type !== fulfillmentFilter) return false;
     if (campaignFilterValue) {
@@ -373,11 +399,18 @@ export default function PurchaseOrdersPage() {
   // (migration 0025), which does the rollup math in SQL so it stays in
   // sync with work_items/invoice_items without extra client-side joins.
   const { data: utilization, isError: utilizationError } = useQuery({
-    queryKey: ['po-utilization', orgId],
+    queryKey: ['po-utilization', orgId, clientFilter],
     queryFn: async () => {
-      const { data, error } = await supabase.from('v_po_line_item_utilization').select('*');
-      if (error) throw error;
-      return data as POLineItemUtilization[];
+      const rows: POLineItemUtilization[] = [];
+      for (let from = 0; ; from += 500) {
+        let request = supabase.from('v_po_line_item_utilization').select('*').eq('organization_id', orgId);
+        if (clientFilter) request = request.eq('client_id', clientFilter);
+        const { data, error } = await request.order('po_line_item_id', { ascending: true }).range(from, from + 499);
+        if (error) throw error;
+        rows.push(...((data || []) as POLineItemUtilization[]));
+        if (!data || data.length < 500) break;
+      }
+      return rows;
     },
     enabled: !!orgId,
   });
@@ -508,6 +541,44 @@ export default function PurchaseOrdersPage() {
     return invoicedAmount === 0;
   }, [deletePo, shopCountByPo, utilization]);
 
+  // Reconcile *all* PO invoice lines, including older invoice items that
+  // have a PO-linked invoice header but no individual po_line_item_id.
+  // Map by invoice_item.id: an item linked both ways is counted only once.
+  // Amount is ex-tax (invoice_items.amount), not invoice.total/GST/payments.
+  const { data: detailInvoicedAmount, isPending: billingPending, isError: billingError } = useQuery({
+    queryKey: ['po-billing-items', orgId, detailPoId],
+    queryFn: async () => {
+      if (!detailPoId || !orgId) return 0;
+      const lineIds = ((pos || []).find(p => p.id === detailPoId)?.po_line_items || []).map(l => l.id);
+      const invoiceIds: string[] = [];
+      for (let from = 0; ; from += 500) {
+        const { data, error } = await supabase.from('invoices').select('id')
+          .eq('organization_id', orgId).eq('purchase_order_id', detailPoId)
+          .order('id').range(from, from + 499);
+        if (error) throw error;
+        invoiceIds.push(...(data || []).map(row => row.id));
+        if (!data || data.length < 500) break;
+      }
+      const amounts = new Map<string, number>();
+      const readItems = async (field: 'invoice_id' | 'po_line_item_id', ids: string[]) => {
+        for (let i = 0; i < ids.length; i += 50) {
+          for (let from = 0; ; from += 500) {
+            const { data, error } = await supabase.from('invoice_items')
+              .select('id,amount').eq('organization_id', orgId)
+              .in(field, ids.slice(i, i + 50)).order('id').range(from, from + 499);
+            if (error) throw error;
+            for (const item of data || []) amounts.set(item.id, Number(item.amount) || 0);
+            if (!data || data.length < 500) break;
+          }
+        }
+      };
+      await readItems('invoice_id', invoiceIds);
+      await readItems('po_line_item_id', lineIds);
+      return Array.from(amounts.values()).reduce((total, n) => total + n, 0);
+    },
+    enabled: !!orgId && !!detailPoId && !!pos,
+  });
+
   const detailPo = (pos || []).find((p) => p.id === detailPoId) || null;
   const detailPoIsEmpty = useMemo(() => {
     if (!detailPo) return true;
@@ -522,15 +593,10 @@ export default function PurchaseOrdersPage() {
 
   return (
     <div>
-      <PageHeader
-        title="Work Orders"
-        subtitle="Manage orders, delivery, line items and field execution in one place"
-        action={
-          <button onClick={openAdd} className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg font-medium text-sm transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600">
-            <Plus className="w-4 h-4" /> Add Work Order
-          </button>
-        }
-      />
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div><h1 className="text-xl font-semibold tracking-tight text-slate-900">Work orders</h1><p className="mt-1 text-xs text-slate-500">Track delivery, items and site execution</p></div>
+        <button onClick={openAdd} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"><Plus className="h-4 w-4"/> Add work order</button>
+      </div>
 
       {notice && (
         <div className={`flex items-start gap-2.5 rounded-lg px-4 py-3 mb-4 text-sm ${notice.kind === 'error' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'}`}>
@@ -549,26 +615,14 @@ export default function PurchaseOrdersPage() {
       )}
 
       {clientFilter && (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
-          <span className="text-blue-900">Client filter: <strong>{clients?.find(c => c.id === clientFilter)?.name || 'Selected client'}</strong> · {scopedPos.filter(po => po.client_id === clientFilter).length} work orders</span>
-          <button type="button" onClick={() => changeClientFilter('')} className="font-medium text-blue-700 underline underline-offset-2 focus-visible:outline focus-visible:outline-2">Show all clients</button>
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+          <Link to="/clients" className="font-medium text-blue-700 hover:underline">Clients</Link>
+          <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+          <span className="rounded-md bg-blue-50 px-2.5 py-1.5 font-medium text-blue-800">{clientName}</span>
+          <span className="tabular-nums text-slate-500">{ordersLoading ? 'Loading orders…' : `${totalPos} orders`}</span>
+          <button type="button" onClick={() => changeClientFilter('')} className="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-600 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">Clear client filter</button>
         </div>
       )}
-
-      {/* Operational summary: counts come directly from the same fetched orders as the list. */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4" aria-label="Work order summary">
-        {[
-          { label: 'Total orders', count: scopedPos.length, tone: 'text-slate-900' },
-          { label: 'Active', count: scopedPos.filter(p => p.status === 'active').length, tone: 'text-blue-700' },
-          { label: 'Awaiting response', count: scopedPos.filter(p => p.origin === 'client_created' && p.assignment_status === 'pending_acceptance').length, tone: 'text-amber-700' },
-          { label: 'Closed', count: scopedPos.filter(p => p.status === 'closed').length, tone: 'text-emerald-700' },
-        ].map(item => (
-          <div key={item.label} className="rounded-lg border border-slate-200 bg-white px-4 py-3">
-            <p className="text-xs font-medium text-slate-500">{item.label}</p>
-            <p className={`mt-1 text-xl font-semibold tabular-nums ${item.tone}`}>{ordersLoading ? '—' : item.count}</p>
-          </div>
-        ))}
-      </div>
       {(ordersError || shopsError || utilizationError) && (
         <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
           <p className="font-medium">Some Work Order information could not be loaded.</p>
@@ -587,11 +641,14 @@ export default function PurchaseOrdersPage() {
             className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
+        <select aria-label="Filter work orders by status" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+          <option value="">All statuses</option><option value="active">Active</option><option value="awaiting_response">Awaiting response</option><option value="closed">Closed</option><option value="cancelled">Cancelled</option>
+        </select>
         <select aria-label="Sort work orders" value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
           {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>Sort: {o.label}</option>)}
         </select>
         <FilterButton activeCount={activeFilterCount} onClick={() => setFilterDrawerOpen(true)} />
-        {(search || activeFilterCount > 0) && <span className="text-xs text-slate-400">{visiblePos.length} of {scopedPos.length} shown</span>}
+        <span className="ml-auto text-xs tabular-nums text-slate-500" role="status">{ordersLoading ? 'Loading…' : `${visiblePos.length.toLocaleString('en-IN')} work orders`}</span>
       </div>
 
       <FilterDrawer
@@ -603,10 +660,12 @@ export default function PurchaseOrdersPage() {
         resultLabel="Work Orders"
       >
         <FilterSection label="Client">
-          <select value={clientFilter} onChange={(e) => changeClientFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Clients</option>
-            {(clients || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          <input aria-label="Find client" value={clientOptionSearch} onChange={e => setClientOptionSearch(e.target.value)} placeholder="Find a client…" className="mb-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600" />
+          <select value={clientFilter} aria-label="Filter by client" onChange={e => changeClientFilter(e.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+            <option value="">All clients</option>
+            {clientOptions.map(c => <option value={c.id} key={c.id}>{c.name}</option>)}
           </select>
+          <p className="mt-1 text-xs text-slate-500">Showing the first 75 matches. Type to find a client.</p>
         </FilterSection>
         {campaignFilterOptions.length > 0 && (
           <FilterSection label="Campaign">
@@ -634,14 +693,6 @@ export default function PurchaseOrdersPage() {
             <p className="text-[11px] text-slate-400 mt-1">Matches Work Orders that have at least one shop in this zone.</p>
           </FilterSection>
         )}
-        <FilterSection label="Status">
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Statuses</option>
-            <option value="active">Active</option>
-            <option value="closed">Closed</option>
-            <option value="cancelled">Cancelled</option>
-          </select>
-        </FilterSection>
         <FilterSection label="Fulfillment Type">
           <select value={fulfillmentFilter} onChange={(e) => setFulfillmentFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">All Types</option>
@@ -651,16 +702,14 @@ export default function PurchaseOrdersPage() {
       </FilterDrawer>
 
       {clientRequests.length > 0 && (
-        <Card className="p-5 mb-6 border-blue-200 bg-blue-50/40">
-          <div className="flex items-center gap-2 mb-3">
-            <Inbox className="w-4.5 h-4.5 text-blue-600" />
-            <h2 className="font-semibold text-slate-900">Client Requests</h2>
-            <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center">
-              {clientRequests.length}
-            </span>
-          </div>
-          <div className="space-y-2">
-            {clientRequests.map((po) => (
+        <details className="group mb-3 rounded-lg border border-amber-200 bg-amber-50/60" open={requestsExpanded} onToggle={event => setRequestsExpanded(event.currentTarget.open)}>
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm text-amber-950 focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-600">
+            <span className="flex items-center gap-2"><Inbox className="h-4 w-4 text-amber-700"/><strong className="font-medium">{clientRequests.length} client {clientRequests.length === 1 ? 'request' : 'requests'} awaiting acceptance</strong></span>
+            <span className="text-xs text-amber-700">Review <ChevronDown className="inline h-4 w-4 group-open:rotate-180"/></span>
+          </summary>
+          <div className="space-y-2 border-t border-amber-200 px-3 py-3">
+
+            {clientRequests.slice(0, 5).map((po) => (
               <div key={po.id} className="flex items-center justify-between gap-3 flex-wrap bg-white rounded-lg border border-slate-200 px-4 py-3">
                 <div className="flex items-center gap-3">
                   <Building2 className="w-4 h-4 text-slate-400 shrink-0" />
@@ -688,8 +737,9 @@ export default function PurchaseOrdersPage() {
               </div>
             ))}
           </div>
-          {respondMutation.isError && <p className="text-sm text-red-600 mt-2">{(respondMutation.error as Error).message}</p>}
-        </Card>
+          {clientRequests.length > 5 && <button type="button" onClick={() => { setStatusFilter('awaiting_response'); setRequestsExpanded(false); }} className="px-2 py-2 text-xs font-medium text-blue-700 hover:underline">See all {clientRequests.length} pending requests in the Work Orders list →</button>}
+          {respondMutation.isError && <p className="px-2 text-sm text-red-600 mt-2">{(respondMutation.error as Error).message}</p>}
+        </details>
       )}
 
       {/* LISTING — one clean line per Work Order: number, client, campaign,
@@ -699,7 +749,22 @@ export default function PurchaseOrdersPage() {
           keeps the list itself scannable instead of every row trying to
           show everything at once. */}
       <Card className="overflow-hidden">
-        <div className="overflow-x-auto" role="region" aria-label="Work orders list" tabIndex={0}>
+        <div className="divide-y divide-slate-100 md:hidden" role="region" aria-label="Work orders list on mobile">
+          {!ordersLoading && !ordersError && pagedPos.map(po => {
+            const { completionPct, lineCount } = getPoMetrics(po, utilization || []);
+            const primary = getPrimaryStatus(po);
+            return <button type="button" key={po.id} onClick={() => openWorkOrder(po.id)} className="block w-full px-4 py-3 text-left hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+              <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium text-slate-900">{po.name || po.po_number}</p><p className="mt-0.5 text-xs text-slate-500">{po.po_number} · {po.clients?.name || 'Client not set'}</p></div><StatusBadge status={primary.status} label={primary.label}/></div>
+              <div className="mt-3 flex items-center justify-between gap-3 text-xs text-slate-500"><span>{lineCount} items · {shopCountByPo.get(po.id) || 0} sites</span><span>{new Date(po.po_date).toLocaleDateString('en-IN')}</span></div>
+              {completionPct == null
+                ? <p className="mt-2 text-xs text-slate-500">Set planned scope to calculate work completion</p>
+                : <div className="mt-2 flex items-center gap-2"><ProgressBar pct={completionPct} className="flex-1"/><span className="w-10 text-right text-xs text-slate-600">{`${Math.round(completionPct)}%`}</span></div>}
+            </button>;
+          })}
+          {ordersLoading && <p className="px-4 py-8 text-center text-sm text-slate-500" role="status">Loading work orders…</p>}
+          {!ordersLoading && !ordersError && !pagedPos.length && <p className="px-4 py-8 text-center text-sm text-slate-500">No matching work orders.</p>}
+        </div>
+        <div className="hidden overflow-x-auto md:block" role="region" aria-label="Work orders list" tabIndex={0}>
           <table className="w-full text-sm min-w-[720px]">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
               <tr>
@@ -714,15 +779,15 @@ export default function PurchaseOrdersPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {!ordersLoading && !ordersError && pagedPos.map((po) => {
-                const { lineCount, hasBudget, anyVariance, completionPct } = getPoMetrics(po, utilization || []);
+                const { lineCount, anyVariance, completionPct } = getPoMetrics(po, utilization || []);
                 const shopCount = shopCountByPo.get(po.id) || 0;
                 const primary = getPrimaryStatus(po);
 
                 return (
                   <tr
                     key={po.id}
-                    onClick={() => setDetailPoId(po.id)}
-                    onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setDetailPoId(po.id); } }}
+                    onClick={() => openWorkOrder(po.id)}
+                    onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openWorkOrder(po.id); } }}
                     tabIndex={0}
                     aria-label={`Open Work Order ${po.name || po.po_number}`}
                     className="hover:bg-blue-50/50 cursor-pointer transition-colors group focus-visible:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
@@ -746,12 +811,12 @@ export default function PurchaseOrdersPage() {
                       </div>
                     </td>
                     <td className="px-4 py-3.5">
-                      {hasBudget ? (
+                      {completionPct != null ? (
                         <div className="flex items-center gap-2">
                           <ProgressBar pct={completionPct} className="flex-1" />
-                          <span className="text-xs text-slate-500 w-8 text-right shrink-0">{completionPct != null ? `${Math.round(completionPct)}%` : '—'}</span>
+                          <span className="text-xs text-slate-500 w-8 text-right shrink-0">{`${Math.round(completionPct)}%`}</span>
                         </div>
-                      ) : <span className="text-slate-300 text-xs">No budget yet</span>}
+                      ) : <span className="text-slate-500 text-xs" title="Set planned quantities on every line item to calculate work completion">Scope needed</span>}
                     </td>
                     <td className="px-4 py-3.5 text-right whitespace-nowrap">
                       {po.total_amount != null ? (
@@ -919,12 +984,15 @@ export default function PurchaseOrdersPage() {
         <WorkOrderDetailDrawer
           po={detailPo}
           utilization={(utilization || []).filter((r) => r.purchase_order_id === detailPo.id)}
+          reconciledInvoiced={detailInvoicedAmount}
+          billingPending={billingPending}
+          billingError={billingError}
           shopCount={shopCountByPo.get(detailPo.id) || 0}
           canDelete={canDelete}
           canHardDelete={detailPoIsEmpty}
-          onClose={() => setDetailPoId(null)}
-          onEdit={() => { setDetailPoId(null); openEdit(detailPo); }}
-          onManageLineItems={() => { setDetailPoId(null); setLineItemsPo(detailPo); }}
+          onClose={() => openWorkOrder(null)}
+          onEdit={() => { openWorkOrder(null); openEdit(detailPo); }}
+          onManageLineItems={() => { openWorkOrder(null); setLineItemsPo(detailPo); }}
           onDelete={() => setDeletePo(detailPo)}
           onRespond={
             detailPo.origin === 'client_created' && detailPo.assignment_status === 'pending_acceptance'
@@ -1078,9 +1146,13 @@ function DirectInstallTeamCard({ po }: { po: PoRow }) {
 function WorkOrderDetailDrawer({
   po, utilization, shopCount, canDelete, canHardDelete,
   onClose, onEdit, onManageLineItems, onDelete, onRespond, isResponding,
+  reconciledInvoiced, billingPending, billingError,
 }: {
   po: PoRow;
   utilization: POLineItemUtilization[];
+  reconciledInvoiced?: number;
+  billingPending: boolean;
+  billingError: boolean;
   shopCount: number;
   canDelete: boolean;
   canHardDelete: boolean;
@@ -1091,7 +1163,8 @@ function WorkOrderDetailDrawer({
   onRespond?: (decision: 'accepted' | 'rejected') => void;
   isResponding?: boolean;
 }) {
-  const { hasBudget, anyVariance, budgetedAmount, invoicedAmount, balance, invoicedPct, completionPct, stage } = getPoMetrics(po, utilization);
+  const { anyVariance, stage } = getPoMetrics(po, utilization);
+  const progress = calculatePoProgress(utilization, stage, po.po_line_items?.length || 0, reconciledInvoiced);
   const primary = getPrimaryStatus(po);
   const isPending = po.origin === 'client_created' && po.assignment_status === 'pending_acceptance';
 
@@ -1177,26 +1250,15 @@ function WorkOrderDetailDrawer({
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div className="border border-slate-200 rounded-lg p-3">
-            <p className="text-xs text-slate-400 mb-1">Total Amount</p>
-            <p className="text-sm font-semibold text-slate-900">{po.total_amount != null ? formatRupees(po.total_amount) : '—'}</p>
-            {po.gst_percentage != null && <p className="text-[11px] text-slate-400 mt-0.5">+ GST {po.gst_percentage}%</p>}
-          </div>
-          <div className="border border-slate-200 rounded-lg p-3">
-            <p className="text-xs text-slate-400 mb-1">Invoiced</p>
-            <p className="text-sm font-semibold text-slate-900">{hasBudget ? formatRupees(invoicedAmount) : '—'}</p>
-            {invoicedPct != null && <p className="text-[11px] text-slate-400 mt-0.5">{Math.round(invoicedPct)}% of budget</p>}
-          </div>
-          <div className="border border-slate-200 rounded-lg p-3">
-            <p className="text-xs text-slate-400 mb-1">Balance</p>
-            <p className={`text-sm font-semibold ${balance != null && balance < 0 ? 'text-red-600' : 'text-slate-900'}`}>{hasBudget ? formatRupees(balance) : '—'}</p>
-          </div>
-        </div>
+        <PoCompletionDonut
+          key={po.id}
+          progress={progress}
+          stage={stage}
+          billingPending={billingPending}
+          billingError={billingError}
+        />
 
-        <PoCompletionDonut budgetedAmount={hasBudget ? budgetedAmount : null} invoicedAmount={invoicedAmount} completionPct={completionPct} />
-
-        <PoStageProgressChart rows={utilization} stage={stage} />
+        <PoStageProgressChart rows={utilization} stage={stage} fulfillmentType={po.fulfillment_type} />
         <PoUtilizationTable rows={utilization} stage={stage} />
 
         {(po.payment_terms || po.notes) && (
@@ -1268,6 +1330,8 @@ function PoUtilizationTable({ rows, stage }: { rows: POLineItemUtilization[]; st
             <tbody className="divide-y divide-slate-100">
               {rows.map((row) => {
                 const fig = computeUtilization(row, stage);
+                const comparable = !(stage === 'produced' && isAreaUom(row.uom));
+                const rowPct = comparable ? fig.utilizationPct : null;
                 return (
                   <tr key={row.po_line_item_id} className="hover:bg-slate-50">
                     <td className="px-3 py-2 text-slate-900">{row.description}</td>
@@ -1281,7 +1345,12 @@ function PoUtilizationTable({ rows, stage }: { rows: POLineItemUtilization[]; st
                       {formatRupees(fig.remainingBalance)}
                     </td>
                     <td className="px-3 py-2">
-                      <ProgressBar pct={fig.utilizationPct} className="w-16 mx-auto" />
+                      <div className="mx-auto w-24 text-center" title={!comparable ? 'Production pieces cannot be compared with a sqft budget' : undefined}>
+                        <ProgressBar pct={rowPct} />
+                        <span className="text-[11px] text-slate-500">
+                          {rowPct == null ? '—' : `${Math.round(Math.max(0, Math.min(100, rowPct)))}%${rowPct > 100 ? '+' : ''}`}
+                        </span>
+                      </div>
                     </td>
                     <td className="px-3 py-2 text-center">
                       {fig.hasVariance && (
@@ -1297,129 +1366,117 @@ function PoUtilizationTable({ rows, stage }: { rows: POLineItemUtilization[]; st
           </table>
         </div>
       )}
+      {open && <p className="mt-2 text-[11px] text-slate-500">Per-line invoicing includes only invoice items linked to that line. The financial overview also reconciles PO-level invoice items that were not linked individually.</p>}
     </div>
   );
 }
 
-// Replaces the old per-line-item cumulative burndown line chart, which
-// needed picking one line item at a time and reading overlapping lines to
-// answer "how is this PO actually progressing" — not a clear at-a-glance
-// view. This aggregates every line item into ₹ terms (the one unit that's
-// comparable across sqft/piece/lot line items) and shows, stage by stage,
-// how much of the total budget has actually moved through each one so
-// far — a much more direct answer to "what work is happening, how".
-// Replaces the old flat "Overall Completion: 0% + a progress bar +
-// budgeted amount" block, which buried the one thing that actually
-// matters — how much of the physical work is actually done — behind a
-// rupee figure at the very end that reads as the headline when it's
-// really just context. This turns the same three numbers (budgeted,
-// invoiced, % complete) already computed for the summary cards above
-// into a donut that answers "how much work, of what kind" at a glance:
-// how much is done and billed, done but not yet billed, and still
-// remaining — money is present but secondary, sized by its slice, not
-// spelled out as the headline.
-function PoCompletionDonut({
-  budgetedAmount, invoicedAmount, completionPct,
-}: {
-  budgetedAmount: number | null;
-  invoicedAmount: number;
-  completionPct: number | null;
-}) {
-  if (budgetedAmount == null || budgetedAmount <= 0) {
-    return (
-      <div className="border border-dashed border-slate-200 rounded-lg p-4 text-center">
-        <p className="text-xs text-slate-400">Add a rate to this PO's line items to see completion here.</p>
-      </div>
-    );
-  }
-
-  const completedAmount = budgetedAmount * ((completionPct ?? 0) / 100);
-  const invoiced = Math.min(invoicedAmount, budgetedAmount);
-  const completedNotInvoiced = Math.max(0, completedAmount - invoiced);
-  const remaining = Math.max(0, budgetedAmount - completedAmount);
-
-  const segments = [
-    { key: 'invoiced', label: 'Done & Invoiced', value: invoiced, color: '#10b981' },
-    { key: 'completed', label: 'Done, Not Yet Invoiced', value: completedNotInvoiced, color: '#3b82f6' },
-    { key: 'remaining', label: 'Work Remaining', value: remaining, color: '#e2e8f0' },
-  ];
-
+// The existing donut is now one selectable, non-overlapping view. Work is
+// operational scope (default); Financial is billing against the PO budget.
+// These measures NEVER share a numerator: invoices do not prove work done.
+function PoCompletionDonut({ progress, stage, billingPending, billingError }: { progress: PoProgressSummary; stage: UtilizationStage; billingPending?: boolean; billingError?: boolean }) {
+  const [mode, setMode] = useState<'work' | 'financial'>('work');
+  const isWork = mode === 'work';
+  const pct = isWork ? progress.workPct : (billingPending || billingError ? null : progress.financialPct);
+  const budget = progress.budgetedAmount;
+  const segments = isWork
+    ? [
+        { key: 'done', label: 'Executed', value: pct ?? 0, color: '#2563eb' },
+        { key: 'remaining', label: 'Remaining', value: 100 - (pct ?? 0), color: '#e2e8f0' },
+      ]
+    : [
+        { key: 'billed', label: 'Invoiced', value: budget != null ? Math.min(budget, progress.invoicedAmount) : 0, color: '#059669' },
+        { key: 'unbilled', label: 'Not invoiced', value: budget != null ? Math.max(0, budget - progress.invoicedAmount) : 0, color: '#e2e8f0' },
+      ];
   return (
-    <div>
-      <p className="text-sm font-medium text-slate-700 mb-3">Overall Completion — how much work is actually done</p>
-      <div className="flex items-center gap-5">
-        <DonutChart
-          segments={segments}
-          size={132}
-          strokeWidth={18}
-          centerValue={`${Math.round(completionPct ?? 0)}%`}
-          centerLabel="done"
-        />
-        <div className="flex-1 space-y-2.5 min-w-0">
-          {segments.map((s) => (
-            <div key={s.key} className="flex items-center gap-2 text-xs">
-              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: s.color }} />
-              <span className="text-slate-600 flex-1 truncate">{s.label}</span>
-              <span className="font-semibold text-slate-800">{formatRupees(s.value)}</span>
-            </div>
+    <section className="rounded-xl border border-slate-200 bg-white p-4" aria-label="Overall completion">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-900">Overall completion</h3>
+          <p className="text-xs text-slate-500 mt-0.5">{isWork ? `Actual ${stage === 'produced' ? 'production' : 'installation'} against planned scope` : 'Invoicing against planned line-item value (excl. GST)'}</p>
+        </div>
+        <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5" role="group" aria-label="Completion calculation">
+          {(['work', 'financial'] as const).map((value) => (
+            <button key={value} type="button" aria-pressed={mode === value} onClick={() => setMode(value)}
+              className={`rounded-md px-3 py-1.5 text-xs font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 ${mode === value ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>
+              {value === 'work' ? 'Work' : 'Financial'}
+            </button>
           ))}
         </div>
       </div>
-    </div>
+      {pct == null ? (
+        <div className="rounded-lg bg-slate-50 px-4 py-5 text-sm text-slate-600" role="status">
+          {isWork
+            ? 'Work completion is not available until every line item has a planned quantity or area.'
+            : billingPending ? 'Reconciling invoice items…' : billingError ? 'Could not load invoice items. Please retry the Work Order.' : 'Financial completion is not available until every line item has planned scope and a rate, with a positive total budget.'}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
+          <DonutChart segments={segments} size={140} strokeWidth={17} centerValue={`${Math.round(pct)}%`} centerLabel={isWork ? 'work done' : 'invoiced'} />
+          <div className="min-w-0 flex-1 space-y-3">
+            {isWork ? (
+              <>
+                <p className="text-xs text-slate-600">{Math.round(100 - pct)}% of planned scope remains. Breakdown by unit:</p>
+                <div className="text-xs text-slate-600 space-y-1">
+                  {progress.groups.map((g) => <p key={g.uom} className="flex items-center justify-between gap-2"><span>{g.uom === 'sqft' ? 'Area' : g.uom === 'piece' ? 'Pieces' : 'Lots'}:</span><span className="font-medium tabular-nums">{formatQty(g.completed, g.uom)} / {formatQty(g.planned, g.uom)}</span></p>)}
+                </div>
+                {progress.groups.length > 1 && <p className="text-[11px] text-slate-500">Mixed units are reconciled within each unit, then weighted equally by unit type.</p>}
+                {progress.excessScope && <p className="text-xs text-amber-700">Recorded execution exceeds planned scope on at least one line. Progress is capped at 100%.</p>}
+              </>
+            ) : (
+              <>
+                <div className="space-y-2 text-xs">
+                  <p className="flex items-center justify-between gap-3"><span className="text-slate-500">Planned value</span><span className="font-semibold tabular-nums text-slate-900">{formatRupees(budget)}</span></p>
+                  <p className="flex items-center justify-between gap-3"><span className="text-slate-500">Invoiced</span><span className="font-semibold tabular-nums text-emerald-700">{formatRupees(progress.invoicedAmount)}</span></p>
+                  <p className="flex items-center justify-between gap-3 border-t border-slate-100 pt-2"><span className="text-slate-500">Uninvoiced balance</span><span className="font-semibold tabular-nums text-slate-900">{formatRupees(Math.max(0, progress.balance ?? 0))}</span></p>
+                </div>
+                {progress.overInvoicedAmount > 0 && <p className="text-xs font-medium text-red-700">Invoiced {formatRupees(progress.overInvoicedAmount)} above planned value. Chart is capped at 100%.</p>}
+                <p className="text-[11px] text-slate-500">Billing progress, not payment collection or physical work completion.</p>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
-function PoStageProgressChart({ rows, stage }: { rows: POLineItemUtilization[]; stage: UtilizationStage }) {
-  if (rows.length === 0) return null;
-
-  const totalBudget = rows.reduce((sum, r) => {
-    const primary = isAreaUom(r.uom) ? r.budgeted_area : r.budgeted_qty;
-    return sum + (primary != null && r.rate != null ? primary * r.rate : 0);
-  }, 0);
-
-  const stageDefs: { key: UtilizationStage | 'invoiced'; label: string; color: string }[] = [
-    { key: 'surveyed', label: 'Surveyed', color: '#3b82f6' },
-    { key: 'approved', label: 'Approved', color: '#8b5cf6' },
-    { key: stage, label: stage === 'produced' ? 'Produced' : 'Installed', color: '#f59e0b' },
-    { key: 'invoiced', label: 'Invoiced', color: '#10b981' },
+function PoStageProgressChart({ rows, stage, fulfillmentType }: {
+  rows: POLineItemUtilization[];
+  stage: UtilizationStage;
+  fulfillmentType?: string | null;
+}) {
+  // Supply-only and direct-install skip these upstream stages entirely.
+  // The final installation/production % is already the donut above.
+  if (!rows.length || fulfillmentType === 'supply_only' || fulfillmentType === 'direct_install' || stage !== 'installed') return null;
+  const steps: { key: UtilizationStage; label: string; color: string }[] = [
+    { key: 'surveyed', label: 'Survey recorded', color: '#2563eb' },
+    { key: 'approved', label: 'Design approved', color: '#7c3aed' },
+    { key: 'produced', label: 'Production recorded', color: '#d97706' },
   ];
-
-  const amountFor = (key: UtilizationStage | 'invoiced') => {
-    if (key === 'invoiced') return rows.reduce((sum, r) => sum + (r.invoiced_amount || 0), 0);
-    return rows.reduce((sum, r) => sum + (getActualForStage(r, key) || 0) * (r.rate || 0), 0);
-  };
-
-  if (totalBudget <= 0) {
-    return (
-      <div className="border border-dashed border-slate-200 rounded-lg p-4 text-center">
-        <p className="text-xs text-slate-400">Add a rate to this PO's line items to see stage-by-stage progress here.</p>
-      </div>
-    );
-  }
-
   return (
-    <div>
-      <p className="text-sm font-medium text-slate-700 mb-3 flex items-center gap-1.5">
-        <TrendingUp className="w-4 h-4 text-slate-400" /> Progress — how work is moving through each stage
-      </p>
+    <section className="rounded-xl border border-slate-200 p-4">
+      <h3 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-slate-900"><TrendingUp className="h-4 w-4 text-slate-500" /> Upstream stages</h3>
       <div className="space-y-3">
-        {stageDefs.map((s) => {
-          const amount = amountFor(s.key);
-          const pct = Math.min(100, Math.round((amount / totalBudget) * 100));
+        {steps.map((s) => {
+          const summary = calculatePoProgress(rows, s.key);
+          const pct = summary.workPct;
+          const producedPieces = s.key === 'produced' ? rows.reduce((n, r) => n + Math.max(0, r.produced_qty || 0), 0) : 0;
           return (
-            <div key={s.label}>
-              <div className="flex items-center justify-between text-xs mb-1">
+            <div key={s.key}>
+              <div className="flex items-center justify-between gap-3 text-xs mb-1.5">
                 <span className="font-medium text-slate-600">{s.label}</span>
-                <span className="text-slate-500">{formatRupees(amount)} <span className="text-slate-400">({pct}%)</span></span>
+                <span className="text-slate-500 tabular-nums">{pct == null ? (s.key === 'produced' ? `${producedPieces.toLocaleString('en-IN')} pcs recorded · no comparable area target` : 'Scope needed') : `${Math.round(pct)}%`}</span>
               </div>
-              <div className="h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, backgroundColor: s.color }} />
+              <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden" role="progressbar" aria-label={s.label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? 0}>
+                <div className="h-full rounded-full" style={{ width: `${pct ?? 0}%`, backgroundColor: s.color }} />
               </div>
             </div>
           );
         })}
       </div>
-    </div>
+      <p className="mt-3 text-[11px] text-slate-500">Stage figures are recorded quantities against planned scope, not paid value. Production is reported in pieces where area is not comparable.</p>
+    </section>
   );
 }
 
@@ -1575,7 +1632,7 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
           <p className="text-sm font-semibold text-blue-900">{formatRupees(computedTotal)}</p>
         </div>
 
-        <PoStageProgressChart rows={utilization} stage={defaultUtilizationStage(po.fulfillment_type)} />
+        <PoStageProgressChart rows={utilization} stage={defaultUtilizationStage(po.fulfillment_type)} fulfillmentType={po.fulfillment_type} />
 
         <PoUtilizationTable rows={utilization} stage={defaultUtilizationStage(po.fulfillment_type)} />
 

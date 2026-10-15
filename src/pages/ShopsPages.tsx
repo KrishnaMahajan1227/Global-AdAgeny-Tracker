@@ -3,9 +3,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { ProgressBar } from '@/components/ui';
-import { completion, isDone, type Order } from '@/lib/agencyProgress';
+import { isDone, percent, type Order } from '@/lib/agencyProgress';
 import AgencyHierarchyPage from '@/pages/AgencyHierarchyPage';
 import {
   Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, PageHeader,
@@ -25,7 +25,7 @@ import { runBackfillPipeline, BACKFILL_INELIGIBLE_STATUSES, type BackfillStage }
 import { downloadBulkBackfillTemplate, parseBulkBackfillWorkbook, type BulkBackfillParsedShop, type BulkBackfillShopRow } from '@/lib/bulkBackfillExcel';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
 import {
-  Plus, Pencil, Trash2, Store, MapPin, ArrowLeft, Search, CheckCircle2, UserPlus, CheckSquare, Square,
+  Plus, Pencil, Trash2, Store, MapPin, ArrowLeft, Search, CheckCircle2, UserPlus, MoreHorizontal,
   Ruler, FileText, Palette, Wrench, Users, AlertCircle, XCircle, Clock, Camera, LocateFixed, Loader2, Layers,
   ListChecks, Building2, Lock, ListOrdered, UploadCloud, ChevronRight, Ban, Phone,
   ChevronLeft, ChevronsLeft, ChevronsRight, X, RotateCcw, FastForward, PlusCircle, Download,
@@ -37,6 +37,7 @@ import {
 // pulling the whole table into the browser.
 const SHOP_PAGE_SIZES = [25, 50, 100, 200] as const;
 const DEFAULT_SHOP_PAGE_SIZE = 50;
+const CLIENT_PAGE_SIZE = 25;
 
 // Debounce a fast-changing value (typing in the search box) so we don't
 // fire a network request on every keystroke against a table that can
@@ -54,11 +55,15 @@ export function ClientsPage() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
+  // Keep the directory and its per-page delivery figures in sync with changes elsewhere.
+  useRealtimeInvalidate(['clients', 'purchase_orders'], orgId, [['clients', orgId], ['client-progress', orgId]]);
   const canHardDelete = profile?.role === 'agency_owner' || profile?.role === 'admin';
-  const [clientParams, setClientParams] = useSearchParams();
+  const [clientParams] = useSearchParams();
   const selectedClientId = clientParams.get('detail');
   const [clientSearch, setClientSearch] = useState('');
   const [clientPage, setClientPage] = useState(1);
+  const [clientStatus, setClientStatus] = useState('all');
+  const debouncedClientSearch = useDebouncedValue(clientSearch.trim(), 300);
   const [modalOpen, setModalOpen] = useState(false);
   const [editClient, setEditClient] = useState<Client | null>(null);
   const [deactivateClient, setDeactivateClient] = useState<Client | null>(null);
@@ -67,34 +72,60 @@ export function ClientsPage() {
   const [notice, setNotice] = useState<{ kind: 'error' | 'success'; message: string } | null>(null);
   const [form, setForm] = useState({ name: '', contact_person: '', contact_phone: '', contact_email: '', address: '', city: '', state: '', gst_number: '' });
 
-  const { data: clients, isLoading: clientsLoading, isError: clientsError, refetch: retryClients } = useQuery({
-    queryKey: ['clients', orgId],
+  // Page at the database, not in memory: an agency with thousands of clients
+  // should never have to download its entire client directory to open this screen.
+  const { data: clientsPage, isLoading: clientsLoading, isFetching: clientsFetching, isError: clientsError, refetch: retryClients } = useQuery({
+    queryKey: ['clients', orgId, 'directory', clientPage, debouncedClientSearch, clientStatus],
     queryFn: async () => {
-      const rows: Client[] = [];
-      for (let from = 0; ; from += 500) {
-        const { data, error } = await supabase.from('clients').select('*').eq('organization_id', orgId).order('name').range(from, from + 499);
-        if (error) throw error;
-        rows.push(...((data || []) as Client[]));
-        if (!data || data.length < 500) break;
-      }
-      return rows;
+      let request = supabase.from('clients').select('*', { count: 'exact' }).eq('organization_id', orgId);
+      if (debouncedClientSearch) request = request.ilike('name', `%${debouncedClientSearch.replace(/[%_]/g, '\\$&')}%`);
+      if (clientStatus !== 'all') request = request.eq('is_active', clientStatus === 'active');
+      const { data, error, count } = await request.order('name', { ascending: true })
+        .order('id', { ascending: true }).range((clientPage - 1) * CLIENT_PAGE_SIZE, clientPage * CLIENT_PAGE_SIZE - 1);
+      if (error) throw error;
+      return { rows: (data || []) as Client[], count: count || 0 };
     },
     enabled: !!orgId,
   });
 
-  const { data: clientProgress } = useQuery({
-    queryKey: ['client-progress', orgId], enabled: !!orgId,
+  // Only get work-order progress for the 25 visible clients; fetch every
+  // matching order in pages so Supabase's response cap never truncates counts.
+  const pageClientIds = clientsPage?.rows.map(client => client.id) || [];
+  const { data: clientProgress, isFetching: progressLoading, isError: progressError, refetch: retryProgress } = useQuery({
+    queryKey: ['client-progress', orgId, pageClientIds],
+    enabled: !!orgId && pageClientIds.length > 0,
     queryFn: async () => {
-      const [projects, orders] = await Promise.all([
-        supabase.from('projects').select('id,client_id,status').eq('organization_id', orgId),
-        supabase.from('purchase_orders').select('id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,created_at').eq('organization_id', orgId),
-      ]);
-      if (projects.error) throw projects.error;
-      if (orders.error) throw orders.error;
-      return { projects: projects.data || [], orders: (orders.data || []) as Order[] };
+      const orders: Order[] = [];
+      for (let from = 0; ; from += 500) {
+        const { data, error } = await supabase.from('purchase_orders')
+          .select('id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,created_at')
+          .eq('organization_id', orgId).in('client_id', pageClientIds)
+          .order('id', { ascending: true }).range(from, from + 499);
+        if (error) throw error;
+        orders.push(...((data || []) as Order[]));
+        if (!data || data.length < 500) break;
+      }
+      return orders;
     },
   });
+  const progressByClient = useMemo(() => {
+    const result = new Map<string, { total: number; done: number }>();
+    for (const order of clientProgress || []) {
+      if (!order.client_id) continue;
+      const entry = result.get(order.client_id) || { total: 0, done: 0 };
+      entry.total++;
+      if (isDone(order)) entry.done++;
+      result.set(order.client_id, entry);
+    }
+    return result;
+  }, [clientProgress]);
 
+  useEffect(() => { setClientPage(1); }, [debouncedClientSearch, clientStatus]);
+  useEffect(() => {
+    if (clientsPage && clientPage > Math.max(1, Math.ceil(clientsPage.count / CLIENT_PAGE_SIZE))) {
+      setClientPage(Math.max(1, Math.ceil(clientsPage.count / CLIENT_PAGE_SIZE)));
+    }
+  }, [clientsPage, clientPage]);
   // Counts of everything that hangs off this client — fetched only once
   // the hard-delete dialog opens, so the person sees exactly what "delete
   // everything" actually means before they can type the name to confirm.
@@ -215,42 +246,71 @@ export function ClientsPage() {
     setHardDeleteClient(client);
   }
 
-  const visibleClients = (clients || []).filter(c => `${c.name} ${c.city || ''} ${c.contact_person || ''}`.toLowerCase().includes(clientSearch.toLowerCase()));
-  const totalClientPages = Math.max(1, Math.ceil(visibleClients.length / 20));
-  const clientPageSafe = Math.min(clientPage, totalClientPages);
-  const pagedClients = visibleClients.slice((clientPageSafe - 1) * 20, clientPageSafe * 20);
+  const visibleClients = clientsPage?.rows || [];
+  const totalClients = clientsPage?.count || 0;
+  const totalClientPages = Math.max(1, Math.ceil(totalClients / CLIENT_PAGE_SIZE));
   const hardDeleteReady = confirmName.trim().toLowerCase() === (hardDeleteClient?.name || '').trim().toLowerCase();
+  const ordersFor = (id: string) => progressByClient.get(id) || { total: 0, done: 0 };
+  const workOrderUrl = (id: string) => `/purchase-orders?client=${encodeURIComponent(id)}`;
+
+  // Bookmarked legacy URLs must lead to the canonical Work Orders screen,
+  // never render a second client detail/progress page.
+  if (selectedClientId) return <Navigate to={workOrderUrl(selectedClientId)} replace />;
+
+  const clientActions = (client: Client) => <div className="flex items-center gap-1" aria-label={`Actions for ${client.name}`}>
+    <button type="button" onClick={() => openEdit(client)} title="Edit client" aria-label={`Edit ${client.name}`} className="rounded-md p-2 text-slate-600 hover:bg-slate-100 hover:text-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><Pencil size={16}/></button>
+    <button type="button" onClick={() => client.is_active ? setDeactivateClient(client) : deactivateMutation.mutate({client,active:true})} title={client.is_active?'Deactivate client':'Reactivate client'} aria-label={`${client.is_active?'Deactivate':'Reactivate'} ${client.name}`} className="rounded-md p-2 text-slate-600 hover:bg-slate-100 hover:text-amber-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><Ban size={16}/></button>
+    {canHardDelete && <button type="button" onClick={() => openHardDelete(client)} title="Delete client permanently" aria-label={`Delete ${client.name} permanently`} className="rounded-md p-2 text-slate-500 hover:bg-red-50 hover:text-red-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-600"><Trash2 size={16}/></button>}
+  </div>;
 
   return (
-    <div>
-      <PageHeader
-        title="Clients"
-        subtitle="Manage your agency's clients"
-        action={
-          <button onClick={openAdd} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium text-sm transition">
-            <Plus className="w-4 h-4" /> Add Client
-          </button>
-        }
-      />
-
-      {notice && (
-        <div className={`flex items-start gap-2.5 rounded-lg px-4 py-3 mb-4 text-sm ${notice.kind === 'error' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'}`}>
-          {notice.kind === 'error' ? <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /> : <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" />}
-          <p className="flex-1">{notice.message}</p>
-          <button onClick={() => setNotice(null)} className="text-current opacity-60 hover:opacity-100"><X className="w-4 h-4" /></button>
-        </div>
-      )}
-
-      {selectedClientId ? <div className="mb-5"><button className="text-sm font-medium text-blue-700 mb-4" onClick={() => setClientParams(p => {const q = new URLSearchParams(p);q.delete('detail');return q;})}>← All clients</button><AgencyHierarchyPage kind="client" selectedId={selectedClientId}/></div> : <>
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-        <input aria-label="Search clients" value={clientSearch} onChange={e => {setClientSearch(e.target.value);setClientPage(1);}} placeholder="Search clients by name, city or contact" className="rounded-lg border border-slate-300 px-4 py-2 w-full sm:w-80 text-sm" />
-        <span className="text-sm text-slate-500">{visibleClients.length.toLocaleString('en-IN')} clients</span>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div><h1 className="text-xl font-semibold tracking-tight text-slate-900">Clients</h1><p className="mt-1 text-xs text-slate-500">Client directory and work-order delivery</p></div>
+        <button onClick={openAdd} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"><Plus size={16}/> Add client</button>
       </div>
-      {clientsLoading ? <p role="status" className="p-6">Loading clients…</p> : clientsError ? <p role="alert" className="p-6 text-red-700">Unable to load clients. <button className="underline" onClick={() => retryClients()}>Retry</button></p> : <Card className="overflow-x-auto"><table className="w-full min-w-[730px] text-sm"><thead className="bg-slate-50 text-left text-slate-600"><tr><th className="p-3">Client</th><th className="p-3">Campaigns</th><th className="p-3">Work orders</th><th className="p-3">Completion</th><th className="p-3">Status</th><th className="p-3">Actions</th></tr></thead><tbody>
-      {pagedClients.map(client => {const orders = clientProgress?.orders.filter(o=>o.client_id===client.id)||[];const active=clientProgress?.projects.filter(p=>p.client_id===client.id&&p.status==='active').length||0;return <tr className="border-t border-slate-100 hover:bg-slate-50" key={client.id}><td className="p-3"><Link className="font-semibold text-blue-700 hover:underline" to={`/clients?detail=${client.id}`}>{client.name}</Link><p className="text-xs text-slate-500">{client.city || client.contact_person || '—'}</p></td><td className="p-3">{active} active</td><td className="p-3">{orders.filter(isDone).length}/{orders.length} done</td><td className="p-3 min-w-36"><ProgressBar pct={completion(orders)}/><span className="text-xs">{completion(orders)}%</span></td><td className="p-3">{!client.is_active?'Inactive':orders.length&&!orders.every(isDone)?'In progress':'On track'}</td><td className="p-3"><div className="flex items-center gap-3"><Link className="text-xs font-medium text-blue-700 whitespace-nowrap hover:underline" to={`/purchase-orders?client=${encodeURIComponent(client.id)}`}>Work orders →</Link><button className="text-blue-700" onClick={()=>openEdit(client)} aria-label={`Edit ${client.name}`}><Pencil className="w-4 h-4"/></button><button className="text-amber-700" onClick={()=> client.is_active ? setDeactivateClient(client) : deactivateMutation.mutate({client,active:true})} aria-label={`${client.is_active?'Deactivate':'Reactivate'} ${client.name}`}><Ban className="w-4 h-4"/></button>{canHardDelete&&<button className="text-red-700" onClick={()=>openHardDelete(client)} aria-label={`Delete ${client.name}`}><Trash2 className="w-4 h-4"/></button>}</div></td></tr>;})}
-      </tbody></table>{!pagedClients.length&&<p className="p-6 text-slate-500">{clientSearch?'No clients match this search.':'No clients yet. Use Add Client to begin.'}</p>}
-      {totalClientPages>1&&<div className="p-3 border-t flex items-center justify-end gap-3 text-sm"><button className="text-blue-700 disabled:opacity-40" disabled={clientPageSafe===1} onClick={()=>setClientPage(n=>n-1)}>Previous</button><span>Page {clientPageSafe} of {totalClientPages}</span><button className="text-blue-700 disabled:opacity-40" disabled={clientPageSafe===totalClientPages} onClick={()=>setClientPage(n=>n+1)}>Next</button></div>}</Card>}
-      </>}
+
+      {notice && <div role="status" className={`flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm ${notice.kind === 'error' ? 'border-red-200 bg-red-50 text-red-700' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
+        <span className="flex-1">{notice.message}</span><button onClick={() => setNotice(null)} aria-label="Dismiss notification"><X size={16}/></button>
+      </div>}
+
+      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white" aria-label="Clients directory">
+        <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            <div className="relative w-full sm:max-w-sm">
+              <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"/>
+              <input aria-label="Search clients by name" value={clientSearch} onChange={e => setClientSearch(e.target.value)} placeholder="Search client name…" className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+            </div>
+            <select aria-label="Filter client status" value={clientStatus} onChange={e => setClientStatus(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><option value="all">All clients</option><option value="active">Active</option><option value="inactive">Inactive</option></select>
+          </div>
+          <p className="shrink-0 text-xs tabular-nums text-slate-500" role="status">{clientsFetching ? 'Updating…' : `${totalClients.toLocaleString('en-IN')} ${totalClients === 1 ? 'client' : 'clients'}`}</p>
+        </div>
+        {clientsError ? <div className="p-8 text-center text-sm text-red-700" role="alert">Couldn't load clients. <button onClick={() => retryClients()} className="font-medium underline">Retry</button></div> : clientsLoading ? <div className="p-8 text-center text-sm text-slate-500" role="status">Loading clients…</div> : <>
+          {progressError && <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900" role="alert">Order progress is temporarily unavailable. <button onClick={() => retryProgress()} className="font-medium underline">Retry</button></div>}
+          <div className="hidden overflow-x-auto md:block">
+            <table className="w-full min-w-[760px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs font-medium text-slate-500"><tr><th scope="col" className="px-4 py-3 font-medium">Client</th><th scope="col" className="px-4 py-3 font-medium">Contact</th><th scope="col" className="px-4 py-3 font-medium">Work orders</th><th scope="col" className="px-4 py-3 font-medium">Orders closed</th><th scope="col" className="px-4 py-3 font-medium">Status</th><th scope="col" className="px-4 py-3 text-right font-medium">Manage</th></tr></thead>
+              <tbody className="divide-y divide-slate-100">{visibleClients.map(client => { const {done,total}=ordersFor(client.id);const ready = !progressLoading && !progressError;return <tr key={client.id} className="hover:bg-slate-50/70">
+                <td className="px-4 py-3"><Link to={workOrderUrl(client.id)} className="font-medium text-slate-900 hover:text-blue-700 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">{client.name} <ChevronRight size={14} className="inline text-slate-400"/></Link><div className="mt-0.5 text-xs text-slate-500">{[client.city,client.state].filter(Boolean).join(', ') || 'Location not set'}</div></td>
+                <td className="px-4 py-3 text-slate-600"><div>{client.contact_person || '—'}</div><div className="mt-0.5 text-xs text-slate-500">{client.contact_phone || client.contact_email || ''}</div></td>
+                <td className="px-4 py-3"><Link to={workOrderUrl(client.id)} className="font-medium tabular-nums text-blue-700 hover:underline">{ready ? total : '—'} <span className="font-normal">{ready ? 'View orders →' : ''}</span></Link></td>
+                <td className="px-4 py-3"><div className="flex items-center gap-2"><div className="w-20"><ProgressBar pct={ready && total ? percent(done, total) : 0}/></div><span className="whitespace-nowrap text-xs tabular-nums text-slate-600">{ready ? `${done}/${total}` : '—'}</span></div></td>
+                <td className="px-4 py-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${client.is_active?'bg-emerald-50 text-emerald-700':'bg-slate-100 text-slate-600'}`}>{client.is_active?'Active':'Inactive'}</span></td>
+                <td className="px-3 py-2"><div className="flex justify-end">{clientActions(client)}</div></td>
+              </tr>;})}</tbody>
+            </table>
+          </div>
+          <div className="divide-y divide-slate-100 md:hidden">{visibleClients.map(client=>{const {done,total}=ordersFor(client.id);const ready=!progressLoading&&!progressError;return <div key={client.id} className="space-y-2 px-4 py-3">
+            <div className="flex items-start justify-between gap-2"><div className="min-w-0"><Link to={workOrderUrl(client.id)} className="font-medium text-slate-900 hover:text-blue-700">{client.name} <ChevronRight size={14} className="inline text-slate-400"/></Link><p className="mt-1 text-xs text-slate-500">{[client.city,client.contact_person].filter(Boolean).join(' · ') || 'No contact details'}</p></div><span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-medium ${client.is_active?'bg-emerald-50 text-emerald-700':'bg-slate-100 text-slate-600'}`}>{client.is_active?'Active':'Inactive'}</span></div>
+            <div className="flex items-center justify-between"><Link to={workOrderUrl(client.id)} className="text-xs font-medium text-blue-700">{ready ? `${total} work orders · ${done} closed →` : 'Loading orders…'}</Link>{clientActions(client)}</div>
+          </div>;})}</div>
+          {!visibleClients.length && <p className="px-4 py-12 text-center text-sm text-slate-500">{debouncedClientSearch || clientStatus!=='all' ? 'No matching clients. Try another search or status.' : 'No clients yet. Select Add client to begin.'}</p>}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 text-xs text-slate-600">
+            <span className="tabular-nums">{totalClients === 0 ? '0' : `${(clientPage - 1) * CLIENT_PAGE_SIZE + 1}–${Math.min(clientPage * CLIENT_PAGE_SIZE,totalClients)}`} of {totalClients.toLocaleString('en-IN')}</span>
+            <div className="flex items-center gap-2"><span>Page {clientPage} of {totalClientPages}</span><button type="button" onClick={() => setClientPage(page => Math.max(1,page-1))} disabled={clientPage<=1 || clientsFetching} className="rounded-md border border-slate-300 px-2.5 py-1.5 disabled:opacity-40">Previous</button><button type="button" onClick={() => setClientPage(page => Math.min(totalClientPages,page+1))} disabled={clientPage>=totalClientPages || clientsFetching} className="rounded-md border border-slate-300 px-2.5 py-1.5 disabled:opacity-40">Next</button></div>
+          </div>
+        </>}
+      </section>
 
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editClient ? 'Edit Client' : 'Add Client'}>
         <div className="space-y-4">
@@ -856,8 +916,10 @@ export function ShopsPage() {
   // at a time. Selection is a Set (not an array) so toggling a shop by id
   // is a single lookup, and re-clicking the same shop twice always ends
   // up correctly selected/deselected regardless of click order.
-  const [selectMode, setSelectMode] = useState(false);
   const [selectedShopIds, setSelectedShopIds] = useState<Set<string>>(new Set());
+  const [moreActionsShop, setMoreActionsShop] = useState<Shop | null>(null);
+  const [removeConfirmation, setRemoveConfirmation] = useState('');
+  const [bulkRemoveConfirmation, setBulkRemoveConfirmation] = useState('');
 
   // Any filter change (including arriving on a new ?po= link) should land
   // back on page 1 and drop any in-progress bulk selection, since the
@@ -866,6 +928,9 @@ export function ShopsPage() {
     setPage(0);
     setSelectedShopIds(new Set());
   }, [poFilter, statusFilter, debouncedCityFilter, debouncedDistrictFilter, debouncedStateFilter, zoneFilter, campaignFilter, debouncedSearch, pageSize]);
+  // Selection is strictly scoped to the visible page. Never carry old IDs
+  // into a new page/sort and accidentally mutate shops users cannot see.
+  useEffect(() => { setSelectedShopIds(new Set()); }, [page, sortBy]);
   const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
   const [bulkRole, setBulkRole] = useState<'surveyor' | 'installer' | 'designer'>('surveyor');
   const [bulkUserId, setBulkUserId] = useState('');
@@ -1580,16 +1645,22 @@ export function ShopsPage() {
 
   const deleteMutation = useMutation({
     mutationFn: async (shop: Shop) => {
-      if (profile?.role === 'agency_owner' || profile?.role === 'admin') {
-        await supabase.from('shops').delete().eq('id', shop.id);
-      } else {
-        await supabase.from('shops').update({ status: 'cancelled' }).eq('id', shop.id);
-      }
-      await logAudit('shops', shop.id, 'delete', null, null, null, `Deleted/cancelled shop: ${shop.name}`);
+      if (removeConfirmation !== shop.name) throw new Error('Enter the exact shop name to confirm.');
+      const hardDelete = profile?.role === 'agency_owner' || profile?.role === 'admin';
+      const { data, error } = hardDelete
+        ? await supabase.from('shops').delete().eq('id', shop.id).eq('organization_id', orgId).select('id')
+        : await supabase.from('shops').update({ status: 'cancelled' }).eq('id', shop.id).eq('organization_id', orgId).select('id');
+      if (error) throw error;
+      if (data?.length !== 1) throw new Error('Shop was not changed. Refresh and check your permissions.');
+      await logAudit('shops', shop.id, hardDelete ? 'delete' : 'update', 'status', shop.status, hardDelete ? null : 'cancelled', `${hardDelete ? 'Deleted' : 'Cancelled'} shop: ${shop.name}`);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['shops-locations', orgId] });
+      setDeleteShop(null);
+      setRemoveConfirmation('');
     },
+    onError: () => { queryClient.invalidateQueries({ queryKey: ['shops', orgId] }); },
   });
 
   // Candidates for the currently-picked bulk role. Fetched lazily, same
@@ -1828,17 +1899,19 @@ export function ShopsPage() {
     mutationFn: async () => {
       const targetShops = (shops || []).filter((s) => selectedShopIds.has(s.id));
       const canHardDelete = profile?.role === 'agency_owner' || profile?.role === 'admin';
+      const phrase = `${canHardDelete ? 'DELETE' : 'CANCEL'} ${targetShops.length}`;
+      if (!targetShops.length || bulkRemoveConfirmation !== phrase) throw new Error(`Type ${phrase} to confirm.`);
       let removed = 0, cancelled = 0;
       for (const shop of targetShops) {
-        if (canHardDelete) {
-          await supabase.from('shops').delete().eq('id', shop.id);
-          removed++;
-        } else {
-          await supabase.from('shops').update({ status: 'cancelled' }).eq('id', shop.id);
-          cancelled++;
-        }
+        const { data, error } = canHardDelete
+          ? await supabase.from('shops').delete().eq('id', shop.id).eq('organization_id', orgId).select('id')
+          : await supabase.from('shops').update({ status: 'cancelled' }).eq('id', shop.id).eq('organization_id', orgId).select('id');
+        // A batch is not atomic: report partial failures instead of falsely
+        // claiming all rows succeeded (including RLS-blocked operations).
+        if (error || data?.length !== 1) throw new Error(`${removed + cancelled} of ${targetShops.length} updated. ${shop.name}: ${error?.message || 'Not updated. Refresh and check permissions.'}`);
+        if (canHardDelete) removed++; else cancelled++;
+        await logAudit('shops', shop.id, canHardDelete ? 'delete' : 'update', 'status', shop.status, canHardDelete ? null : 'cancelled', `Bulk ${canHardDelete ? 'deleted' : 'cancelled'} shop: ${shop.name}`);
       }
-      await logAudit('shops', null, 'delete', null, null, null, `Bulk ${canHardDelete ? 'deleted' : 'cancelled'} ${targetShops.length} shop(s)`);
       return { removed, cancelled };
     },
     onSuccess: () => {
@@ -1849,6 +1922,11 @@ export function ShopsPage() {
       queryClient.invalidateQueries({ queryKey: ['shops-locations', orgId] });
       setSelectedShopIds(new Set());
       setBulkRemoveConfirmOpen(false);
+      setBulkRemoveConfirmation('');
+    },
+    onError: () => {
+      queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['shops-locations', orgId] });
     },
   });
 
@@ -1916,7 +1994,6 @@ export function ShopsPage() {
       setStatusChangeShops(null);
       setNextShopStatus('');
       setSelectedShopIds(new Set());
-      setSelectMode(false);
     },
   });
 
@@ -1942,7 +2019,7 @@ export function ShopsPage() {
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
       queryClient.invalidateQueries({ queryKey: ['surveyor-assignments'] });
       queryClient.invalidateQueries({ queryKey: ['installer-assignments'] });
-      setRejectTargets(null); setRejectReason(''); setSelectedShopIds(new Set()); setSelectMode(false);
+      setRejectTargets(null); setRejectReason(''); setSelectedShopIds(new Set());
     },
   });
 
@@ -1992,39 +2069,22 @@ export function ShopsPage() {
         subtitle="Manage all shop locations"
         action={
           <div className="flex items-center gap-2">
-            {canBulkAssign && (
-              <button
-                onClick={() => { setSelectMode((v) => !v); setSelectedShopIds(new Set()); }}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-lg font-medium text-sm transition border ${
-                  selectMode ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
-                }`}
-              >
-                {selectMode ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />} Select
-              </button>
-            )}
             <button
               onClick={() => { setBulkOpen(true); setBulkUploadResult(null); }}
-              className="flex items-center gap-2 bg-white text-slate-600 border border-slate-300 hover:bg-slate-50 px-3.5 py-2 rounded-lg font-medium text-sm transition"
+              className="flex items-center gap-1.5 bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 px-3 py-2 rounded-md font-medium text-xs transition"
             >
               <UploadCloud className="w-4 h-4" /> Bulk Upload
             </button>
             {canBulkAssign && (
-              <button
-                onClick={() => { resetFastTrack(); setFastTrackOpen(true); }}
-                className="flex items-center gap-2 bg-white text-amber-700 border border-amber-300 hover:bg-amber-50 px-3.5 py-2 rounded-lg font-medium text-sm transition"
-                title="For shops already surveyed/designed/produced outside the app"
-              >
-                <FastForward className="w-4 h-4" /> Add Shop (In Progress)
-              </button>
-            )}
-            {canBulkAssign && (
-              <button
-                onClick={() => { resetBulkBackfill(); setBulkBackfillOpen(true); }}
-                className="flex items-center gap-2 bg-white text-amber-700 border border-amber-300 hover:bg-amber-50 px-3.5 py-2 rounded-lg font-medium text-sm transition"
-                title="Backfill many already-added shops at once via Excel"
-              >
-                <ListOrdered className="w-4 h-4" /> Bulk Backfill
-              </button>
+              <details className="relative group">
+                <summary className="list-none cursor-pointer inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+                  More <ChevronRight className="h-3.5 w-3.5 rotate-90" />
+                </summary>
+                <div className="absolute right-0 top-full z-30 mt-1 w-56 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                  <button type="button" onClick={(e) => { (e.currentTarget.closest('details') as HTMLDetailsElement).open = false; resetFastTrack(); setFastTrackOpen(true); }} className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"><FastForward className="h-4 w-4"/>Add already-in-progress shop</button>
+                  <button type="button" onClick={(e) => { (e.currentTarget.closest('details') as HTMLDetailsElement).open = false; resetBulkBackfill(); setBulkBackfillOpen(true); }} className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"><ListOrdered className="h-4 w-4"/>Bulk Backfill</button>
+                </div>
+              </details>
             )}
             <button onClick={openAdd} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium text-sm transition">
               <Plus className="w-4 h-4" /> Add Shop
@@ -2044,44 +2104,21 @@ export function ShopsPage() {
         </div>
       )}
 
-      {selectMode && (
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-4 bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5">
-          <p className="text-sm text-blue-800 font-medium">
-            {selectedShopIds.size} shop{selectedShopIds.size === 1 ? '' : 's'} selected
-            {totalShops > pageSize && <span className="font-normal text-blue-600"> (this page only)</span>}
-          </p>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setSelectedShopIds(new Set(filteredShops.map((s) => s.id)))}
-              className="text-xs font-medium text-blue-700 hover:underline"
-            >
-              Select all on this page
-            </button>
-            <button
-              onClick={() => openStatusChange(filteredShops.filter((s) => selectedShopIds.has(s.id)))}
-              disabled={selectedShopIds.size === 0}
-              className="flex items-center gap-1.5 bg-white text-violet-700 border border-violet-200 hover:bg-violet-50 px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
-            >
-              <Layers className="w-3.5 h-3.5" /> Change Stage
-            </button>
-            <button
-              onClick={openBulkAssign}
-              disabled={selectedShopIds.size === 0}
-              className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
-            >
-              <UserPlus className="w-3.5 h-3.5" /> Bulk Assign
-            </button>
-            {canBulkRemove && <button onClick={() => { setRejectReason(''); setRejectTargets(filteredShops.filter((shop) => selectedShopIds.has(shop.id) && shop.status !== 'rejected')); }} disabled={!Array.from(selectedShopIds).some((id) => filteredShops.some((shop) => shop.id === id && shop.status !== 'rejected'))} className="flex items-center gap-1.5 bg-red-600 text-white px-3 py-1.5 rounded-lg text-xs disabled:opacity-50"><XCircle className="w-3.5 h-3.5"/> Reject Selected</button>}
-            {canBulkRemove && (
-              <button
-                onClick={() => setBulkRemoveConfirmOpen(true)}
-                disabled={selectedShopIds.size === 0}
-                className="flex items-center gap-1.5 bg-white text-red-600 border border-red-200 hover:bg-red-50 px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
-              >
-                <Ban className="w-3.5 h-3.5" /> Cancel / Remove
-              </button>
-            )}
-          </div>
+      {canBulkAssign && selectedShopIds.size > 0 && (
+        <div role="region" aria-label="Selected shop actions" className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/70 px-3 py-2">
+          <span className="mr-auto text-xs font-semibold text-blue-900">{selectedShopIds.size} selected <span className="font-normal text-blue-700">· current page only</span></span>
+          <button type="button" onClick={() => setSelectedShopIds(new Set())} className="rounded px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-white">Clear selection</button>
+          <button type="button" onClick={() => openStatusChange(filteredShops.filter((s) => selectedShopIds.has(s.id)))} className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">Change stage</button>
+          <button type="button" onClick={openBulkAssign} className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700"><UserPlus className="h-3.5 w-3.5"/> Assign</button>
+          {canBulkRemove && (
+            <details className="relative group">
+              <summary className="list-none cursor-pointer rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">More actions</summary>
+              <div className="absolute right-0 top-full z-30 mt-1 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                <button type="button" onClick={(e) => { (e.currentTarget.closest('details') as HTMLDetailsElement).open = false; setRejectReason(''); setRejectTargets(filteredShops.filter((shop) => selectedShopIds.has(shop.id) && shop.status !== 'rejected')); }} disabled={!filteredShops.some((shop) => selectedShopIds.has(shop.id) && shop.status !== 'rejected')} className="block w-full rounded px-3 py-2 text-left text-xs text-red-700 hover:bg-red-50 disabled:opacity-40">Reject selected…</button>
+                <button type="button" onClick={(e) => { (e.currentTarget.closest('details') as HTMLDetailsElement).open = false; setBulkRemoveConfirmation(''); setBulkRemoveConfirmOpen(true); }} className="block w-full rounded px-3 py-2 text-left text-xs text-red-700 hover:bg-red-50">Cancel / Delete…</button>
+              </div>
+            </details>
+          )}
         </div>
       )}
 
@@ -2089,13 +2126,14 @@ export function ShopsPage() {
         <div className="relative flex-1 min-w-[220px]">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
-            placeholder="Name, city, address, owner..."
+            aria-label="Search shops by name, city, address or owner"
+            placeholder="Search shops, city, address or contact"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
-        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
+        <select aria-label="Sort shops" value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
           {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>Sort: {o.label}</option>)}
         </select>
         <FilterButton activeCount={activeFilterCount} onClick={() => setFilterDrawerOpen(true)} />
@@ -2184,21 +2222,28 @@ export function ShopsPage() {
         </FilterSection>
       </FilterDrawer>
 
-      {/* LISTING — a proper table, not cards: every shop's location, contact,
-          who's currently working it (and their status), and pipeline status
-          all readable at a glance without opening each one. */}
+      {/* One canonical shop table. Checkboxes are always first, not a
+          temporary mode; clicking anywhere else NEVER changes selection. */}
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide border-b border-slate-200">
+          <table className="w-full min-w-[880px] table-fixed text-xs">
+            <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-600">
               <tr>
-                {selectMode && <th className="w-10 px-3 py-2.5"></th>}
-                <th className="text-left px-3 py-2.5 font-medium">Shop</th>
-                <th className="text-left px-3 py-2.5 font-medium">Location</th>
-                <th className="text-left px-3 py-2.5 font-medium">Contact</th>
-                <th className="text-left px-3 py-2.5 font-medium">Assigned</th>
-                <th className="text-left px-3 py-2.5 font-medium">Status</th>
-                <th className="text-right px-3 py-2.5 font-medium">Actions</th>
+                {canBulkAssign && (
+                  <th scope="col" className="sticky left-0 z-10 w-11 bg-slate-50 px-3 py-2 text-left">
+                    <input type="checkbox" aria-label="Select all shops on this page"
+                      disabled={!filteredShops.length || shopsLoading}
+                      checked={filteredShops.length > 0 && filteredShops.every((shop) => selectedShopIds.has(shop.id))}
+                      onChange={(e) => setSelectedShopIds(e.target.checked ? new Set(filteredShops.map((shop) => shop.id)) : new Set())}
+                      className="h-4 w-4 cursor-pointer accent-blue-600" />
+                  </th>
+                )}
+                <th scope="col" className="w-[24%] px-3 py-2 text-left font-medium">Shop / Client</th>
+                <th scope="col" className="w-[17%] px-3 py-2 text-left font-medium">Location / Contact</th>
+                <th scope="col" className="w-[15%] px-3 py-2 text-left font-medium">Work Order</th>
+                <th scope="col" className="w-[18%] px-3 py-2 text-left font-medium">Assigned</th>
+                <th scope="col" className="w-[16%] px-3 py-2 text-left font-medium">Stage</th>
+                <th scope="col" className="w-[96px] px-3 py-2 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -2207,92 +2252,60 @@ export function ShopsPage() {
                 const locationLine = [shop.city, shop.district].filter(Boolean).join(', ');
                 const zoneLabel = shop.zones?.name || shop.zone;
                 return (
-                  <tr
-                    key={shop.id}
-                    className={`hover:bg-slate-50 transition ${selectedShopIds.has(shop.id) ? 'bg-blue-50/60' : ''}`}
-                    onClick={selectMode ? () => toggleShopSelected(shop.id) : undefined}
-                  >
-                    {selectMode && (
-                      <td className="px-3 py-3 align-top cursor-pointer" onClick={(e) => { e.stopPropagation(); toggleShopSelected(shop.id); }}>
-                        <input
-                          type="checkbox"
-                          checked={selectedShopIds.has(shop.id)}
-                          onChange={() => toggleShopSelected(shop.id)}
-                          onClick={(e) => e.stopPropagation()}
-                          className="w-4 h-4 accent-blue-600"
-                        />
+                  <tr key={shop.id} className={`align-middle transition-colors hover:bg-slate-50 ${selectedShopIds.has(shop.id) ? 'bg-blue-50/70' : ''}`}>
+                    {canBulkAssign && (
+                      <td className={`sticky left-0 z-10 px-3 py-2 ${selectedShopIds.has(shop.id) ? 'bg-blue-50' : 'bg-white'}`}>
+                        <input type="checkbox" aria-label={`Select ${shop.name}`}
+                          disabled={shopsLoading}
+                          checked={selectedShopIds.has(shop.id)} onChange={() => toggleShopSelected(shop.id)}
+                          className="h-4 w-4 cursor-pointer accent-blue-600 disabled:opacity-50" />
                       </td>
                     )}
-                    <td className="px-3 py-3 align-top max-w-[220px]">
-                      {selectMode ? (
-                        <div>
-                          <p className="font-medium text-slate-900 truncate">{shop.name}</p>
-                          <p className="text-xs text-slate-500 truncate">{shop.clients?.name || 'No client'}</p>
+                    <td className="min-w-0 px-3 py-2">
+                      <Link to={`/shops/${shop.id}`} title={shop.name} className="block truncate font-semibold text-slate-900 hover:text-blue-700 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">{shop.name}</Link>
+                      <p className="mt-0.5 truncate text-[11px] text-slate-500" title={shop.clients?.name || ''}>{shop.clients?.name || 'No client'}</p>
+                      {shop.status === 'rejected' && <p className="mt-0.5 truncate text-[11px] text-red-700" title={shop.rejected_reason || 'Rejected'}>Rejected: {shop.rejected_reason || 'See details'}</p>}
+                    </td>
+                    <td className="min-w-0 px-3 py-2">
+                      <p className="truncate text-slate-700" title={locationLine}>{locationLine || '—'}</p>
+                      <p className="mt-0.5 truncate text-[11px] text-slate-500" title={[zoneLabel, shop.owner_name, shop.contact_phone].filter(Boolean).join(' · ')}>{[zoneLabel, shop.contact_phone].filter(Boolean).join(' · ') || '—'}</p>
+                    </td>
+                    <td className="min-w-0 px-3 py-2 text-slate-700">
+                      <span className="block truncate" title={shop.purchase_orders?.po_number || ''}>{shop.purchase_orders?.po_number || 'Not linked'}</span>
+                    </td>
+                    <td className="min-w-0 px-3 py-2">
+                      {shopAssignments.length ? (
+                        <div className="min-w-0 text-xs">
+                          <span className="block truncate font-medium text-slate-800" title={`${shopAssignments[0].name} · ${shopAssignments[0].role}`}>
+                            {shopAssignments[0].name} <span className="font-normal capitalize text-slate-500">· {shopAssignments[0].role}</span>
+                          </span>
+                          {shopAssignments.length > 1 && (
+                            <details className="group/people relative mt-0.5">
+                              <summary className="w-fit cursor-pointer list-none rounded text-[11px] font-medium text-blue-700 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+                                View all {shopAssignments.length} assigned <span aria-hidden="true">▾</span>
+                              </summary>
+                              <ul className="mt-1 max-h-36 space-y-1 overflow-y-auto rounded-md border border-slate-200 bg-white p-2 shadow-sm">
+                                {shopAssignments.map((person, index) => (
+                                  <li key={`${person.role}-${person.name}-${index}`} className="flex items-start justify-between gap-2 text-[11px] leading-4">
+                                    <span className="min-w-0 break-words font-medium text-slate-800">{person.name}</span>
+                                    <span className="shrink-0 capitalize text-slate-500">{person.role}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
                         </div>
-                      ) : (
-                        <Link to={`/shops/${shop.id}`} className="block">
-                          <p className="font-medium text-slate-900 hover:text-blue-600 truncate">{shop.name}</p>
-                          <p className="text-xs text-slate-500 truncate">{shop.clients?.name || 'No client'}</p>
-                        </Link>
-                      )}
-                      {shop.status === 'rejected' && <div className="mt-1 rounded bg-red-50 p-1.5 text-xs text-red-700 space-y-0.5"><p><b>Rejected:</b> {shop.rejected_reason || 'Reason unavailable'}</p><p>By: {(shop as Shop & { rejected_profile?: {full_name?: string} }).rejected_profile?.full_name || shop.rejected_by || 'Unknown'} · {shop.rejected_at ? new Date(shop.rejected_at).toLocaleString('en-IN') : 'Date unavailable'}</p></div>}
-                      {shop.purchase_orders?.po_number && (
-                        <span className="inline-flex items-center gap-1 mt-1 text-[10px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
-                          <FileText className="w-3 h-3" /> {shop.purchase_orders.po_number}
-                        </span>
-                      )}
+                      ) : <span className="text-slate-400">Unassigned</span>}
                     </td>
-                    <td className="px-3 py-3 align-top max-w-[200px]">
-                      {locationLine && (
-                        <p className="text-slate-700 flex items-center gap-1 truncate"><MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" /> {locationLine}</p>
-                      )}
-                      {zoneLabel && <p className="text-xs text-slate-400 truncate mt-0.5">Zone: {zoneLabel}</p>}
-                      {!locationLine && !zoneLabel && <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="px-3 py-3 align-top max-w-[180px]">
-                      {(shop.owner_name || shop.contact_phone) ? (
-                        <div>
-                          {shop.owner_name && <p className="text-slate-700 truncate">{shop.owner_name}</p>}
-                          {shop.contact_phone && <p className="text-xs text-slate-400 flex items-center gap-1"><Phone className="w-3 h-3" /> {shop.contact_phone}</p>}
-                        </div>
-                      ) : <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="px-3 py-3 align-top max-w-[220px]">
-                      {shopAssignments.length > 0 ? (
-                        <div className="flex flex-col gap-1">
-                          {shopAssignments.map((a, i) => (
-                            <span key={i} className="inline-flex items-center gap-1 text-xs">
-                              <span className="capitalize text-slate-500 shrink-0">{a.role}:</span>
-                              <span className="text-slate-700 truncate">{a.name}</span>
-                              <span className="text-[10px] text-slate-400 capitalize shrink-0">({a.status.replace(/_/g, ' ')})</span>
-                            </span>
-                          ))}
-                        </div>
-                      ) : <span className="text-xs text-slate-300">Unassigned</span>}
-                    </td>
-                    <td className="px-3 py-3 align-top">
-                      {canBulkAssign && !selectMode ? (
-                        <button onClick={(e) => { e.stopPropagation(); openStatusChange([shop]); }} className="rounded-md hover:ring-2 hover:ring-violet-100 transition" title="Change shop stage">
-                          <StatusBadge status={shop.status} />
-                        </button>
+                    <td className="px-3 py-2">
+                      {canBulkAssign ? (
+                        <button type="button" onClick={() => openStatusChange([shop])} title={`Change stage for ${shop.name}`} aria-label={`Change stage for ${shop.name}`} className="rounded-md p-0.5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><StatusBadge status={shop.status} /></button>
                       ) : <StatusBadge status={shop.status} />}
                     </td>
-                    <td className="px-3 py-3 align-top">
-                      <div className="flex items-center justify-end gap-3">
-                        <Link to={`/shops/${shop.id}`} onClick={(e) => e.stopPropagation()} className="text-slate-400 hover:text-blue-600" title="View details">
-                          <ChevronRight className="w-4 h-4" />
-                        </Link>
-                        {!selectMode && canBulkRemove && shop.status !== 'rejected' && <button onClick={(e) => { e.stopPropagation(); setRejectReason(''); setRejectTargets([shop]); }} className="text-red-600 hover:text-red-800 text-xs font-semibold" title="Reject this shop">Reject</button>}
-                        {!selectMode && (
-                          <>
-                            <button onClick={(e) => { e.stopPropagation(); openEdit(shop); }} className="text-slate-400 hover:text-blue-600" title="Edit">
-                              <Pencil className="w-4 h-4" />
-                            </button>
-                            <button onClick={(e) => { e.stopPropagation(); setDeleteShop(shop); }} className="text-slate-400 hover:text-red-600" title={profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Delete' : 'Cancel'}>
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </>
-                        )}
+                    <td className="px-3 py-2">
+                      <div className="flex items-center justify-end gap-1">
+                        <button type="button" onClick={() => openEdit(shop)} title={`Edit ${shop.name}`} aria-label={`Edit ${shop.name}`} className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><Pencil className="h-3.5 w-3.5" /></button>
+                        <button type="button" onClick={() => setMoreActionsShop(shop)} title={`More actions for ${shop.name}`} aria-label={`More actions for ${shop.name}`} className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><MoreHorizontal className="h-4 w-4" /></button>
                       </div>
                     </td>
                   </tr>
@@ -2301,8 +2314,9 @@ export function ShopsPage() {
             </tbody>
           </table>
         </div>
-        {filteredShops.length === 0 && (
-          <EmptyState icon={<Store className="w-12 h-12" />} title="No shops found" subtitle={totalShops === 0 && !hasActiveFilters ? 'Add a shop, or bulk upload via Excel' : 'Adjust filters or add a new shop'} />
+        {shopsLoading && !shopsPage && <p role="status" className="px-4 py-5 text-xs text-slate-500">Loading shops…</p>}
+        {!shopsLoading && !shopsLoadError && filteredShops.length === 0 && (
+          <EmptyState icon={<Store className="w-10 h-10" />} title="No shops found" subtitle={totalShops === 0 && !hasActiveFilters ? 'Add a shop, or bulk upload via Excel' : 'Adjust your filters to find shops'} />
         )}
 
         {/* Pagination — this list is designed to hold 10,000+ shops, so
@@ -2461,15 +2475,32 @@ export function ShopsPage() {
         </div>
       </Modal>
 
-      <ConfirmDialog
-        open={!!deleteShop}
-        onClose={() => setDeleteShop(null)}
-        onConfirm={() => deleteShop && deleteMutation.mutate(deleteShop)}
-        title={profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Delete Shop' : 'Cancel Shop'}
-        message={`Are you sure you want to ${profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'permanently delete' : 'cancel'} ${deleteShop?.name}?`}
-        confirmLabel={profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Delete' : 'Cancel'}
-        danger
-      />
+      {/* Row actions are behind an explicit menu instead of prominent
+          Reject / Cancel buttons in every row. No mutation runs here. */}
+      <Modal open={!!moreActionsShop} onClose={() => setMoreActionsShop(null)} title="Shop actions" size="sm">
+        <div className="space-y-3">
+          <p className="text-sm font-medium text-slate-900">{moreActionsShop?.name}</p>
+          <p className="text-xs text-slate-500">Choose an action. Rejection and removal always require separate confirmation.</p>
+          <Link to={moreActionsShop ? `/shops/${moreActionsShop.id}` : '#'} className="block rounded-md border border-slate-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-slate-50">View shop details →</Link>
+          {canBulkRemove && moreActionsShop?.status !== 'rejected' && (
+            <button type="button" onClick={() => { setRejectReason(''); setRejectTargets(moreActionsShop ? [moreActionsShop] : null); setMoreActionsShop(null); }} className="block w-full rounded-md border border-slate-200 px-3 py-2 text-left text-xs font-medium text-red-700 hover:bg-red-50">Reject shop…</button>
+          )}
+          <button type="button" onClick={() => { setDeleteShop(moreActionsShop); setRemoveConfirmation(''); setMoreActionsShop(null); }} className="block w-full rounded-md border border-slate-200 px-3 py-2 text-left text-xs font-medium text-red-700 hover:bg-red-50">{profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Delete shop…' : 'Cancel shop…'}</button>
+        </div>
+      </Modal>
+
+      <Modal open={!!deleteShop} onClose={() => { if (!deleteMutation.isPending) { setDeleteShop(null); setRemoveConfirmation(''); } }} title={profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Permanently delete shop' : 'Cancel shop'} size="sm">
+        <div className="space-y-3">
+          <p className="text-sm text-slate-700">{profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'This permanently deletes the shop and may affect linked records.' : 'This marks the shop cancelled. Existing work and history remain linked.'}</p>
+          <p className="text-xs text-slate-600">To confirm, type the exact shop name: <strong className="text-slate-900">{deleteShop?.name}</strong></p>
+          <input type="text" aria-label="Type exact shop name to confirm" value={removeConfirmation} onChange={(e) => setRemoveConfirmation(e.target.value)} autoComplete="off" className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500" />
+          {deleteMutation.isError && <p role="alert" className="text-xs text-red-700">{(deleteMutation.error as Error).message}</p>}
+          <div className="flex justify-end gap-2">
+            <button type="button" disabled={deleteMutation.isPending} onClick={() => { setDeleteShop(null); setRemoveConfirmation(''); }} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700">Keep shop</button>
+            <button type="button" disabled={!deleteShop || removeConfirmation !== deleteShop.name || deleteMutation.isPending} onClick={() => deleteShop && deleteMutation.mutate(deleteShop)} className="rounded-md bg-red-700 px-3 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{deleteMutation.isPending ? 'Processing…' : (profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Delete permanently' : 'Cancel shop')}</button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal open={!!statusChangeShops} onClose={() => { setStatusChangeShops(null); setNextShopStatus(''); }} title={statusChangeShops?.length === 1 ? 'Change Shop Stage' : `Change Stage — ${statusChangeShops?.length || 0} Shops`} size="md">
         <div className="space-y-4">
@@ -2500,7 +2531,10 @@ export function ShopsPage() {
           <div className="max-h-40 overflow-y-auto text-xs bg-slate-50 rounded p-2 space-y-1">{(rejectTargets || []).map((shop) => <p key={shop.id}>{shop.name} · Work Order: {(purchaseOrders || []).find((po) => po.id === shop.purchase_order_id)?.po_number || 'Not linked'}</p>)}</div>
           <Textarea label="Rejection reason (required)" value={rejectReason} onChange={setRejectReason} rows={3}/>
           {rejectShopsMutation.isError && <p className="text-xs text-red-700">{(rejectShopsMutation.error as Error).message}</p>}
-          <button type="button" disabled={!rejectReason.trim() || rejectShopsMutation.isPending} onClick={() => rejectShopsMutation.mutate()} className="w-full py-2.5 rounded-lg bg-red-600 text-white font-medium disabled:opacity-50">{rejectShopsMutation.isPending ? 'Rejecting...' : 'Confirm Rejection'}</button>
+          <div className="flex justify-end gap-2">
+            <button type="button" disabled={rejectShopsMutation.isPending} onClick={() => { setRejectTargets(null); setRejectReason(''); }} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700">Keep shops</button>
+            <button type="button" disabled={!rejectReason.trim() || rejectShopsMutation.isPending} onClick={() => rejectShopsMutation.mutate()} className="rounded-md bg-red-700 px-3 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{rejectShopsMutation.isPending ? 'Rejecting…' : 'Confirm rejection'}</button>
+          </div>
         </div>
       </Modal>
       <Modal open={bulkAssignOpen} onClose={() => setBulkAssignOpen(false)} title="Bulk Assign">
@@ -2566,7 +2600,7 @@ export function ShopsPage() {
           </button>
           {bulkResult && (
             <button
-              onClick={() => { setBulkAssignOpen(false); setSelectMode(false); setSelectedShopIds(new Set()); }}
+              onClick={() => { setBulkAssignOpen(false); setSelectedShopIds(new Set()); }}
               className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2 rounded-lg text-sm"
             >
               Done
@@ -2700,15 +2734,18 @@ export function ShopsPage() {
         </div>
       </Modal>
 
-      <ConfirmDialog
-        open={bulkRemoveConfirmOpen}
-        onClose={() => setBulkRemoveConfirmOpen(false)}
-        onConfirm={() => bulkRemoveMutation.mutate()}
-        title={profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Delete selected shops?' : 'Cancel selected shops?'}
-        message={`This will ${profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'permanently delete' : 'cancel'} ${selectedShopIds.size} shop${selectedShopIds.size === 1 ? '' : 's'}. This can't be undone.`}
-        confirmLabel={bulkRemoveMutation.isPending ? 'Working...' : (profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Delete' : 'Cancel Shops')}
-        danger
-      />
+      <Modal open={bulkRemoveConfirmOpen} onClose={() => { if (!bulkRemoveMutation.isPending) { setBulkRemoveConfirmOpen(false); setBulkRemoveConfirmation(''); } }} title="Confirm selected shops" size="sm">
+        <div className="space-y-3">
+          <p className="text-sm text-slate-700">{profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'Permanently delete' : 'Cancel'} {selectedShopIds.size} selected shop(s). This action may affect existing records.</p>
+          <p className="text-xs text-slate-600">Type <strong className="text-slate-900">{`${profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'DELETE' : 'CANCEL'} ${selectedShopIds.size}`}</strong> to confirm:</p>
+          <input value={bulkRemoveConfirmation} aria-label="Type the confirmation phrase" autoComplete="off" onChange={(e) => setBulkRemoveConfirmation(e.target.value)} className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500" />
+          {bulkRemoveMutation.isError && <p role="alert" className="text-xs text-red-700">{(bulkRemoveMutation.error as Error).message}</p>}
+          <div className="flex justify-end gap-2">
+            <button type="button" disabled={bulkRemoveMutation.isPending} onClick={() => { setBulkRemoveConfirmOpen(false); setBulkRemoveConfirmation(''); }} className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700">Keep shops</button>
+            <button type="button" disabled={!selectedShopIds.size || bulkRemoveConfirmation !== `${profile?.role === 'agency_owner' || profile?.role === 'admin' ? 'DELETE' : 'CANCEL'} ${selectedShopIds.size}` || bulkRemoveMutation.isPending} onClick={() => bulkRemoveMutation.mutate()} className="rounded-md bg-red-700 px-3 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{bulkRemoveMutation.isPending ? 'Processing…' : 'Confirm action'}</button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal open={fastTrackOpen} onClose={() => setFastTrackOpen(false)} title="Add Shop — Already In Progress" size="lg">
         <div className="space-y-5">
@@ -3106,17 +3143,19 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const [backfillSurveyPhotos, setBackfillSurveyPhotos] = useState<File[]>([]);
   const [backfillDesignFiles, setBackfillDesignFiles] = useState<File[]>([]);
 
-  const { data: shop } = useQuery({
+  const { data: shop, isLoading: shopLoading, isError: shopError, refetch: retryShop } = useQuery({
     queryKey: ['shop', shopId],
     queryFn: async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('shops')
         .select('*, clients(name), projects(name), zones(name), purchase_orders(po_number, fulfillment_type)')
         .eq('id', shopId)
+        .eq('organization_id', orgId!)
         .maybeSingle();
+      if (error) throw error;
       return data;
     },
-    enabled: !!shopId,
+    enabled: !!shopId && !!orgId,
   });
 
   useEffect(() => {
@@ -3149,11 +3188,21 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     return () => { cancelled = true; };
   }, [shop?.status, shopId]);
 
-  const { data: workItems } = useQuery({
+  const { data: workItems, isLoading: workItemsLoading, isError: workItemsError, refetch: retryWorkItems } = useQuery({
     queryKey: ['shop-work-items', shopId],
     queryFn: async () => {
-      const { data } = await supabase.from('work_items').select('*').eq('shop_id', shopId).order('created_at');
-      return data as WorkItem[];
+      // Paginate all of this shop's items from the server: a single Supabase
+      // select can silently stop at its row cap on unusually large jobs.
+      const all: WorkItem[] = [];
+      for (let offset = 0; ; offset += 500) {
+        const { data, error } = await supabase.from('work_items').select('*').eq('shop_id', shopId)
+          .order('created_at', { ascending: true }).order('id', { ascending: true })
+          .range(offset, offset + 499);
+        if (error) throw error;
+        all.push(...((data || []) as WorkItem[]));
+        if (!data || data.length < 500) break;
+      }
+      return all;
     },
     enabled: !!shopId,
   });
@@ -3415,7 +3464,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     enabled: !!shopId,
   });
 
-  const { data: designTasks } = useQuery({
+  const { data: designTasks, isLoading: designTasksLoading } = useQuery({
     queryKey: ['shop-design-tasks', shopId],
     queryFn: async () => {
       const { data } = await supabase
@@ -3494,7 +3543,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     enabled: !!shopId,
   });
 
-  const { data: assignments } = useQuery({
+  const { data: assignments, isLoading: assignmentsLoading, isError: assignmentsError, refetch: retryAssignments } = useQuery({
     queryKey: ['shop-assignments', shopId],
     queryFn: async () => {
       const { data } = await supabase
@@ -3938,84 +3987,80 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     timeline[firstPendingIdx] = { ...timeline[firstPendingIdx], status: 'current' };
   }
 
-  if (!shop) return <div className="p-8 text-center text-slate-400">Loading shop...</div>;
+  const currentPeople = (assignments || []).filter((a: any) => a.status !== 'declined');
+  const assignmentHistory = (assignments || []).filter((a: any) => a.status === 'declined');
+  // Design ownership lives on design_tasks; include every current designer, not just the newest task.
+  const designers = (designTasks || []).slice(0, 1).filter((task: any) => !!task.designer_id);
+  const olderDesigners = (designTasks || []).slice(1).filter((task: any) => !!task.designer_id);
+  const currentPeopleByRole = (role: 'surveyor' | 'installer') => currentPeople.filter((a: any) => a.role === role);
+
+  if (shopLoading || (!shop && !shopError && orgId)) return <div role="status" className="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-600">Loading shop details…</div>;
+  if (shopError) return <div role="alert" className="rounded-lg border border-red-200 bg-white p-6 text-sm text-red-700">Unable to load shop details. <button type="button" className="ml-2 font-medium underline" onClick={() => void retryShop()}>Retry</button></div>;
+  if (!shop) return <div role="status" className="rounded-lg border border-slate-200 bg-white p-6 text-sm text-slate-600">Shop not found or access denied. <Link to="/shops" className="ml-2 text-blue-700 underline">Back to shops</Link></div>;
 
   return (
-    <div>
-      <Link to="/shops" className="inline-flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 mb-4">
-        <ArrowLeft className="w-4 h-4" /> Back to Shops
-      </Link>
-
-      <div className="mb-5 rounded-2xl border border-slate-200 bg-white p-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-bold text-slate-900 break-words">{shop.name}</h1>
-            <p className="mt-1 text-sm text-slate-500">{shop.clients?.name}{shop.projects?.name ? ` · ${shop.projects.name}` : ''}</p>
+    <div className="space-y-3 pb-6">
+      <div className="rounded-xl border border-slate-200 bg-white px-3 py-3 sm:px-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <Link to="/shops" className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 hover:underline focus-visible:underline"><ArrowLeft className="h-3.5 w-3.5" /> All shops</Link>
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h1 className="min-w-0 break-words text-lg font-semibold leading-6 text-slate-900 sm:text-xl">{shop.name}</h1>
+              <StatusBadge status={shop.status} />
+            </div>
+            <p className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-slate-600">
+              <span className="font-medium">{shop.clients?.name || 'No client'}</span>
+              {shop.purchase_orders?.po_number && <Link to={`/purchase-orders?order=${encodeURIComponent(shop.purchase_order_id)}`} className="text-blue-700 hover:underline">PO {shop.purchase_orders.po_number}</Link>}
+              {(shop.city || shop.district) && <span>· {[shop.city, shop.district].filter(Boolean).join(', ')}</span>}
+              {!!shop.contact_phone && <a href={`tel:${shop.contact_phone}`} className="hover:underline">· {shop.contact_phone}</a>}
+            </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {canCrudShop ? (
-              <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white pl-3 text-xs font-medium text-slate-500">
-                Stage
-                <select value={shop.status} disabled={stageBusy} onChange={(e) => void changeStage(e.target.value)} className="rounded-r-lg border-0 border-l border-slate-200 bg-slate-50 py-2 pl-2 pr-8 text-sm font-semibold text-slate-900 outline-none focus:ring-2 focus:ring-slate-400 disabled:opacity-50">
-                  {SHOP_STATUSES.map((st) => <option key={st} value={st}>{STATUS_LABELS[st] || st}</option>)}
-                </select>
-              </label>
-            ) : <StatusBadge status={shop.status} />}
-            {canCrudShop && <button onClick={() => setDetailEditOpen(true)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50"><Pencil className="w-4 h-4" /> Edit shop</button>}
+            {canCrudShop ? <label className="flex items-center gap-1.5 text-xs font-medium text-slate-600">Change stage
+              <select aria-label="Shop stage" value={shop.status} disabled={stageBusy} onChange={(e) => void changeStage(e.target.value)} className="max-w-[180px] rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs font-medium text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 disabled:opacity-50">
+                {SHOP_STATUSES.map((st) => <option key={st} value={st}>{STATUS_LABELS[st] || st}</option>)}
+              </select>
+            </label> : null}
+            {canCrudShop && <button type="button" onClick={() => setDetailEditOpen(true)} className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"><Pencil className="h-3.5 w-3.5" /> Edit shop</button>}
           </div>
         </div>
-        {(() => {
-          const Val = ({ v, wide }: { v: ReactNode; wide?: boolean }) => {
-            const empty = v === null || v === undefined || v === '';
-            return empty
-              ? (canCrudShop ? <button onClick={() => setDetailEditOpen(true)} className="text-sm text-slate-300 hover:text-blue-600 hover:underline">— add</button> : <span className="text-sm text-slate-300">—</span>)
-              : <span className={`text-sm text-slate-900 break-words ${wide ? '' : ''}`}>{v}</span>;
-          };
-          const Fact = ({ label, v, span }: { label: string; v: ReactNode; span?: string }) => (
-            <div className={`min-w-0 ${span || ''}`}><dt className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</dt><dd className="mt-0.5"><Val v={v} /></dd></div>
-          );
-          const phone = shop.contact_phone ? String(shop.contact_phone).trim() : '';
-          const waNumber = phone.replace(/[^0-9]/g, '');
-          const extras = Object.entries(shop.extra_details || {}).filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '');
-          const created = shop.created_at ? new Date(shop.created_at).toLocaleDateString('en-IN') : null;
-          return (
-            <div className="mt-5 grid grid-cols-1 gap-x-10 gap-y-5 border-t border-slate-100 pt-5 lg:grid-cols-2">
-              {/* Contact & location */}
-              <section>
-                <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Contact &amp; location</h2>
-                <dl className="grid grid-cols-2 gap-x-6 gap-y-3.5 sm:grid-cols-3">
-                  <Fact label="Owner name" v={shop.owner_name} />
-                  <Fact label="Phone" v={phone ? <span className="inline-flex flex-wrap items-center gap-x-2"><a href={`tel:${phone}`} className="font-medium hover:underline">{phone}</a>{waNumber.length >= 10 && <a href={`https://wa.me/${waNumber.length === 10 ? '91' + waNumber : waNumber}`} target="_blank" rel="noreferrer" className="text-xs text-slate-500 hover:text-slate-800 hover:underline">WhatsApp</a>}</span> : null} />
-                  <Fact label="Signage language" v={shop.signage_language} />
-                  <Fact label="Address" v={shop.address} span="col-span-2 sm:col-span-3" />
-                  <Fact label="Village" v={shop.village} />
-                  <Fact label="City" v={shop.city} />
-                  <Fact label="District" v={shop.district} />
-                  <Fact label="State" v={shop.state} />
-                  <Fact label="Zone" v={shop.zones?.name || shop.zone} />
-                  <Fact label="GPS" v={shop.latitude ? <a href={`https://www.google.com/maps?q=${shop.latitude},${shop.longitude}`} target="_blank" rel="noreferrer" className="hover:underline">{Number(shop.latitude).toFixed(5)}, {Number(shop.longitude).toFixed(5)} ↗</a> : null} />
-                </dl>
-              </section>
-              {/* Work order & record */}
-              <section>
-                <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Work order &amp; record</h2>
-                <dl className="grid grid-cols-2 gap-x-6 gap-y-3.5 sm:grid-cols-3">
-                  <Fact label="Client" v={shop.clients?.name} />
-                  <Fact label="Project" v={shop.projects?.name} />
-                  <Fact label="Purchase order" v={shop.purchase_orders?.po_number} />
-                  <Fact label="Fulfilment" v={shop.purchase_orders?.fulfillment_type ? String(shop.purchase_orders.fulfillment_type).replace(/_/g, ' ') : null} />
-                  <Fact label="Added on" v={created} />
-                  {extras.map(([k, v]) => <Fact key={k} label={k.replace(/_/g, ' ')} v={String(v)} />)}
-                </dl>
-              </section>
-            </div>
-          );
-        })()}
+        <div className="mt-3 grid grid-cols-2 gap-x-5 gap-y-2 border-t border-slate-100 pt-3 text-xs sm:grid-cols-3 lg:grid-cols-5">
+          {([
+            ['Owner / contact', shop.owner_name],
+            ['Location', [shop.village, shop.city, shop.state].filter(Boolean).join(', ')],
+            ['Zone', shop.zones?.name || shop.zone],
+            ['Signage language', shop.signage_language],
+            ['Address', shop.address],
+          ] as [string, string | null | undefined][]).map(([label, value]) => (
+            <div key={label} className="min-w-0"><p className="text-[11px] text-slate-500">{label}</p><p className="mt-0.5 break-words font-medium text-slate-800" title={value || undefined}>{value || '—'}</p></div>
+          ))}
+        </div>
+        <details className="group mt-2 border-t border-slate-100 pt-2">
+          <summary className="w-fit cursor-pointer rounded text-xs font-medium text-blue-700 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">All shop information <span aria-hidden="true">▾</span></summary>
+          <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-3 text-xs sm:grid-cols-3 xl:grid-cols-5">
+            {([
+              ['Shop / site', shop.name], ['Client', shop.clients?.name], ['Project', shop.projects?.name],
+              ['Owner', shop.owner_name], ['Phone', shop.contact_phone], ['Signage language', shop.signage_language],
+              ['Address', shop.address], ['Village', shop.village], ['City', shop.city], ['District', shop.district],
+              ['State', shop.state], ['Zone', shop.zones?.name || shop.zone],
+              ['Fulfilment', shop.purchase_orders?.fulfillment_type ? String(shop.purchase_orders.fulfillment_type).replace(/_/g, ' ') : ''],
+              ['Created', shop.created_at ? new Date(shop.created_at).toLocaleDateString('en-IN') : ''],
+              ['GPS', shop.latitude != null && shop.longitude != null ? `${shop.latitude}, ${shop.longitude}` : ''],
+            ] as [string, any][]).concat(Object.entries(shop.extra_details || {}).filter(([,v]) => v !== null && v !== undefined && String(v).trim() !== '').map(([k,v]) => [k.replace(/_/g, ' '), String(v)]))
+              .map(([label, value], index) => <div key={`${label}-${index}`} className="min-w-0"><dt className="text-slate-500">{label}</dt><dd className="mt-0.5 break-words font-medium text-slate-800">{value || '—'}</dd></div>)}
+          </dl>
+          <div className="mt-3 flex flex-wrap gap-3 text-xs">
+            {shop.contact_phone && <a href={`tel:${shop.contact_phone}`} className="text-blue-700 underline">Call shop</a>}
+            {shop.contact_phone && String(shop.contact_phone).replace(/\D/g, '').length >= 10 && <a href={`https://wa.me/${String(shop.contact_phone).replace(/\D/g, '').length === 10 ? '91' : ''}${String(shop.contact_phone).replace(/\D/g, '')}`} target="_blank" rel="noreferrer" className="text-blue-700 underline">WhatsApp</a>}
+            {shop.latitude != null && shop.longitude != null && <a href={`https://www.google.com/maps?q=${shop.latitude},${shop.longitude}`} target="_blank" rel="noreferrer" className="text-blue-700 underline">View on map</a>}
+          </div>
+        </details>
       </div>
 
       {/* Timeline */}
-      <Card className="p-4 mb-4">
-        <h2 className="text-sm font-semibold text-slate-900 mb-3">Workflow Timeline</h2>
+      <details className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 sm:px-4">
+        <summary className="cursor-pointer text-xs font-semibold text-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">Workflow history <span className="font-normal text-slate-500">· milestones & dates</span></summary>
+        <div className="pt-3">
         <div className="flex items-start overflow-x-auto pb-2">
           {timeline.map((step, i) => (
             <div key={i} className="flex items-start flex-shrink-0">
@@ -4064,91 +4109,47 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
             </div>
           ))}
         </div>
-      </Card>
+        </div>
+      </details>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Assignments */}
-        <Card className="p-4 lg:col-span-2">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-              <Users className="w-5 h-5 text-blue-600" /> Assignments
-            </h2>
-            {canAssign && (
-              <div className="flex gap-2">
-                <button
-                  onClick={() => { setAssignModal('surveyor'); setAssignUserId(''); }}
-                  className="flex items-center gap-1 text-xs font-medium text-blue-600 border border-blue-200 bg-blue-50 px-2.5 py-1 rounded-lg"
-                >
-                  <UserPlus className="w-3.5 h-3.5" /> Surveyor
-                </button>
-                <button
-                  onClick={() => { setAssignModal('installer'); setAssignUserId(''); }}
-                  className="flex items-center gap-1 text-xs font-medium text-teal-600 border border-teal-200 bg-teal-50 px-2.5 py-1 rounded-lg"
-                >
-                  <UserPlus className="w-3.5 h-3.5" /> Installer
-                </button>
-                <button
-                  onClick={() => { setAssignModal('designer'); setAssignUserId(designTasks?.[0]?.designer_id || ''); }}
-                  className="flex items-center gap-1 text-xs font-medium text-violet-600 border border-violet-200 bg-violet-50 px-2.5 py-1 rounded-lg"
-                >
-                  <Palette className="w-3.5 h-3.5" /> Designer
-                </button>
-              </div>
-            )}
+      <div className="grid grid-cols-1 gap-3">
+        {/* Canonical assignment data: shop_assignments for field roles, design_tasks for design. */}
+        <section className="rounded-xl border border-slate-200 bg-white p-3 sm:p-4" aria-labelledby="shop-team-heading">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h2 id="shop-team-heading" className="flex items-center gap-2 text-sm font-semibold text-slate-900"><Users className="h-4 w-4 text-slate-500" /> Assigned team</h2>
+            <span className="text-xs text-slate-500">{currentPeople.length + designers.length} recorded assignment{currentPeople.length + designers.length === 1 ? '' : 's'}</span>
           </div>
-          {assignments && assignments.length > 0 ? (
-            <div className="space-y-3">
-              {assignments.map((a) => (
-                <div key={a.id} className="flex items-center justify-between text-sm">
-                  <div>
-                    <p className="text-slate-900 font-medium">{a.profiles?.full_name}</p>
-                    <p className="text-xs text-slate-500 capitalize">{a.role}</p>
-                  </div>
-                  <StatusBadge status={a.status} />
+          {assignmentsError && <p role="alert" className="mb-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">Could not load field assignments. <button type="button" onClick={() => void retryAssignments()} className="font-medium underline">Retry</button></p>}
+          {(assignmentsLoading || designTasksLoading) && <p role="status" className="mb-2 text-xs text-slate-500">Loading assigned people…</p>}
+          <div className="grid gap-3 sm:grid-cols-3">
+            {(['surveyor', 'designer', 'installer'] as const).map((role) => {
+              const assigned = role === 'designer' ? designers.map((task: any) => ({ id: task.id, name: task.profiles?.full_name || 'Name unavailable', status: task.status })) : currentPeopleByRole(role).map((a: any) => ({ id: a.id, name: a.profiles?.full_name || 'Name unavailable', status: a.status }));
+              return <div key={role} className="min-w-0 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold capitalize text-slate-700">{role}{assigned.length > 1 ? 's' : ''} <span className="font-normal text-slate-500">({assigned.length})</span></span>
+                  {canAssign && <button type="button" aria-label={`Assign ${role}`} onClick={() => { setAssignModal(role); setAssignUserId(role === 'designer' ? designTasks?.[0]?.designer_id || '' : ''); }} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><UserPlus className="mr-1 inline h-3 w-3" />{assigned.length ? 'Change' : 'Assign'}</button>}
                 </div>
-              ))}
-            </div>
-          ) : <p className="text-sm text-slate-400">No surveyor / installer assignments yet</p>}
-          {designTasks?.[0] && (
-            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-sm">
-              <div><p className="text-slate-900 font-medium">{designTasks[0].profiles?.full_name || 'Unassigned'}</p><p className="text-xs text-slate-500">Designer</p></div>
-              <StatusBadge status={designTasks[0].status} />
-            </div>
-          )}
-        </Card>
-
-        {/* Backfill — Owner/Admin entering work that's already done
-            outside the app (survey/design/production happened on paper
-            or another system before this shop existed here). Only
-            offered up to the point production actually finishes —
-            Installation itself always runs through the real
-            Installer flow, never backfilled, since that's the step
-            that's actually left to do. */}
-        {canAssign && shop && !BACKFILL_INELIGIBLE_STATUSES.includes(shop.status) && (
-          <Card className="p-6 border-amber-200 bg-amber-50/40">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-                  <FastForward className="w-5 h-5 text-amber-600" /> Backfill Completed Work
-                </h2>
-                <p className="text-xs text-slate-500 mt-1 max-w-md">
-                  Already surveyed / designed / produced outside the app? Fill in what's already
-                  done here — the shop lands at the right stage and only Installation is left to run normally.
-                </p>
-              </div>
-              <button
-                onClick={() => setBackfillOpen(true)}
-                className="shrink-0 flex items-center gap-1 text-xs font-medium text-amber-700 border border-amber-300 bg-white px-2.5 py-1.5 rounded-lg"
-              >
-                <FastForward className="w-3.5 h-3.5" /> Backfill
-              </button>
-            </div>
-          </Card>
-        )}
+                {assigned.length ? <ul className="space-y-1.5" aria-label={`Assigned ${role}s`}>
+                  {assigned.map((person: any) => <li key={person.id} className="flex items-start justify-between gap-2 rounded-md bg-white px-2 py-1.5 text-xs">
+                    <span className="min-w-0 break-words font-medium text-slate-800">{person.name}</span>
+                    <span className="shrink-0 text-[11px] capitalize text-slate-500">{String(person.status || 'assigned').replace(/_/g, ' ')}</span>
+                  </li>)}
+                </ul> : <p className="text-xs text-slate-500">{(assignmentsLoading || designTasksLoading || assignmentsError) ? '—' : 'Not assigned'}</p>}
+              </div>;
+            })}
+          </div>
+          {(assignmentHistory.length + olderDesigners.length) > 0 && <details className="mt-3 border-t border-slate-100 pt-2 text-xs">
+            <summary className="w-fit cursor-pointer text-slate-600 hover:underline">Previous / declined assignments ({assignmentHistory.length + olderDesigners.length})</summary>
+            <ul className="mt-2 grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
+              {assignmentHistory.map((a: any) => <li key={a.id} className="flex justify-between gap-2 rounded bg-slate-50 px-2 py-1 text-slate-600"><span className="min-w-0 break-words">{a.profiles?.full_name || 'Name unavailable'}</span><span className="shrink-0 capitalize">{a.role}</span></li>)}
+              {olderDesigners.map((task: any) => <li key={task.id} className="flex justify-between gap-2 rounded bg-slate-50 px-2 py-1 text-slate-600"><span className="min-w-0 break-words">{task.profiles?.full_name || 'Name unavailable'}</span><span className="shrink-0">Designer</span></li>)}
+            </ul>
+          </details>}
+        </section>
 
         {/* Work Items */}
-        <div className="lg:col-span-2 lg:order-first">
-          <WorkItemsPanel
+        <div className="min-w-0">
+          {workItemsLoading ? <div role="status" className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">Loading work items and evidence…</div> : workItemsError ? <div role="alert" className="rounded-xl border border-red-200 bg-white p-6 text-sm text-red-700">Work items could not be loaded. <button type="button" onClick={() => void retryWorkItems()} className="font-medium underline">Retry</button></div> : <WorkItemsPanel
             items={workItems || []}
             names={(workItems || []).map((w, i) => workItemName(w, i))}
             canEdit={!!canCrudShop}
@@ -4187,10 +4188,39 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                 // approved photos are always visible on Shop Details.
                 const unmappedInstall = allProofs.filter((p:any)=>!p.work_item_id || !currentWorkItemIds.has(p.work_item_id));
                 if (!unmappedSurvey.length && !unmappedInstall.length) return null;
-                return <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-3"><p className="text-xs font-bold text-amber-900">Legacy / unmapped evidence</p><p className="text-[11px] text-amber-700 mt-0.5">These photos exist in the shop and are shown here so evidence never disappears. They are not guessed onto a measurement.</p><div className="mt-2 flex flex-wrap gap-2">{unmappedSurvey.map((p:any,i:number)=><button key={`us-${p.id}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped survey ${i+1}`})} className="relative"><img src={p.photo_url} className="w-20 h-16 object-contain bg-white rounded-lg border border-amber-200"/><span className="absolute bottom-1 left-1 text-[8px] bg-blue-700 text-white px-1 rounded">SURVEY</span></button>)}{unmappedInstall.map((p:any,i:number)=><button key={`ui-${p.id}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped installation ${i+1}`})} className="relative"><img src={p.photo_url} className="w-20 h-16 object-contain bg-white rounded-lg border border-amber-200"/><span className="absolute bottom-1 left-1 text-[8px] bg-emerald-700 text-white px-1 rounded">INSTALL</span></button>)}</div></div>;
+                return <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-3"><p className="text-xs font-bold text-amber-900">Legacy / unmapped evidence</p><p className="text-[11px] text-amber-700 mt-0.5">These photos exist in the shop and are shown here so evidence never disappears. They are not guessed onto a measurement.</p><div className="mt-2 grid max-h-80 grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3 lg:grid-cols-4">{unmappedSurvey.map((p:any,i:number)=><button type="button" key={`us-${p.id}`} aria-label={`Inspect unmapped survey ${i+1}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped survey ${i+1}`})} className="relative flex h-40 min-w-0 items-center justify-center rounded-lg border border-amber-200 bg-white p-1.5 hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><img src={p.photo_url} alt={`Unmapped survey ${i+1}`} loading="lazy" className="max-h-[148px] max-w-full object-contain"/><span className="absolute bottom-1 left-1 rounded bg-blue-700 px-1 text-[9px] text-white">SURVEY</span></button>)}{unmappedInstall.map((p:any,i:number)=><button type="button" key={`ui-${p.id}`} aria-label={`Inspect unmapped installation ${i+1}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped installation ${i+1}`})} className="relative flex h-40 min-w-0 items-center justify-center rounded-lg border border-amber-200 bg-white p-1.5 hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><img src={p.photo_url} alt={`Unmapped installation ${i+1}`} loading="lazy" className="max-h-[148px] max-w-full object-contain"/><span className="absolute bottom-1 left-1 rounded bg-emerald-700 px-1 text-[9px] text-white">INSTALL</span></button>)}</div></div>;
               })()}
-          />
+          />}
         </div>
+        {/* Backfill — Owner/Admin entering work that's already done
+            outside the app (survey/design/production happened on paper
+            or another system before this shop existed here). Only
+            offered up to the point production actually finishes —
+            Installation itself always runs through the real
+            Installer flow, never backfilled, since that's the step
+            that's actually left to do. */}
+        {canAssign && shop && !BACKFILL_INELIGIBLE_STATUSES.includes(shop.status) && (
+          <Card className="border-amber-200 bg-amber-50/40 p-3 sm:p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  <FastForward className="h-4 w-4 text-amber-600" /> Backfill completed work
+                </h2>
+                <p className="text-xs text-slate-500 mt-1 max-w-md">
+                  Already surveyed / designed / produced outside the app? Fill in what's already
+                  done here — the shop lands at the right stage and only Installation is left to run normally.
+                </p>
+              </div>
+              <button
+                onClick={() => setBackfillOpen(true)}
+                className="shrink-0 flex items-center gap-1 text-xs font-medium text-amber-700 border border-amber-300 bg-white px-2.5 py-1.5 rounded-lg"
+              >
+                <FastForward className="w-3.5 h-3.5" /> Backfill
+              </button>
+            </div>
+          </Card>
+        )}
+
 
       </div>
 
@@ -4248,7 +4278,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
             <p className="text-xs text-slate-500 mb-3">File names do not matter. The sequence below is exactly the sequence selected from your device. Choose the board visible in each photo one-by-one.</p>
             <div className="max-h-[420px] overflow-y-auto border border-slate-200 rounded-xl divide-y divide-slate-100">
               {surveyPhotoUploadFiles.map((file, photoIndex) => <div key={`${file.name}-${photoIndex}`} className="p-3 grid grid-cols-[56px_1fr] gap-3 items-center">
-                <div className="w-14 h-14 rounded-lg bg-slate-100 overflow-hidden flex items-center justify-center text-xs font-bold text-slate-500">{file.type.startsWith('image/') ? <img src={URL.createObjectURL(file)} className="w-full h-full object-cover" /> : `#${photoIndex + 1}`}</div>
+                <div className="w-14 h-14 rounded-lg bg-slate-100 overflow-hidden flex items-center justify-center text-xs font-bold text-slate-500">{file.type.startsWith('image/') ? <img src={URL.createObjectURL(file)} className="h-full w-full object-contain" alt={file.name} /> : `#${photoIndex + 1}`}</div>
                 <div className="min-w-0"><div className="flex items-center gap-2 mb-1"><span className="text-xs font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded">Photo {photoIndex + 1}</span><span className="text-xs text-slate-500 truncate">{file.name}</span></div>
                   {surveyPhotoTargetItemId ? <div className="w-full border border-blue-200 bg-blue-50 rounded-lg px-2.5 py-2 text-sm text-blue-800 font-medium">Automatically linked to this Work Item</div> : <select value={surveyPhotoFileMap[photoIndex] || ''} onChange={(e) => setSurveyPhotoFileMap((prev) => ({ ...prev, [photoIndex]: e.target.value }))} className="w-full border border-slate-300 rounded-lg px-2.5 py-2 text-sm bg-white">
                     <option value="">Select exact board / measurement...</option>
@@ -4276,7 +4306,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
             <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
               {installUploadFiles.map((file, i) => (
                 <div key={`${file.name}-${i}`} className="grid grid-cols-[56px_1fr] gap-3 items-center rounded-lg border border-slate-200 p-2">
-                  <img src={URL.createObjectURL(file)} alt="" className="w-14 h-12 rounded object-cover bg-slate-100" />
+                  <img src={URL.createObjectURL(file)} alt={file.name} className="h-12 w-14 rounded bg-slate-100 object-contain" />
                   <div className="min-w-0">
                     <p className="text-xs text-slate-500 truncate">{file.name}</p>
                     {installUploadTarget ? <p className="text-xs font-medium text-slate-600">Mapped to selected work item</p> : (

@@ -33,7 +33,7 @@ export function formatDim(value: number | string | null | undefined): number | n
   if (value == null || value === '') return null;
   const n = typeof value === 'string' ? parseFloat(value) : value;
   if (!Number.isFinite(n)) return null;
-  return Math.round(n);
+  return Math.round(n * 10000) / 10000;
 }
 
 export function toFeet(value: number, unit: string): number {
@@ -67,7 +67,7 @@ export function areaSqFt(width: number, widthUnit: string, height: number, heigh
 const UNIT_SHORT: Record<string, string> = { ft: 'ft', feet: 'ft', foot: 'ft', in: 'in', inch: 'in', inches: 'in', m: 'm', meter: 'm', metre: 'm', cm: 'cm', mm: 'mm' };
 export function unitShort(unit?: string | null): string { return UNIT_SHORT[String(unit || 'ft').trim().toLowerCase()] || String(unit || 'ft'); }
 /** 10 -> "10", 4.5 -> "4.5", 4.1666 -> "4.17" (never a long decimal, never rounded to a whole number). */
-export function trimNum(value: number | string | null | undefined, max = 2): string {
+export function trimNum(value: number | string | null | undefined, max = 4): string {
   if (value == null || value === '') return '—';
   const n = typeof value === 'string' ? parseFloat(value) : value;
   if (!Number.isFinite(n)) return '—';

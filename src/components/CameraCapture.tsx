@@ -13,9 +13,11 @@ interface CameraCaptureProps {
   onClose: () => void;
   onCapture: (dataUrl: string, fileName: string) => void;
   title?: string;
+  /** Survey flow skips the redundant Retake/Use Photo step and opens marking immediately. */
+  autoUsePhoto?: boolean;
 }
 
-export function CameraCapture({ open, onClose, onCapture, title }: CameraCaptureProps) {
+export function CameraCapture({ open, onClose, onCapture, title, autoUsePhoto = false }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [status, setStatus] = useState<'opening' | 'live' | 'error'>('opening');
@@ -92,7 +94,15 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
     } else {
       ctx.drawImage(video, (outW - dw) / 2, (outH - dh) / 2, dw, dh);
     }
-    setShot(canvas.toDataURL('image/jpeg', 0.92));
+    const captured = canvas.toDataURL('image/jpeg', 0.92);
+    if (autoUsePhoto) {
+      // The survey wizard creates the local draft and opens its marker immediately.
+      onCapture(captured, `photo-${Date.now()}.jpg`);
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      onClose();
+    } else {
+      setShot(captured);
+    }
   }
 
   function confirm() {
@@ -149,7 +159,8 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[100] bg-black flex flex-col">
+    <div className="fixed inset-0 z-[100] flex justify-center bg-slate-950/95">
+      <div className="flex h-full w-full max-w-xl flex-col bg-black">
       <div className="flex items-center justify-between px-4 py-3 text-white">
         <span className="font-medium text-sm">{title || 'Take Photo'}</span>
         <div className="flex items-center gap-1">
@@ -196,7 +207,7 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
         {shot && <img src={shot} alt="Captured" className="w-full h-full object-contain bg-black" />}
       </div>
 
-      <div className="p-6 flex items-center justify-center gap-8 bg-black">
+      <div className="px-4 py-4 pb-[max(1rem,env(safe-area-inset-bottom))] flex items-center justify-center gap-8 bg-black">
         {!shot ? (
           status === 'live' && (
             <button
@@ -221,6 +232,7 @@ export function CameraCapture({ open, onClose, onCapture, title }: CameraCapture
             </button>
           </>
         )}
+      </div>
       </div>
     </div>
   );

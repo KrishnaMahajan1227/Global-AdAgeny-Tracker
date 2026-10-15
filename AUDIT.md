@@ -1,36 +1,15 @@
-# Targeted audit — 14 Oct 2026
+# AUDIT — Surveyor and Installer field refinement
 
-Source: uploaded `src.zip` and existing patched source; static review only.
+- Existing role entry and My Work routing remain unchanged from the latest field redo patch.
+- Canonical capture: `src/components/CameraCapture.tsx` and the SurveyorPage capture/marking wizard. It previously required Capture → Use Photo → Mark, and duplicate photo/back controls existed.
+- Canonical board/polygon input: `BoardMarkerCanvas`; marking points remain percentages (0–100), bound to their photo, and multiple board IDs remain independent.
+- Canonical rendered evidence: `renderMarkedImage` / `MarkedPhotoGrid`; not replaced. The shared caption now honors separately entered width and height units.
+- Canonical physical calculation: `toFeet` / `areaSqFt` in `src/lib/units.ts`. `src/lib/syncManager.ts` already stores survey_width, survey_height in feet and survey_area in square feet; entered widths/heights and units are stored separately. These write paths are preserved.
+- Existing installer direct-install write path was inconsistent: raw width/height with non-foot units; now it normalizes dimensions to feet while storing entered dimensions and original units.
+- Previous `field_redo_save` RPC only supported a single unit for both corrected dimensions. Migration 0092 extends it with optional `heightUnit` while preserving compatibility with old queued drafts.
+- Survey submission previously allowed unmarked or invalid-size boards; it now refuses incomplete submissions before server writes or offline queueing.
+- Survey capture original draft and current photo are retained in IndexedDB. The active-photo pointer was not persisted: new optional field restores it without modifying Dexie indexes or tables.
+- Unsafe Installer thumbnail X previously filtered React state without a correct server deletion; it was removed. The one canonical handler manages local/remote deletion with explicit in-app confirmation.
+- Owner dashboard/work-order screens, approval calculations, review components and past image records are not modified in this patch.
 
-## Canonical screens and route map (agency)
-- `/dashboard`: `src/pages/DashboardPage.tsx` via `src/App.tsx`, linked from `AdminLayout.tsx`; agency owner/admin and other explicitly allowed office roles.
-- `/clients`: `src/pages/ShopsPages.tsx` `ClientsPage` with detail in `AgencyHierarchyPage.tsx`; sidebar Clients.
-- `/purchase-orders`: `src/pages/PurchaseOrdersPage.tsx`, list/detail drawer; sidebar Work Orders, client detail links.
-- `/campaigns`, `/projects`, `/progress`: compatibility redirects; not sidebar items.
-- `/campaigns/project/:id`, `/campaigns/client/:id`: compatibility redirects to Clients.
-- `/supply-orders`, `/survey-review`, `/design`, `/production`, `/installation-review`, `/field-map`, `/route-planning`, `/reports`, `/billing`, `/owner`, `/account`: existing independent screens, unchanged.
-- `/client/*`: separate client-organization portal, including its own `/client/campaigns` routes; preserved because client-owned campaign navigation is a separate working role.
-- `/mobile`: surveyor/installer; `/superadmin`: super admin; public `/`, `/login`, `/how-it-works`, `/for-agencies`, `/for-clients`.
-- Exact permissions/links reside in App.tsx and AdminLayout.tsx; router guards are NOT a substitute for database RLS.
-
-## Data map
-- `clients.id` → `purchase_orders.client_id`, `projects.client_id`; organization ownership on agency records.
-- `projects.id` → `purchase_orders.project_id`; client-owned `campaigns.id` → `purchase_orders.campaign_id`. These foreign keys must remain intact.
-- Work-order completion derives from status (`closed`) or assignment status (`completed`). Assignment status denotes workflow, not a reliable person-level assignee. No trustworthy per-PO due/completed date in inspected type/query.
-- `src/lib/agencyProgress.ts` contains shared percent, completion, done and overdue helpers.
-- Teams/profiles and invoices/payment/billing are separate existing modules; no schema changes.
-
-## Duplicate report
-- Standalone agency Campaigns page in `ShopsPages.tsx` and nested client campaign presentation overlap: canonical agency presentation is now Clients → direct Work Orders. Old standalone route redirects; source CRUD function is retained to avoid destructive code removal.
-- Work order drawer in `PurchaseOrdersPage.tsx` remains canonical operational details. Client detail links open this existing drawer.
-- Dashboard previously duplicated campaign/client lists and displayed nonfunctional team leaderboard. Removed in favor of compact client delivery and action panels.
-
-## Shared components
-- `src/components/ui.tsx`: Card, ProgressBar, StatusBadge, dialogs, inputs, filters and many other reusable primitives. Reused ProgressBar; no new generic UI components.
-
-## Sidebar and clicks
-Agency sidebar: Dashboard, Clients, Work Orders, Supply Orders, Survey Review, Design Queue, Production, Installation Review, Live Field Map, Route Planning, Reports, Billing, Owner Console, My Account (conditional by role). No Campaigns.
-Dashboard → client row (click 1) → work-order link (click 2) opens the existing drawer.
-
-## Safety
-This is a front-end-only presentation change. No migration, no SQL, no destructive DDL/DML. Database record retention does not guarantee that existing RLS policies are correct: verify independently.
+**Limitations:** Source-level validation is not live QA. Full build/lint/typecheck, Supabase staging migration, permissions, photo capture and offline retry still require execution on a configured environment. Existing old Direct Install records are not rewritten. Cached drafts can be lost if device/browser storage is cleared.

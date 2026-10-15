@@ -9,7 +9,7 @@ import PublicInfoPage from '@/pages/PublicInfoPage';
 import AdminLayout from '@/components/AdminLayout';
 import DashboardPage from '@/pages/DashboardPage';
 import OwnerConsolePage from '@/pages/OwnerConsolePage';
-import { ClientsPage, ShopsPage, ShopDetailPage } from '@/pages/ShopsPages';
+import { ClientsPage, CampaignsPage, ShopsPage, ShopDetailPage } from '@/pages/ShopsPages';
 import PurchaseOrdersPage from '@/pages/PurchaseOrdersPage';
 import SupplyOrdersPage from '@/pages/SupplyOrdersPage';
 import SurveyReviewPage from '@/pages/SurveyReviewPage';
@@ -34,6 +34,7 @@ import SuperAdminPage from '@/pages/SuperAdminPage';
 import AccountSettingsPage from '@/pages/AccountSettingsPage';
 import { Loader2 } from 'lucide-react';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { FieldDialogHost } from '@/lib/fieldDialogs';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -92,9 +93,10 @@ function homeRouteForRole(role: Role) {
 }
 
 // Preserve existing bookmarked detail URLs while showing details in their original list screens.
-function DetailRedirect({ section }: { section: 'clients' | 'campaigns' }) {
+function DetailRedirect({ section, kind }: { section: 'clients' | 'campaigns'; kind?: 'project' | 'campaign' }) {
   const { id } = useParams();
-  return <Navigate to={section === 'clients' ? `/clients?detail=${encodeURIComponent(id || '')}` : '/clients'} replace />;
+  const detail = section === 'clients' ? id : `${kind}:${id}`;
+  return <Navigate to={`/${section}?detail=${encodeURIComponent(detail || '')}`} replace />;
 }
 
 function RoleRedirect() {
@@ -184,10 +186,10 @@ function AppRoutes() {
         <Route path="/account" element={<AccountSettingsPage />} />
         <Route path="/clients" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'demo']}><ClientsPage /></ProtectedRoute>} />
         <Route path="/clients/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="clients" /></ProtectedRoute>} />
-        <Route path="/campaigns/project/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" /></ProtectedRoute>} />
-        <Route path="/campaigns/client/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" /></ProtectedRoute>} />
-        <Route path="/campaigns" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'demo']}><Navigate to="/clients" replace /></ProtectedRoute>} />
-        <Route path="/projects" element={<Navigate to="/clients" replace />} />
+        <Route path="/campaigns/project/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" kind="project" /></ProtectedRoute>} />
+        <Route path="/campaigns/client/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" kind="campaign" /></ProtectedRoute>} />
+        <Route path="/campaigns" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'demo']}><CampaignsPage /></ProtectedRoute>} />
+        <Route path="/projects" element={<Navigate to="/campaigns" replace />} />
         <Route path="/purchase-orders" element={
           <ProtectedRoute allowedRoles={FINANCIAL_ROLES}><PurchaseOrdersPage /></ProtectedRoute>
         } />
@@ -246,6 +248,7 @@ function ShopDetailPageWrapper() {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <FieldDialogHost />
       <AuthProvider>
         <BrowserRouter>
           <AppRoutes />

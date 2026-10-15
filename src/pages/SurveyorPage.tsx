@@ -1,11 +1,14 @@
 import { FieldNavigation } from '@/components/FieldNavigation';
+import { fieldNotice, fieldConfirm } from '@/lib/fieldDialogs';
+import { loadFieldAssignments, loadAssignedFieldShop } from '@/lib/fieldAssignments';
+import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { Shop, WorkType, POLineItemWorkContext } from '@/lib/types';
+import { Shop, WorkType, POLineItemWorkContext, type WorkItem, type SurveyPhoto, type BoardMarking } from '@/lib/types';
 import { Card, Input, Select, Textarea, StatusBadge } from '@/components/ui';
-import { computePOVariance, findLineItemForWorkType } from '@/lib/poVariance';
+import { findLineItemForWorkType } from '@/lib/poVariance';
 import { useOnlineStatus } from '@/lib/useOnlineStatus';
 import {
   getDraft, saveDraft, deleteDraft, listDraftsForSurveyor,
@@ -19,7 +22,7 @@ import { capturePhotoLocation } from '@/lib/captureLocation';
 import { VoiceMicButton, VoiceSizeButton } from '@/components/VoiceMicButton';
 import { BoardMarkerCanvas } from '@/components/BoardMarkerCanvas';
 import { fillMissingShopCoordinates, buildAddressQuery } from '@/lib/geocode';
-import { LENGTH_UNIT_OPTIONS, areaSqFt, formatDim } from '@/lib/units';
+import { LENGTH_UNIT_OPTIONS, areaSqFt, formatDim, itemSizeLabel } from '@/lib/units';
 import { renderMarkedImage, buildBoardLabel, type MarkPoint } from '@/lib/markingUtils';
 import { useLiveLocationTracking, LocationShareIndicator } from '@/lib/locationTracking';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
@@ -89,7 +92,7 @@ export function navigateToShop(shop: {
   if (query) {
     window.open(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(query)}`, '_blank');
   } else {
-    alert("This shop doesn't have an address on file to navigate to. Ask your office to add one.");
+    fieldNotice("This shop has no address on file. Contact your office to update its location.");
   }
 }
 
@@ -97,23 +100,121 @@ export function navigateToShop(shop: {
 function SurveyEntry({ shopId, onExit }: { shopId: string; onExit: (nextShopId?: string) => void }) {
   const { profile } = useAuth();
   const { data, isLoading } = useQuery({
-    queryKey: ['survey-entry-corrections', shopId, profile?.id],
+    queryKey: ['survey-entry-context', shopId, profile?.id],
     queryFn: async () => {
-      const { count } = await supabase.from('field_corrections').select('id', { count: 'exact', head: true }).eq('shop_id', shopId).eq('stage', 'survey').eq('assigned_to', profile!.id).eq('status', 'open');
-      return count || 0;
+      const [{ count }, { data: shop }] = await Promise.all([
+        supabase.from('field_corrections').select('id', { count: 'exact', head: true }).eq('shop_id', shopId).eq('stage', 'survey').eq('assigned_to', profile!.id).eq('status', 'open'),
+        supabase.from('shops').select('id,name,status').eq('id', shopId).maybeSingle(),
+      ]);
+      return { correctionCount: count || 0, shopStatus: shop?.status || null };
     }, enabled: !!profile?.id,
   });
   if (isLoading) return <div className="p-8 text-center text-slate-400 text-sm">Loading…</div>;
-  if ((data || 0) > 0) return <SurveyCorrectionFixer shopId={shopId} onExit={() => onExit()} />;
+  if ((data?.correctionCount || 0) > 0) return <SurveyCorrectionFixer shopId={shopId} onExit={() => onExit()} />;
+  if (!isShopSurveyable(data?.shopStatus)) return <SurveySubmissionViewer shopId={shopId} onExit={() => onExit()} />;
   return <SurveyWizard shopId={shopId} onExit={onExit} />;
 }
 
 function isShopSurveyable(status: string | null | undefined): boolean {  return SURVEYABLE_SHOP_STATUSES.includes(status || '');
 }
 
+function SurveySubmissionViewer({ shopId, onExit }: { shopId: string; onExit: () => void }) {
+  const { profile } = useAuth();
+  const { data: shop } = useQuery({
+    queryKey: ['survey-view-shop', shopId],
+    queryFn: async () => {
+      return loadAssignedFieldShop(shopId, profile!.id, profile!.organization_id, 'surveyor') as Promise<(Shop & { clients?: { name: string }; purchase_orders?: { name?: string | null; po_number?: string | null } | null }) | null>;
+    },
+    enabled: !!shopId && !!profile?.id,
+  });
+  const { data: latestSurvey } = useQuery({
+    queryKey: ['survey-view-latest', shopId],
+    queryFn: async () => {
+      const { data } = await supabase.from('surveys').select('id,status,submitted_at,reviewed_at,review_note').eq('shop_id', shopId).eq('surveyor_id', profile!.id).order('submitted_at', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).limit(1).maybeSingle();
+      return data as { id: string; status: string; submitted_at?: string | null; reviewed_at?: string | null; review_note?: string | null } | null;
+    },
+    enabled: !!shopId,
+  });
+  const { data: workItems = [] } = useQuery({
+    queryKey: ['survey-view-items', shopId],
+    queryFn: async () => {
+      const { data } = await supabase.from('work_items').select('*').eq('shop_id', shopId).order('created_at');
+      return (data || []) as WorkItem[];
+    },
+    enabled: !!shopId,
+  });
+  const { data: surveyPhotos = [] } = useQuery({
+    queryKey: ['survey-view-photos', shopId],
+    queryFn: async () => {
+      const { data } = await supabase.from('survey_photos').select('*').eq('shop_id', shopId).order('created_at');
+      return (data || []) as SurveyPhoto[];
+    },
+    enabled: !!shopId,
+  });
+  const { data: boardMarkings = [] } = useQuery({
+    queryKey: ['survey-view-markings', shopId, surveyPhotos.map((p) => p.id).join(',')],
+    queryFn: async () => {
+      const ids = surveyPhotos.map((p) => p.id);
+      if (!ids.length) return [] as { survey_photo_id: string; work_item_id: string | null; points: any }[];
+      const { data } = await supabase.from('board_markings').select('*').in('survey_photo_id', ids);
+      return (data || []) as BoardMarking[];
+    },
+    enabled: surveyPhotos.length > 0,
+  });
+
+  return (
+    <div className="min-h-screen bg-slate-50 pb-24 max-w-md mx-auto">
+      <div className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
+        <div className="flex items-center justify-between px-4 py-3">
+          <button onClick={onExit} className="text-sm font-medium text-slate-600">Back</button>
+          <p className="text-sm font-semibold text-slate-900">Submitted Survey</p>
+          <button type="button" onClick={() => navigateToShop(shop)} className="text-sm font-medium text-blue-600">Map</button>
+        </div>
+      </div>
+      <div className="p-4 space-y-4">
+        <Card className="p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-lg font-semibold text-slate-900">{shop?.name || 'Shop'}</p>
+              <p className="mt-1 text-sm text-slate-500">{shop?.clients?.name || 'Client'}{shop?.purchase_orders ? ` · ${shop.purchase_orders.name || shop.purchase_orders.po_number || 'Work Order'}` : ''}</p>
+            </div>
+            <StatusBadge status={latestSurvey?.status || shop?.status || 'submitted'} />
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><p className="text-slate-500">Photos</p><p className="mt-1 font-semibold text-slate-900">{surveyPhotos.length}</p></div>
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><p className="text-slate-500">Marked items</p><p className="mt-1 font-semibold text-slate-900">{workItems.length}</p></div>
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><p className="text-slate-500">Submitted</p><p className="mt-1 font-semibold text-slate-900">{latestSurvey?.submitted_at ? new Date(latestSurvey.submitted_at).toLocaleDateString() : '—'}</p></div>
+          </div>
+          {latestSurvey?.review_note && <div className={`mt-3 rounded-xl border px-3 py-2 text-xs ${latestSurvey.status === 'approved' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-amber-200 bg-amber-50 text-amber-800'}`}><p className="font-semibold">Latest review note</p><p className="mt-1">{latestSurvey.review_note}</p></div>}
+          <p className="mt-3 text-xs text-slate-500">This job is already submitted. It stays read-only here unless Owner/Admin sends it back for redo.</p>
+        </Card>
+
+        {surveyPhotos.length > 0 && <Card className="p-3">
+          <h2 className="text-sm font-semibold text-slate-900">Submitted marked photos</h2>
+          <p className="mt-1 mb-3 text-xs text-slate-500">Each photo retains every board marking and work-item label.</p>
+          <MarkedPhotoGrid photos={surveyPhotos} markings={boardMarkings} workItems={workItems} />
+        </Card>}
+        <Card className="p-3">
+          <h2 className="text-sm font-semibold text-slate-900">Submitted measurements</h2>
+          <div className="mt-3 divide-y divide-slate-100">
+            {workItems.length === 0 && <p className="py-3 text-xs text-slate-500">No submitted measurements available.</p>}
+            {workItems.map((item, idx) => <div key={item.id} className="py-3 first:pt-0 last:pb-0">
+              <div className="flex items-start justify-between gap-2">
+                <div><p className="text-sm font-medium text-slate-900">{item.work_type_name || item.material || `Work Item ${idx + 1}`}</p><p className="mt-0.5 text-xs text-slate-500">{itemSizeLabel(item, 'survey')} · Qty {item.survey_quantity || 1}</p></div>
+                <span className="shrink-0 text-xs font-medium text-slate-600">{item.status?.replace(/_/g,' ')}</span>
+              </div>
+              {item.survey_notes && <p className="mt-1 text-xs text-slate-600">{item.survey_notes}</p>}
+            </div>)}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 export default function SurveyorPage() {
   const { profile, signOut } = useAuth();
-  const [tab, setTab] = useState<MobileTab>('home');
+  const [tab, setTab] = useState<MobileTab>('work');
   const [activeSurvey, setActiveSurvey] = useState<string | null>(null);
   const isOnline = useOnlineStatus();
 
@@ -130,7 +231,7 @@ export default function SurveyorPage() {
   // nothing is lost, and "Continue Survey" on Home picks it back up.
   function goToTab(nextTab: MobileTab) {
     if (activeSurvey) setActiveSurvey(null);
-    setTab(nextTab);
+    setTab(nextTab === 'home' ? 'work' : nextTab);
   }
 
   return (
@@ -144,8 +245,7 @@ export default function SurveyorPage() {
         <SurveyEntry shopId={activeSurvey} onExit={(nextShopId) => setActiveSurvey(nextShopId || null)} />
       ) : (
         <>
-          {tab === 'home' && <SurveyorHome onStart={(shopId) => setActiveSurvey(shopId)} />}
-          {tab === 'work' && <SurveyorWork onStart={(shopId) => setActiveSurvey(shopId)} />}
+          {(tab === 'home' || tab === 'work') && <SurveyorWork onStart={(shopId) => setActiveSurvey(shopId)} />}
           {tab === 'map' && <FieldMapView />}
           {tab === 'notifications' && <NotificationsView />}
           {tab === 'profile' && <ProfileView onSignOut={signOut} />}
@@ -183,7 +283,7 @@ function ReviewPhotoThumb({ src, boardPointSets, boardLabels, index }: { src: st
 
   return (
     <div className="relative">
-      <img src={renderedSrc || src} alt={`Photo ${index + 1}`} className="w-full h-20 object-cover rounded-lg" />
+      <img src={renderedSrc || src} alt={`Photo ${index + 1}`} className="w-full h-24 object-contain bg-slate-100 rounded-lg" />
       {boardPointSets.length > 0 && (
         <span className="absolute top-1 right-1 bg-blue-600 text-white text-[9px] font-medium px-1 py-0.5 rounded">Marked</span>
       )}
@@ -208,13 +308,7 @@ function SurveyorHome({ onStart }: { onStart: (shopId: string) => void }) {
   const { data: assignments } = useQuery({
     queryKey: ['surveyor-assignments', profile?.id],
     queryFn: async () => {
-      const { data } = await supabase
-        .from('shop_assignments')
-        .select('*, shops(*, clients(name))')
-        .eq('user_id', profile!.id)
-        .eq('role', 'surveyor')
-        .order('assigned_at', { ascending: false });
-      return data;
+      return loadFieldAssignments(profile!.id, profile!.organization_id, 'surveyor');
     },
     enabled: !!profile?.id,
   });
@@ -394,106 +488,134 @@ export function AssignedShopList<T extends { shop_id: string; shops: any }>({
   renderExtra,
 }: {
   assignments: T[];
-  getButtonState: (a: T) => { label: string; disabled: boolean; done?: boolean };
+  getButtonState: (a: T) => { label: string; disabled: boolean; done?: boolean; tone?: 'blue' | 'amber' | 'slate' };
   onStart: (shopId: string) => void;
   emptyLabel: string;
   renderExtra?: (a: T) => ReactNode;
 }) {
   const [search, setSearch] = useState('');
+  const [clientFilter, setClientFilter] = useState('');
+  const [poFilter, setPoFilter] = useState('');
   const [cityFilter, setCityFilter] = useState('');
-  const [districtFilter, setDistrictFilter] = useState('');
-  const [stateFilter, setStateFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'redo' | 'done'>('all');
   const [filtersOpen, setFiltersOpen] = useState(false);
 
+  const clientOptions = useMemo(() => Array.from(new Set(assignments.map((a) => a.shops?.clients?.name).filter(Boolean))).sort(), [assignments]);
+  const poOptions = useMemo(() => Array.from(new Set(assignments.map((a) => a.shops?.purchase_orders?.name || a.shops?.purchase_orders?.po_number).filter(Boolean))).sort(), [assignments]);
   const cityOptions = useMemo(() => Array.from(new Set(assignments.map((a) => a.shops?.city).filter(Boolean))).sort(), [assignments]);
-  const districtOptions = useMemo(() => Array.from(new Set(assignments.map((a) => a.shops?.district).filter(Boolean))).sort(), [assignments]);
-  const stateOptions = useMemo(() => Array.from(new Set(assignments.map((a) => a.shops?.state).filter(Boolean))).sort(), [assignments]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return assignments.filter((a) => {
+      const btn = getButtonState(a);
       if (q) {
-        const haystack = [a.shops?.name, a.shops?.city, a.shops?.district, a.shops?.state, a.shops?.address, a.shops?.owner_name].filter(Boolean).join(' ').toLowerCase();
+        const haystack = [a.shops?.name, a.shops?.city, a.shops?.district, a.shops?.state, a.shops?.address, a.shops?.owner_name, a.shops?.clients?.name, a.shops?.purchase_orders?.name, a.shops?.purchase_orders?.po_number].filter(Boolean).join(' ').toLowerCase();
         if (!haystack.includes(q)) return false;
       }
+      const clientName = a.shops?.clients?.name || '';
+      const poName = a.shops?.purchase_orders?.name || a.shops?.purchase_orders?.po_number || '';
+      if (clientFilter && clientName !== clientFilter) return false;
+      if (poFilter && poName !== poFilter) return false;
       if (cityFilter && a.shops?.city !== cityFilter) return false;
-      if (districtFilter && a.shops?.district !== districtFilter) return false;
-      if (stateFilter && a.shops?.state !== stateFilter) return false;
+      if (statusFilter === 'open' && btn.done) return false;
+      if (statusFilter === 'done' && !btn.done) return false;
+      if (statusFilter === 'redo' && !/redo/i.test(btn.label)) return false;
       return true;
     });
-  }, [assignments, search, cityFilter, districtFilter, stateFilter]);
+  }, [assignments, search, clientFilter, poFilter, cityFilter, statusFilter, getButtonState]);
 
-  const activeFilterCount = [cityFilter, districtFilter, stateFilter].filter(Boolean).length;
+  const activeFilterCount = [clientFilter, poFilter, cityFilter, statusFilter !== 'all' ? statusFilter : ''].filter(Boolean).length;
 
   return (
     <div>
-      <div className="relative mb-2">
-        <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search shop, city, address..."
-          className="w-full pl-9 pr-3 py-2.5 border border-slate-200 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
-        />
+      <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+        <div className="relative mb-3">
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search shop, client, work order..."
+            className="w-full pl-9 pr-3 py-2.5 border border-slate-200 rounded-xl text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <p className="text-xs text-slate-500">{filtered.length} of {assignments.length} shops</p>
+          <button
+            onClick={() => setFiltersOpen((v) => !v)}
+            className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg ${activeFilterCount > 0 ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-slate-100 text-slate-600'}`}
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5" />
+            Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+          </button>
+        </div>
+
+        {filtersOpen && (
+          <div className="grid grid-cols-2 gap-2 mb-2">
+            <select value={clientFilter} onChange={(e) => setClientFilter(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white outline-none">
+              <option value="">All clients</option>
+              {clientOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <select value={poFilter} onChange={(e) => setPoFilter(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white outline-none">
+              <option value="">All work orders</option>
+              {poOptions.map((po) => <option key={po} value={po}>{po}</option>)}
+            </select>
+            <select value={cityFilter} onChange={(e) => setCityFilter(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white outline-none">
+              <option value="">All cities</option>
+              {cityOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as any)} className="px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white outline-none">
+              <option value="all">All statuses</option>
+              <option value="open">Open work</option>
+              <option value="redo">Redo only</option>
+              <option value="done">Completed / submitted</option>
+            </select>
+          </div>
+        )}
       </div>
 
-      <button
-        onClick={() => setFiltersOpen((v) => !v)}
-        className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg mb-3 ${activeFilterCount > 0 ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-slate-100 text-slate-600'}`}
-      >
-        <SlidersHorizontal className="w-3.5 h-3.5" />
-        Filter by area{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
-      </button>
-
-      {filtersOpen && (
-        <div className="grid grid-cols-3 gap-2 mb-3">
-          <select value={cityFilter} onChange={(e) => setCityFilter(e.target.value)} className="px-2 py-2 border border-slate-200 rounded-lg text-xs bg-white outline-none">
-            <option value="">All Cities</option>
-            {cityOptions.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-          <select value={districtFilter} onChange={(e) => setDistrictFilter(e.target.value)} className="px-2 py-2 border border-slate-200 rounded-lg text-xs bg-white outline-none">
-            <option value="">All Districts</option>
-            {districtOptions.map((d) => <option key={d} value={d}>{d}</option>)}
-          </select>
-          <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)} className="px-2 py-2 border border-slate-200 rounded-lg text-xs bg-white outline-none">
-            <option value="">All States</option>
-            {stateOptions.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-      )}
-
-      <p className="text-xs text-slate-400 mb-2">{filtered.length} of {assignments.length} shop{assignments.length === 1 ? '' : 's'}</p>
-
-      {/* Fixed max-height + its own scroll — this is what keeps the page
-          itself from turning into one endless scroll of 100+ cards. */}
-      <div className="space-y-2 max-h-[65vh] overflow-y-auto pr-0.5 -mr-0.5">
+      <div className="mt-3 space-y-2 max-h-[67vh] overflow-y-auto pr-0.5 -mr-0.5">
         {filtered.map((a) => {
           const btn = getButtonState(a);
+          const tone = btn.tone || 'blue';
+          const btnClass = tone === 'amber'
+            ? 'bg-amber-500 hover:bg-amber-600 text-white'
+            : tone === 'slate'
+              ? 'bg-slate-900 hover:bg-slate-800 text-white'
+              : 'bg-blue-600 hover:bg-blue-700 text-white';
+          const workOrderLabel = a.shops?.purchase_orders?.name || a.shops?.purchase_orders?.po_number || null;
           return (
-            <div key={a.shop_id} className={`rounded-xl border p-3 ${btn.done ? 'border-green-200 bg-green-50/40' : 'border-slate-200 bg-white'}`}>
-              <div className="flex items-center gap-2">
+            <div key={a.shop_id} className={`rounded-2xl border p-3 shadow-sm ${btn.done ? 'border-slate-200 bg-slate-50/70' : 'border-slate-200 bg-white'}`}>
+              <div className="flex items-start gap-3">
                 <div className="min-w-0 flex-1">
-                  <p className="font-medium text-slate-900 text-sm truncate">{a.shops?.name}</p>
-                  <p className="text-xs text-slate-500 truncate flex items-center gap-1">
-                    <MapPin className="w-3 h-3 shrink-0" /> {[a.shops?.city, a.shops?.district].filter(Boolean).join(', ') || 'No address on file'}
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-semibold text-slate-900 text-sm leading-5 truncate">{a.shops?.name}</p>
+                    <StatusBadge status={a.shops?.status || 'pending'} />
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {a.shops?.clients?.name && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">{a.shops.clients.name}</span>}
+                    {workOrderLabel && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700">{workOrderLabel}</span>}
+                    {a.shops?.city && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">{a.shops.city}</span>}
+                  </div>
+                  <p className="mt-2 text-xs text-slate-500 flex items-center gap-1">
+                    <MapPin className="w-3 h-3 shrink-0" /> {[a.shops?.address, a.shops?.district, a.shops?.state].filter(Boolean).join(', ') || 'Address not entered'}
                   </p>
                 </div>
-                <StatusBadge status={a.shops?.status || 'pending'} />
               </div>
               {renderExtra?.(a)}
-              <div className="flex items-center gap-2 mt-2.5">
+              <div className="mt-3 flex items-center gap-2">
                 <button
                   onClick={() => navigateToShop(a.shops)}
                   title="Navigate"
                   aria-label="Navigate"
-                  className="shrink-0 w-9 h-9 flex items-center justify-center bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg transition"
+                  className="shrink-0 w-10 h-10 flex items-center justify-center bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl transition"
                 >
                   <Navigation className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => onStart(a.shop_id)}
                   disabled={btn.disabled}
-                  className="flex-1 flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-medium py-2 rounded-lg text-sm transition"
+                  className={`flex-1 flex items-center justify-center gap-1.5 disabled:bg-slate-200 disabled:text-slate-400 font-medium py-2.5 rounded-xl text-sm transition ${btnClass}`}
                 >
                   {btn.done && <CheckCircle2 className="w-4 h-4" />} {btn.label}
                 </button>
@@ -519,13 +641,7 @@ function SurveyorWork({ onStart }: { onStart: (shopId: string) => void }) {
   const { data: assignments } = useQuery({
     queryKey: ['surveyor-work', profile?.id],
     queryFn: async () => {
-      const { data } = await supabase
-        .from('shop_assignments')
-        .select('*, shops(*, clients(name))')
-        .eq('user_id', profile!.id)
-        .eq('role', 'surveyor')
-        .order('assigned_at', { ascending: false });
-      return data;
+      return loadFieldAssignments(profile!.id, profile!.organization_id, 'surveyor');
     },
     enabled: !!profile?.id,
   });
@@ -579,15 +695,15 @@ function SurveyorWork({ onStart }: { onStart: (shopId: string) => void }) {
         assignments={assignments || []}
         getButtonState={(a) => {
           const redo=correctionsByShop.get(a.shop_id)||[];
-          if(redo.length) return { label: `Fix Redo (${redo.length})`, disabled:false };
+          if(redo.length) return { label: `Fix Redo (${redo.length})`, disabled:false, tone: 'amber' as const };
           const done = !isShopSurveyable(a.shops?.status);
-          return done ? { label: 'Job Done', disabled: true, done: true } : { label: 'Start Survey', disabled: false };
+          return done ? { label: 'View Submission', disabled: false, done: true, tone: 'slate' as const } : { label: 'Start Survey', disabled: false, tone: 'blue' as const };
         }}
         onStart={onStart}
         emptyLabel="No work assigned yet"
         renderExtra={(a) => {
           const exactRedo=correctionsByShop.get(a.shop_id)||[];
-          if(exactRedo.length) return <div className="mt-2 rounded-xl border border-amber-300 bg-amber-50 p-2.5"><p className="text-xs font-bold text-amber-900">Redo requested · {exactRedo.length} item{exactRedo.length===1?'':'s'}</p><p className="text-[11px] text-amber-700 mt-0.5">Fix only the returned measurement/photo. Approved survey work stays unchanged.</p>{exactRedo.slice(0,2).map((c:any)=><p key={c.id} className="text-[11px] text-amber-800 mt-1">• {c.issue_type==='measurement'?'Measurement':'Survey photo'} — {c.note||'Correction requested'}</p>)}</div>;
+          if(exactRedo.length) return <div className="mt-2 rounded-xl border border-amber-300 bg-amber-50 p-2.5"><p className="text-xs font-bold text-amber-900">Redo requested · {exactRedo.length} item{exactRedo.length===1?'':'s'}</p><p className="text-[11px] text-amber-700 mt-0.5">Open this shop to see the full redo context and fix only the returned measurement/photo. Approved survey work stays unchanged.</p>{exactRedo.slice(0,2).map((c:any)=><p key={c.id} className="text-[11px] text-amber-800 mt-1">• {c.issue_type==='measurement'?'Measurement':'Survey photo'} — {c.note||'Correction requested'}</p>)}</div>;
           if (!isShopSurveyable(a.shops?.status)) {
             return (
               <p className="flex items-center gap-1.5 text-[11px] font-medium text-green-700 mt-1.5">
@@ -647,6 +763,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   // photo (or accidentally leave two different boards' points combined on
   // one photo's marking).
   const [currentPhotoLocalId, setCurrentPhotoLocalId] = useState<string | null>(null);
+  const [activeMarkingIndex, setActiveMarkingIndex] = useState(0);
 
   // Live location sharing: active for the whole time the surveyor has this
   // job's wizard open (On Route / At Shop / Working), pinged to
@@ -656,8 +773,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   const { data: shop } = useQuery({
     queryKey: ['shop', shopId],
     queryFn: async () => {
-      const { data } = await supabase.from('shops').select('*, clients(name)').eq('id', shopId).maybeSingle();
-      return data as Shop & { clients?: { name: string } };
+      return loadAssignedFieldShop(shopId, profile!.id, profile!.organization_id, 'surveyor');
     },
   });
 
@@ -738,35 +854,9 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
     enabled: !!shop?.purchase_order_id,
   });
 
-  // How much of each of this PO's line items is already surveyed on OTHER
-  // shops (work_items is org-wide readable regardless of role — no RLS
-  // change needed for this sum). Excludes this shop so a redo/correction
-  // survey doesn't double-count its own earlier attempt.
-  const lineItemIds = (poLineItemsForShop || []).map((li) => li.id);
   const allowedWorkTypes = shop?.purchase_order_id
     ? (workTypes || []).filter((wt) => poLineItemsForShop?.some((li) => li.work_type_id === wt.id))
     : (workTypes || []);
-  const { data: elsewhereSums } = useQuery({
-    queryKey: ['survey-po-elsewhere', shopId, lineItemIds.join(',')],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('work_items')
-        .select('po_line_item_id, survey_area, survey_quantity')
-        .in('po_line_item_id', lineItemIds)
-        .neq('shop_id', shopId);
-      if (error) throw error;
-      const sums: Record<string, { area: number; qty: number }> = {};
-      for (const row of data || []) {
-        if (!row.po_line_item_id) continue;
-        const cur = sums[row.po_line_item_id] || { area: 0, qty: 0 };
-        cur.area += row.survey_area || 0;
-        cur.qty += row.survey_quantity || 0;
-        sums[row.po_line_item_id] = cur;
-      }
-      return sums;
-    },
-    enabled: lineItemIds.length > 0,
-  });
 
   // Persist the wizard's current state to IndexedDB so nothing is lost if
   // the network drops, the tab is closed, or the phone loses signal.
@@ -790,6 +880,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       step,
       photos,
       workItems,
+      currentPhotoLocalId,
       gps,
       gpsStatus,
       status: 'draft',
@@ -800,7 +891,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       ...overrides,
     };
     await saveDraft(draft);
-  }, [profile, shop, shopId, step, photos, workItems, gps, gpsStatus, surveyId, isLocalSurveyId, draftReady]);
+  }, [profile, shop, shopId, step, photos, workItems, gps, gpsStatus, surveyId, isLocalSurveyId, draftReady, currentPhotoLocalId]);
 
   // Creates a real survey id: an actual `surveys` row if online, or a local
   // placeholder id if offline (synced for real later). Shared by both the
@@ -845,6 +936,9 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
         setStep(Math.max(2, stepMap[existing.step] || Math.min(existing.step, 3)));
         setPhotos(existing.photos);
         setWorkItems(existing.workItems);
+        if (existing.currentPhotoLocalId && existing.photos.some((photo) => photo.localId === existing.currentPhotoLocalId)) {
+          setCurrentPhotoLocalId(existing.currentPhotoLocalId);
+        }
         setGps(existing.gps);
         setGpsStatus(existing.gpsStatus);
 
@@ -885,6 +979,16 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftReady, step]);
 
+  // Debounced local autosave after edits/markings. No network is required.
+  // Avoid writing a large image blob to IndexedDB on every pointer movement.
+  useEffect(() => {
+    if (!draftReady || submitting || submitted || submittedOffline) return;
+    const timer = window.setTimeout(() => {
+      void persistDraft().catch(() => setSubmitError('Could not save this draft on your device. Check available storage before leaving.'));
+    }, 650);
+    return () => window.clearTimeout(timer);
+  }, [draftReady, persistDraft, submitting, submitted, submittedOffline]);
+
   // Capture GPS
   useEffect(() => {
     if (step >= 1 && gpsStatus === 'idle') {
@@ -902,12 +1006,6 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, gpsStatus]);
-
-  const totalArea = workItems.reduce((sum, item) => {
-    const w = parseFloat(item.width) || 0;
-    const h = parseFloat(item.height) || 0;
-    return sum + (w * h * (parseInt(item.quantity) || 1));
-  }, 0);
 
   // Whenever a board doesn't have a photo picked yet (can happen on an
   // older resumed draft), default it to a photo so it never ends up
@@ -962,7 +1060,8 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
     setPhotos(nextPhotos);
     setWorkItems(nextWorkItems);
     setCurrentPhotoLocalId(draftPhoto.localId);
-    persistDraft({ photos: nextPhotos, workItems: nextWorkItems, gps: photoGps, gpsStatus: photoGps ? 'captured' : gpsStatus });
+    setActiveMarkingIndex(0);
+    persistDraft({ photos: nextPhotos, workItems: nextWorkItems, currentPhotoLocalId: draftPhoto.localId, gps: photoGps, gpsStatus: photoGps ? 'captured' : gpsStatus });
   }
 
   // Adds another board (a fresh, independent set of corner points +
@@ -973,21 +1072,24 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
     if (!currentPhotoLocalId) return;
     const singlePO = shop?.purchase_order_id && poLineItemsForShop?.length === 1 ? poLineItemsForShop[0] : null;
     const defaultWt = !shop?.purchase_order_id && allowedWorkTypes.length === 1 ? allowedWorkTypes[0] : null;
+    setActiveMarkingIndex(workItems.filter((w) => w.photoLocalId === currentPhotoLocalId).length);
     setWorkItems([...workItems, { ...BLANK_WORK_ITEM, photoLocalId: currentPhotoLocalId, points: [], ...(singlePO ? { work_type_id: singlePO.work_type_id || '', work_type_name: singlePO.description, po_line_item_id: singlePO.id } : defaultWt ? { work_type_id: defaultWt.id, work_type_name: defaultWt.name, po_line_item_id: null } : {}) }]);
   }
 
-  function deleteSurveyPhoto(localId: string) {
-    if (!window.confirm('Delete this photo and all markings attached to it?')) return;
+  async function deleteSurveyPhoto(localId: string) {
+    if (!await fieldConfirm('This removes the selected draft photo and all its unsent markings. You cannot undo it.', 'Remove draft photo?')) return;
     const nextPhotos = photos.filter((p) => p.localId !== localId);
     const nextWorkItems = workItems.filter((w) => w.photoLocalId !== localId);
     setPhotos(nextPhotos);
     setWorkItems(nextWorkItems);
     setCurrentPhotoLocalId(null);
-    persistDraft({ photos: nextPhotos, workItems: nextWorkItems });
+    persistDraft({ photos: nextPhotos, workItems: nextWorkItems, currentPhotoLocalId: null });
   }
 
-  function removeBoard(idx: number) {
+  async function removeBoard(idx: number) {
+    if (!await fieldConfirm('This removes only the selected draft marking and its measurement.', 'Remove marking?')) return;
     setWorkItems(workItems.filter((_, i) => i !== idx));
+    setActiveMarkingIndex((current) => Math.max(0,current-1));
   }
 
   async function submitSurvey() {
@@ -1008,6 +1110,18 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
 
     if (shop.purchase_order_id && (!poLineItemsForShop || poLineItemsForShop.length === 0 || workItems.some((item) => !item.po_line_item_id || !poLineItemsForShop.some((li) => li.id === item.po_line_item_id)))) {
       setSubmitError('Every board must use a work type from this PO / Work Order. Check the line items before submitting.');
+      setStep(3);
+      return;
+    }
+    // Block incomplete evidence before queuing/uploading. The server must never
+    // receive an unmarked board or dimensions that would tally as zero.
+    if (!photos.length || !workItems.length || workItems.some((item) =>
+      !item.photoLocalId || !photos.some((photo) => photo.localId === item.photoLocalId) ||
+      (item.points?.length || 0) < 3 || !Number.isFinite(Number(item.width)) || Number(item.width) <= 0 ||
+      !Number.isFinite(Number(item.height)) || Number(item.height) <= 0 ||
+      !Number.isInteger(Number(item.quantity)) || Number(item.quantity) < 1
+    )) {
+      setSubmitError('Complete every board marking, width, height and quantity before submitting.');
       setStep(3);
       return;
     }
@@ -1158,8 +1272,8 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       )}
       {/* Header with progress */}
       <div className="bg-white border-b border-slate-200 sticky top-0 z-30">
-        <div className="flex items-center justify-between p-4">
-          <button onClick={() => onExit()} className="text-sm text-slate-500">Cancel</button>
+        <div className="flex items-center justify-between px-4 py-2.5">
+          <button onClick={() => { void persistDraft(); onExit(); }} className="rounded-lg px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100">Back to jobs</button>
           <p className="font-semibold text-slate-900">{step === 2 ? 'Capture & Mark' : 'Review & Submit'}</p>
           <span className="text-xs text-slate-400">{photos.length} photos</span>
         </div>
@@ -1173,7 +1287,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
             <div key={s} className={`h-1.5 flex-1 rounded-full ${s <= step ? 'bg-blue-600' : 'bg-slate-200'}`} />
           ))}
         </div>
-        <div className="px-4 pb-3">
+        <div className="px-4 pb-2">
           <LocationShareIndicator status={locStatus} lastSentAt={lastSentAt} />
         </div>
       </div>
@@ -1183,6 +1297,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
         onClose={() => setCameraOpen(false)}
         onCapture={handlePhotoCaptured}
         title="Survey Photo"
+        autoUsePhoto
       />
 
       <div className="p-4">
@@ -1192,12 +1307,11 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
             over the whole photo set. */}
         {step === 2 && (
           <div className="space-y-4">
-            {shop && <Card className="p-3 space-y-2">
-              <div className="flex items-start justify-between gap-2"><div><p className="font-semibold text-slate-900">{shop.name}</p><p className="text-xs text-slate-600">{shop.clients?.name || 'Client'} · {shop.owner_name || 'Owner not entered'}</p></div><button type="button" onClick={() => navigateToShop(shop)} className="text-xs text-blue-600 flex items-center gap-1"><Navigation className="w-3.5 h-3.5"/> Map</button></div>
-              <p className="text-xs text-slate-600">Office address: {[shop.address, shop.city, shop.district, shop.state].filter(Boolean).join(', ') || 'Not entered'}</p>
-              <div className="flex flex-wrap gap-3 text-xs"><span className="text-slate-600">Office pin: {shop.latitude != null && shop.longitude != null ? `${shop.latitude.toFixed(5)}, ${shop.longitude.toFixed(5)}` : 'Not entered'}</span><span className={gps ? 'text-green-700' : 'text-amber-700'}>Device GPS: {gps ? `${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)} (±${Math.round(gps.accuracy)}m)` : 'Awaiting location permission'}</span></div>
-              {lastReview && <p className={lastReview.status === 'rejected' ? 'text-xs text-red-700' : 'text-xs text-amber-700'}>{lastReview.status === 'rejected' ? 'Rejected' : 'Redo'}: {lastReview.review_note || 'See review details'}</p>}
-              {!!correctionTasks?.length && <p className="text-xs text-amber-700">Redo requested for {correctionTasks.length} specific item(s); approved items remain unchanged.</p>}
+            {shop && <Card className="p-3">
+              <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-semibold text-slate-900 truncate">{shop.name}</p><p className="mt-0.5 text-xs text-slate-600 truncate">{shop.clients?.name || 'Client'}{shop.purchase_orders ? ` · ${shop.purchase_orders.name || shop.purchase_orders.po_number || 'Work Order'}` : ''}</p></div><button type="button" onClick={() => navigateToShop(shop)} className="text-xs text-blue-600 flex items-center gap-1"><Navigation className="w-3.5 h-3.5"/> Map</button></div>
+              <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]"><div className="rounded-xl bg-slate-50 px-2.5 py-2 text-slate-600"><p className="font-medium text-slate-500">Address</p><p className="mt-0.5 line-clamp-2">{[shop.address, shop.city, shop.district, shop.state].filter(Boolean).join(', ') || 'Not entered'}</p></div><div className={`rounded-xl px-2.5 py-2 ${gps ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}><p className="font-medium opacity-80">Device GPS</p><p className="mt-0.5">{gps ? `${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)} (±${Math.round(gps.accuracy)}m)` : 'Awaiting location permission'}</p></div></div>
+              {lastReview && <p className={lastReview.status === 'rejected' ? 'mt-2 text-xs text-red-700' : 'mt-2 text-xs text-amber-700'}>{lastReview.status === 'rejected' ? 'Rejected' : 'Redo'}: {lastReview.review_note || 'See review details'}</p>}
+              {!!correctionTasks?.length && <p className="mt-1 text-xs text-amber-700">Redo requested for {correctionTasks.length} specific item(s); approved items remain unchanged.</p>}
             </Card>}
             {!currentPhotoLocalId && (
               <p className="text-sm text-slate-600">
@@ -1215,10 +1329,10 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                   return (
                     <button
                       key={p.localId}
-                      onClick={() => setCurrentPhotoLocalId(p.localId)}
+                      onClick={() => { setActiveMarkingIndex(0); setCurrentPhotoLocalId(p.localId); }}
                       className={`relative flex-shrink-0 rounded-lg overflow-hidden border-2 ${currentPhotoLocalId === p.localId ? 'border-blue-600' : 'border-transparent'}`}
                     >
-                      <img src={p.photoUrl || p.dataUrl} alt={`Photo ${i + 1}`} className="w-16 h-16 object-cover" />
+                      <img src={p.photoUrl || p.dataUrl} alt={`Photo ${i + 1}`} className="w-16 h-16 object-contain bg-slate-100" />
                       <span className="absolute bottom-0 inset-x-0 bg-black/60 text-white text-[9px] text-center py-0.5">Photo {i + 1}</span>
                       {boardCount > 0 && (
                         <span className={`absolute top-0.5 right-0.5 text-white text-[9px] font-medium px-1 rounded ${markedCount === boardCount ? 'bg-green-600' : 'bg-amber-500'}`}>
@@ -1233,8 +1347,8 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
 
             {!currentPhotoLocalId && (
               <div className="flex gap-2">
-                <button onClick={() => setCameraOpen(true)} className="flex-1 flex items-center justify-center gap-2 bg-blue-600 text-white font-bold py-4 rounded-xl text-lg">
-                  <Camera className="w-6 h-6" /> {photos.length === 0 ? 'Take Photo' : 'Take Another'}
+                <button onClick={() => setCameraOpen(true)} className="flex-1 flex items-center justify-center gap-2 bg-blue-700 text-white font-semibold py-3 rounded-xl text-sm">
+                  <Camera className="w-4 h-4" /> {photos.length === 0 ? 'Take Photo' : 'Take Another'}
                 </button>
                 {/* Gallery picker straight on this screen — previously it
                     only lived inside the live-camera view, so picking an
@@ -1246,7 +1360,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                     is an added shortcut, not a replacement. */}
                 <button
                   onClick={() => galleryInputRef.current?.click()}
-                  className="flex-shrink-0 flex flex-col items-center justify-center gap-1 bg-slate-100 text-slate-700 font-medium px-4 rounded-xl border border-slate-200"
+                  className="flex-shrink-0 flex flex-col items-center justify-center gap-1 bg-slate-100 text-slate-700 font-medium px-3 rounded-xl border border-slate-200"
                   aria-label="Choose from Gallery"
                 >
                   <Image className="w-5 h-5" />
@@ -1279,26 +1393,27 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
 
               return (
                 <div className="space-y-4">
-                  <button type="button" onClick={() => deleteSurveyPhoto(photo.localId)} className="w-full rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm py-2">Delete incorrect photo & markings</button>
-                  {boardsForPhoto.map(({ w: item, idx }, n) => {
-                    const area = areaSqFt(parseFloat(item.width) || 0, item.unit, parseFloat(item.height) || 0, item.heightUnit || item.unit) * (parseInt(item.quantity) || 1);
+                  {boardsForPhoto.length > 1 && <div className="flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-white p-2" role="group" aria-label="Choose marking on this photo">
+                    {boardsForPhoto.map(({ w }, index) => <button key={index} type="button" onClick={() => setActiveMarkingIndex(index)} className={`min-h-9 rounded-lg px-3 py-1.5 text-xs font-medium ${Math.min(activeMarkingIndex,boardsForPhoto.length-1) === index ? 'bg-blue-700 text-white' : 'bg-slate-50 text-slate-600'}`}>Board {index+1}{(w.points?.length || 0)>=3 ? ' ✓' : ''}</button>)}
+                  </div>}
+                  {boardsForPhoto.filter((_, n) => n === Math.min(activeMarkingIndex, boardsForPhoto.length-1)).map(({ w: item, idx }) => {
+                    const n = Math.min(activeMarkingIndex, boardsForPhoto.length-1);
                     return (
                       <Card key={idx} className="p-4 space-y-3">
                         <div className="flex items-center justify-between">
                           <span className="font-medium text-slate-900">
                             Marking {n + 1} of {boardsForPhoto.length} — Photo {photoIndex + 1}
                           </span>
-                          {boardsForPhoto.length > 1 && (
-                            <button onClick={() => removeBoard(idx)} className="text-sm text-red-500">Remove</button>
-                          )}
+
                         </div>
 
                         <BoardMarkerCanvas
                           photoUrl={photo.photoUrl || photo.dataUrl}
                           points={item.points || []}
                           onChange={(pts) => setWorkItems(workItems.map((w, i) => (i === idx ? { ...w, points: pts } : w)))}
-                          polygonLabel={buildBoardLabel({ workTypeName: item.work_type_name, width: item.width, height: item.height, unit: item.unit })}
+                          polygonLabel={buildBoardLabel({ workTypeName: item.work_type_name, width: item.width, height: item.height, unit: item.unit, heightUnit: item.heightUnit || item.unit })}
                           colorIndex={n}
+                          otherPointsSets={boardsForPhoto.filter((_, i) => i !== n).map(({w}) => w.points || [])}
                         />
 
                         <div className="space-y-3 pt-1 border-t border-slate-100">
@@ -1380,53 +1495,6 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                             onChange={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, notes: v } : w))}
                             addon={<VoiceMicButton mode="text" fieldLabel="Notes" onValue={(v) => setWorkItems(workItems.map((w, i) => i === idx ? { ...w, notes: w.notes ? `${w.notes} ${v}` : v } : w))} />}
                           />
-                          <div className="bg-blue-50 rounded-lg p-3 text-center">
-                            <p className="text-xs text-blue-600">Size Taken (as measured)</p>
-                            <p className="text-lg font-bold text-blue-700">
-                              {item.width || 0} {item.unit} × {item.height || 0} {item.heightUnit || item.unit}
-                              {(parseInt(item.quantity) || 1) > 1 ? ` × ${item.quantity}` : ''}
-                            </p>
-                            {/* Mixed units (e.g. width in feet, height in inch) are
-                                real and common on-site — this always shows the final,
-                                properly-converted sq.ft figure right here, the same
-                                number that gets saved to the survey and used by every
-                                agency downstream (design, PO tracking, billing all run
-                                on sq.ft regardless of what unit was convenient to
-                                measure in on-site). */}
-                            {(item.width || item.height) && (
-                              <p className="text-xs text-blue-500 mt-1">
-                                = {areaSqFt(parseFloat(item.width) || 0, item.unit, parseFloat(item.height) || 0, item.heightUnit || item.unit).toFixed(2)} sq.ft
-                                {(parseInt(item.quantity) || 1) > 1 ? ` per pc × ${item.quantity} = ${area.toFixed(2)} sq.ft total` : ' (final, converted)'}
-                              </p>
-                            )}
-                          </div>
-                          {(() => {
-                            const lineItem = poLineItemsForShop?.find((li) => li.id === item.po_line_item_id);
-                            if (!lineItem) return null;
-                            const elsewhere = elsewhereSums?.[lineItem.id];
-                            const areaBased = lineItem.uom === 'sqft';
-                            const surveyedElsewhere = areaBased ? (elsewhere?.area || 0) : (elsewhere?.qty || 0);
-                            const thisMeasurement = areaBased ? area : (parseInt(item.quantity) || 1);
-                            const fig = computePOVariance(lineItem, surveyedElsewhere, thisMeasurement);
-                            const unitLabel = areaBased ? 'sqft' : lineItem.uom;
-                            return (
-                              <div className={`rounded-lg p-3 text-xs space-y-1 border ${fig.exceeds ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'}`}>
-                                <p className="font-medium text-slate-700">
-                                  {lineItem.name ? `${lineItem.name} (${lineItem.po_number})` : `PO ${lineItem.po_number}`} — {lineItem.description || 'Line item'} budget: {fig.budgeted != null ? `${fig.budgeted} ${unitLabel}` : 'not set'}
-                                </p>
-                                <p className="text-slate-500">Already surveyed elsewhere on this PO: {fig.surveyedElsewhere.toFixed(2)} {unitLabel}</p>
-                                <p className="text-slate-500">This shop's measurement: {fig.thisMeasurement.toFixed(2)} {unitLabel}</p>
-                                <p className={fig.exceeds ? 'text-amber-700 font-semibold' : 'text-slate-700 font-medium'}>
-                                  Running total: {fig.runningTotal.toFixed(2)}{fig.budgeted != null ? ` / ${fig.budgeted} ${unitLabel} (${fig.pct?.toFixed(0)}%)` : ` ${unitLabel}`}
-                                </p>
-                                {fig.exceeds && (
-                                  <p className="text-amber-700 flex items-center gap-1">
-                                    <AlertCircle className="w-3.5 h-3.5" /> Exceeds PO budget by {fig.exceedsBy.toFixed(2)} {unitLabel}
-                                  </p>
-                                )}
-                              </div>
-                            );
-                          })()}
                         </div>
                       </Card>
                     );
@@ -1434,31 +1502,37 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
 
                   <button
                     onClick={addBoardToCurrentPhoto}
-                    className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-blue-300 text-blue-600 font-medium py-3 rounded-lg"
+                    className="w-full flex items-center justify-center gap-2 border border-blue-200 bg-blue-50 text-blue-700 text-sm font-medium py-2.5 rounded-lg"
                   >
-                    + Add Another Marking on This Photo
+                    Add another marking on this photo
                   </button>
 
-                  <button
-                    onClick={() => { persistDraft(); setCurrentPhotoLocalId(null); }}
-                    className="w-full bg-slate-900 text-white font-medium py-3 rounded-lg"
-                  >
-                    Done with This Photo
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => { void persistDraft({ currentPhotoLocalId: null }); setCurrentPhotoLocalId(null); }}
+                      className="min-h-10 flex-1 rounded-xl bg-slate-900 px-3 py-2.5 text-sm font-medium text-white"
+                    >
+                      Done with photo
+                    </button>
+                    <details className="relative group">
+                      <summary className="flex min-h-10 cursor-pointer list-none items-center rounded-xl border border-slate-200 bg-white px-3 text-xs font-medium text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">Options</summary>
+                      <div className="absolute bottom-full right-0 z-30 mb-2 min-w-[200px] rounded-xl border border-rose-200 bg-white p-2 shadow-lg">
+                        {boardsForPhoto.length > 1 && <button type="button" onClick={() => { void removeBoard(boardsForPhoto[Math.min(activeMarkingIndex,boardsForPhoto.length-1)]!.idx); }} className="min-h-10 w-full rounded-lg px-3 py-2 text-left text-xs font-medium text-rose-700 hover:bg-rose-50">Remove selected marking</button>}
+                        <button type="button" onClick={() => void deleteSurveyPhoto(photo.localId)} className="min-h-10 w-full rounded-lg px-3 py-2 text-left text-xs font-medium text-rose-700 hover:bg-rose-50">Remove photo and all markings</button>
+                      </div>
+                    </details>
+                  </div>
                 </div>
               );
             })()}
 
             <div className="flex gap-2">
-              <button onClick={() => { setCurrentPhotoLocalId(null); persistDraft(); }} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
-                <Camera className="w-4 h-4" /> Photos
-              </button>
               <button
-                onClick={() => { persistDraft(); setCurrentPhotoLocalId(null); setStep(3); }}
+                onClick={() => { void persistDraft({ currentPhotoLocalId: null, step: 3 }); setCurrentPhotoLocalId(null); setStep(3); }}
                 disabled={photos.length === 0}
-                className="bg-slate-900 text-white font-medium py-3 rounded-lg flex-1 disabled:opacity-50"
+                className="min-h-10 rounded-xl bg-blue-700 px-3 py-2.5 text-sm font-medium text-white flex-1 disabled:opacity-50"
               >
-                Continue to Review
+                Review & Submit
               </button>
             </div>
           </div>
@@ -1478,7 +1552,6 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                   <div className="flex justify-between"><span className="text-slate-500">Shop:</span><span className="text-slate-900 font-medium">{shop?.name}</span></div>
                   <div className="flex justify-between"><span className="text-slate-500">Photos:</span><span className="text-slate-900 font-medium">{photos.length}</span></div>
                   <div className="flex justify-between"><span className="text-slate-500">Boards:</span><span className="text-slate-900 font-medium">{workItems.length}</span></div>
-                  <div className="flex justify-between"><span className="text-slate-500">Total Area:</span><span className="text-slate-900 font-medium">{Math.round(totalArea)} sq ft</span></div>
                   <div className="flex justify-between items-center">
                     <span className="text-slate-500">GPS:</span>
                     {gpsStatus === 'captured' ? (
@@ -1508,12 +1581,11 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                   .filter(({ w }) => w.photoLocalId === p.localId);
                 const markedBoards = boards.filter(({ w }) => w.points && w.points.length >= 3);
                 const boardPointSets = markedBoards.map(({ w }) => w.points as MarkPoint[]);
-                const boardLabels = markedBoards.map(({ w }) => buildBoardLabel({ workTypeName: w.work_type_name, width: w.width, height: w.height, unit: w.unit }));
+                const boardLabels = markedBoards.map(({ w }) => buildBoardLabel({ workTypeName: w.work_type_name, width: w.width, height: w.height, unit: w.unit, heightUnit: w.heightUnit || w.unit }));
                 return (
                   <Card key={p.localId} className="p-3">
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-sm font-medium text-slate-900">Photo {i + 1}</span>
-                      <button type="button" onClick={() => { deleteSurveyPhoto(p.localId); setStep(2); }} className="text-xs font-medium text-red-600 mr-3">Delete</button>
                       <button
                         onClick={() => { setCurrentPhotoLocalId(p.localId); setStep(2); }}
                         className="text-xs font-medium text-blue-600"
@@ -1564,7 +1636,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
               <FileText className="w-12 h-12 text-blue-500 mx-auto mb-3" />
               <h2 className="text-lg font-bold text-slate-900 mb-2">Ready to Submit</h2>
               <p className="text-sm text-slate-500 mb-4">
-                {shop?.name} - {photos.length} photos, {workItems.length} boards, {Math.round(totalArea)} sq ft
+                {shop?.name} - {photos.length} photos, {workItems.length} boards
               </p>
               {submitError && (
                 <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg p-2 mb-4 text-left">

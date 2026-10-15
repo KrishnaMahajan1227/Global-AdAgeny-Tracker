@@ -1,31 +1,27 @@
-# AdRoute Clients ↔ Work Orders synchronization
+# AdRoute Installer — runtime and query-safety hotfix
 
-## Files changed
-- `src/pages/AgencyHierarchyPage.tsx`: Client detail stops rendering a second simplified work-order table; provides one direct link into canonical, client-filtered Work Orders list. Other legacy detail modes unchanged.
-- `src/pages/ShopsPages.tsx`: Client list adds a direct Work Orders shortcut per client, preserving client editing and existing actions.
-- `src/pages/PurchaseOrdersPage.tsx`: Reads client filter from `?client=<id>`, keeps filter selection synchronized with URL changes, and provides a visible scoped-client banner and clear action. Existing order table, detailed drawer, status/zone/campaign filters, and CRUD stay in place.
+## Scope
 
-## Navigation
-- Clients → Work orders: one click using each client's shortcut.
-- Clients → Client detail → Work orders: two clicks.
-- Work Orders → existing order drawer: click a work-order row.
-- A client-scoped Work Orders URL is bookmarkable and can be refreshed. Filtering is client-ID based and still uses the existing organization's order query and backend policies.
+Only `src/pages/InstallerPage.tsx` is modified. No database tables, evidence, photos, RLS policies, or records are changed by this ZIP. No new dependencies.
 
-## Deleted files / database
-- None. No SQL/migrations. No dependencies. No schema or data modifications.
+## Root causes fixed
 
-## Validation
-- Source patch and paths packaged only; ZIP integrity checked.
-- `npm ci` did not finish (tool transport timeout in this environment).
-- `npm run typecheck` blocked by incomplete `node_modules` (missing React/Babel and other @types), not reported as passed.
-- Vite production build, lint, mobile browsers and real Supabase CRUD require local verification before deployment.
+1. `InstallationWizard` declared `const online = useOnlineStatus()` but used `isOnline` in the photo sync effect and its dependency array, causing `ReferenceError: isOnline is not defined`. All references now use the declared variable; the reconnect callback uses a different name so it cannot create a temporal-dead-zone error.
+2. Normal installations queried `field_corrections.replacement_saved_at` (new in migration 0091) even when no redo existed. This could produce HTTP 400 if 0091 wasn't deployed. The query now checks the original 0057 columns first and requests the acknowledgement column **only when returned corrections actually exist**. If absent for a redo, it displays a clear schema error rather than silently losing the correction.
+3. `InstallerEntry` formerly ignored Supabase errors and treated a failed correction count as zero; it now stops safely with Retry/Back rather than accidentally routing redo into fresh installation.
+4. Installer My Work previously returned an empty correction list on some schema errors. Errors are now visible and retryable, while the assignment list stays available.
+5. The installer assignment list and compact wizard job queue used the same React Query key for different-shaped responses. The compact queue now has its own key.
+6. A fresh `installation_jobs` row could be inserted while correction status was pending or errored. New inserts are now guarded, but an existing job ID can still be loaded for redo proof display.
+7. Reconnect photo-sync effect now catches async rejections instead of leaking unhandled promises. Existing IndexedDB photo queue and evidence sync logic are unchanged.
 
-## Verify before deployment
-1. Client list: use Work orders shortcut; only selected client's orders appear.
-2. Client detail: no duplicate order table; View client work orders opens canonical Work Orders screen.
-3. Filter drawer: client preselected; changing it changes `?client=`; clearing it removes query param.
-4. Refresh and browser Back/Forward restore correct client scope.
-5. Open an order; existing drawer/edit/line items/shops still work; close/reopen.
-6. Test clients with 0 orders, many orders, and inactive clients; confirm pagination and no cross-client leakage.
-7. Test direct URLs for a different organization with non-owner accounts and verify Supabase RLS.
-8. Run `npm ci`, `npm run typecheck`, `npm run lint`, `npm run build`.
+## Verification and limits
+
+- TypeScript/TSX parsing: passed using TypeScript AST.
+- Source-level regression checks: passed (included script).
+- Full `npm run typecheck`, `npm run lint`, `npm run build`: **not verified** in the available environment (node_modules dependencies unavailable).
+- Actual Supabase request/authorization, migrations 0091/0092, offline photo capture and reconnect on physical devices: **not tested**.
+- If `field_corrections` table or 0091 is not deployed, the code cannot create database columns. Run `CHECK_FIELD_MIGRATIONS.sql` read-only to diagnose; use your previously supplied, reviewed migrations on staging with a backup before production.
+
+## Baseline
+
+This update is based on `AdRoute_Field_Capture_Marking_Units_Final_Patch.zip` and prior `AdRoute_Field_Review_Redo_Safe_Patch.zip`. Do not overwrite further local changes without reviewing the diff. The source in the ZIP replaces the complete InstallerPage file; it does not touch Surveyor UI or other project modules.

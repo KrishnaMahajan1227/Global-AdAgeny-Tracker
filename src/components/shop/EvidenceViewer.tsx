@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, ChevronLeft, ChevronRight, ExternalLink, ImageOff, FileText } from 'lucide-react';
 
 export type Mark = { points: { x: number; y: number }[]; label: string; own: boolean };
@@ -35,24 +35,27 @@ export function MarkOverlay({ marks, compact = false, showLabels = false }: { ma
 export function EvidenceThumb({ slide, onOpen, onDelete, badge, badgeTone }: { slide: Slide; onOpen: () => void; onDelete?: () => void; badge?: string; badgeTone?: 'ok' | 'redo' | 'info' }) {
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  useEffect(() => { setFailed(false); setLoaded(false); }, [slide.src]);
   const tone = badgeTone === 'ok' ? 'bg-emerald-600' : badgeTone === 'redo' ? 'bg-amber-600' : 'bg-slate-800/80';
   return (
-    <div className="relative shrink-0 group">
-      <button type="button" onClick={onOpen} title="Open full view" className="relative block h-24 min-w-[96px] rounded-xl overflow-hidden border border-slate-200 bg-slate-100 shadow-sm hover:border-slate-400 transition focus:outline-none focus:ring-2 focus:ring-slate-400">
+    <div className="group relative min-w-0">
+      <button type="button" onClick={onOpen} aria-label={`Inspect ${slide.title}`} title={`${slide.title} · Click for detailed review`} className="relative flex h-40 w-full items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white p-1.5 transition hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
         {failed ? (
-          <span className="flex h-24 w-28 flex-col items-center justify-center gap-1 text-slate-400"><ImageOff className="w-5 h-5" /><span className="text-[10px]">Unavailable</span></span>
+          <span className="flex flex-col items-center gap-1 text-slate-500"><ImageOff className="h-5 w-5" /><span className="text-[10px]">Image unavailable</span></span>
         ) : (
-          <span className="relative inline-block h-24">
-            {!loaded && <span className="absolute inset-0 animate-pulse bg-slate-200" />}
-            <img src={slide.src} alt={slide.title} loading="lazy" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} className="h-24 w-auto max-w-none block" />
+          <span className="relative inline-block max-h-full max-w-full">
+            {!loaded && <span className="absolute inset-0 animate-pulse bg-slate-100" />}
+            <img src={slide.src} alt={slide.subtitle || slide.title} loading="lazy" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} className="block max-h-[148px] max-w-full object-contain" />
             <MarkOverlay marks={slide.marks} compact />
           </span>
         )}
-        <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white">{slide.title}</span>
-        {badge && <span className={`absolute top-1 left-1 rounded px-1.5 py-0.5 text-[9px] font-bold text-white ${tone}`}>{badge}</span>}
-        {slide.marks && slide.marks.filter((m) => m.points.length >= 3).length > 0 && <span className="absolute top-1 right-1 rounded bg-slate-800/80 px-1.5 py-0.5 text-[9px] font-bold text-white">{slide.marks.filter((m) => m.points.length >= 3).length} MARKED</span>}
+        {badge && <span className={`absolute right-1 top-1 rounded px-1 py-0.5 text-[9px] font-bold text-white ${tone}`}>{badge}</span>}
+        {slide.marks && slide.marks.some(m => m.points.length >= 3) && <span className="absolute left-1 top-1 rounded bg-slate-800/80 px-1 py-0.5 text-[9px] font-bold text-white">MARKED</span>}
       </button>
-      {onDelete && <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} title="Delete photo" className="absolute -top-2 -right-2 hidden group-hover:flex w-6 h-6 items-center justify-center rounded-full bg-white border border-red-200 text-red-600 shadow hover:bg-red-50"><X className="w-3.5 h-3.5" /></button>}
+      <div className="mt-1 flex min-w-0 items-center justify-between gap-2 px-0.5">
+        <p className="min-w-0 truncate text-[11px] text-slate-600" title={slide.subtitle || slide.title}>{slide.title}</p>
+        {onDelete && <button type="button" onClick={onDelete} aria-label={`Delete ${slide.title}`} title="Delete photo (confirmation required)" className="shrink-0 rounded-md p-1 text-slate-400 hover:bg-red-50 hover:text-red-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-600"><X className="h-3.5 w-3.5" /></button>}
+      </div>
     </div>
   );
 }
@@ -60,7 +63,7 @@ export function EvidenceThumb({ slide, onOpen, onDelete, badge, badgeTone }: { s
 export function FileTile({ url, label, tone }: { url: string; label: string; tone: string }) {
   const ext = (url.split('?')[0].split('.').pop() || 'file').slice(0, 4).toUpperCase();
   return (
-    <a href={url} target="_blank" rel="noreferrer" className={`relative shrink-0 h-24 w-24 rounded-xl border bg-white flex flex-col items-center justify-center gap-1 hover:shadow-md transition ${tone}`}>
+    <a href={url} target="_blank" rel="noreferrer" className={`relative flex h-40 min-w-0 flex-col items-center justify-center gap-1 rounded-lg border bg-white p-2 transition hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 ${tone}`}>
       <FileText className="w-6 h-6 text-slate-500" /><span className="text-[11px] font-bold">{ext}</span><span className="text-[10px] text-slate-500">{label}</span>
     </a>
   );
@@ -70,9 +73,25 @@ export function FileTile({ url, label, tone }: { url: string; label: string; ton
 export function EvidenceViewer({ slides, index, onClose, onIndex }: { slides: Slide[]; index: number; onClose: () => void; onIndex: (i: number) => void }) {
   const s = slides[index];
   const [failed, setFailed] = useState(false);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeButtonRef.current?.focus();
+    return () => { previous?.focus(); };
+  }, []);
   useEffect(() => { setFailed(false); }, [index]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Tab' && dialogRef.current) {
+        const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled])'));
+        if (focusable.length) {
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+          else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+      }
       if (e.key === 'Escape') onClose();
       if (e.key === 'ArrowRight' && index < slides.length - 1) onIndex(index + 1);
       if (e.key === 'ArrowLeft' && index > 0) onIndex(index - 1);
@@ -85,7 +104,7 @@ export function EvidenceViewer({ slides, index, onClose, onIndex }: { slides: Sl
   const k = KIND[s.kind];
   const markCount = (s.marks || []).filter((m) => m.points.length >= 3).length;
   return (
-    <div className="fixed inset-0 z-[100] bg-slate-950/95 flex flex-col" onClick={onClose}>
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Evidence photo viewer" className="fixed inset-0 z-[100] bg-slate-950/95 flex flex-col" onClick={onClose}>
       <div className="flex items-center justify-between gap-3 px-4 py-3 text-white" onClick={(e) => e.stopPropagation()}>
         <div className="min-w-0 flex items-center gap-3">
           <span className={`rounded px-2 py-0.5 text-[10px] font-bold uppercase ${k.chip}`}>{k.name}</span>
@@ -94,23 +113,23 @@ export function EvidenceViewer({ slides, index, onClose, onIndex }: { slides: Sl
         <div className="flex items-center gap-2 shrink-0">
           <span className="text-xs text-slate-300">{index + 1} / {slides.length}</span>
           <a href={s.src} target="_blank" rel="noreferrer" className="p-2 rounded-lg hover:bg-white/10" title="Open original"><ExternalLink className="w-4 h-4" /></a>
-          <button onClick={onClose} className="p-2 rounded-lg hover:bg-white/10" title="Close (Esc)"><X className="w-5 h-5" /></button>
+          <button type="button" ref={closeButtonRef} onClick={onClose} aria-label="Close photo viewer" className="p-2 rounded-lg hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white" title="Close (Esc)"><X className="w-5 h-5" /></button>
         </div>
       </div>
       <div className="relative flex-1 min-h-0 flex items-center justify-center px-14" onClick={(e) => e.stopPropagation()}>
-        {index > 0 && <button onClick={() => onIndex(index - 1)} className="absolute left-2 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white"><ChevronLeft className="w-6 h-6" /></button>}
+        {index > 0 && <button type="button" aria-label="Previous photo" onClick={() => onIndex(index - 1)} className="absolute left-2 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white"><ChevronLeft className="w-6 h-6" /></button>}
         {failed ? <div className="text-slate-300 flex flex-col items-center gap-2"><ImageOff className="w-10 h-10" /><p className="text-sm">Unable to load photo</p><a href={s.src} target="_blank" rel="noreferrer" className="text-xs underline">Open original image</a></div> : (
           <div className="relative inline-block max-h-full max-w-full">
             <img src={s.src} alt={s.title} onError={() => setFailed(true)} className="block max-h-[calc(100vh-190px)] max-w-full rounded-lg object-contain" />
             <MarkOverlay marks={s.marks} showLabels />
           </div>
         )}
-        {index < slides.length - 1 && <button onClick={() => onIndex(index + 1)} className="absolute right-2 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white"><ChevronRight className="w-6 h-6" /></button>}
+        {index < slides.length - 1 && <button type="button" aria-label="Next photo" onClick={() => onIndex(index + 1)} className="absolute right-2 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white"><ChevronRight className="w-6 h-6" /></button>}
       </div>
       <div className="px-4 pb-4 pt-2" onClick={(e) => e.stopPropagation()}>
         {markCount > 0 && <p className="text-center text-xs text-slate-300 mb-2">{markCount} board marking(s) on this photo — <span className="text-blue-300 font-semibold">blue</span> = this work item, grey dashed = other items</p>}
         <div className="flex gap-2 overflow-x-auto justify-center">
-          {slides.map((sl, i) => <button key={i} onClick={() => onIndex(i)} className={`shrink-0 h-12 w-16 rounded-md overflow-hidden border-2 ${i === index ? 'border-blue-400' : 'border-transparent opacity-60 hover:opacity-100'}`}><img src={sl.src} alt="" className="h-full w-full object-cover" /></button>)}
+          {slides.map((sl, i) => <button key={i} type="button" aria-label={`View photo ${i + 1}: ${sl.title}`} aria-current={i === index ? 'true' : undefined} onClick={() => onIndex(i)} className={`shrink-0 h-12 w-16 rounded-md overflow-hidden border-2 ${i === index ? 'border-blue-400' : 'border-transparent opacity-60 hover:opacity-100'}`}><img src={sl.src} alt="" className="h-full w-full bg-slate-900 object-contain" /></button>)}
         </div>
       </div>
     </div>

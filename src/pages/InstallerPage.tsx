@@ -1,14 +1,20 @@
 import { FieldNavigation } from '@/components/FieldNavigation';
+import { offlineDb, pendingInstallationPhotos, newLocalId, type PendingInstallationPhoto } from '@/lib/offlineDb';
+import { syncInstallationPhoto, syncInstallationPhotos, isInstallationPhotoSyncing, loadInstallationProofs } from '@/lib/installationSync';
+import { fieldNotice, fieldConfirm } from '@/lib/fieldDialogs';
+import { loadFieldAssignments, loadAssignedFieldShop } from '@/lib/fieldAssignments';
+import { loadRedoDrafts, queueRedoDraft, redoDraftId, syncRedoDraft, type RedoDraft } from '@/lib/fieldRedo';
+import { useOnlineStatus } from '@/lib/useOnlineStatus';
 import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { Card, Select, Textarea, Input, EmptyState } from '@/components/ui';
+import { Card, Select, Textarea, Input, EmptyState, StatusBadge } from '@/components/ui';
 import { logAudit, createNotification } from '@/lib/helpers';
 import { submitCorrections, setAvailability } from '@/lib/reviewApi';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { CameraCapture } from '@/components/CameraCapture';
-import { formatDim, LENGTH_UNIT_OPTIONS, areaSqFt, itemSizeLabel } from '@/lib/units';
+import { formatDim, LENGTH_UNIT_OPTIONS, areaSqFt, itemSizeLabel, toFeet } from '@/lib/units';
 import { useLiveLocationTracking } from '@/lib/locationTracking';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { computeImageHash, hammingDistance, DUPLICATE_HASH_THRESHOLD } from '@/lib/imageHash';
@@ -16,7 +22,6 @@ import { haversineDistanceMeters, GPS_DISTANCE_FLAG_METERS } from '@/lib/geoDist
 import { reverseGeocode } from '@/lib/geocode';
 import { stampGeoTag, ensureLandscape } from '@/lib/geoStamp';
 import { capturePhotoLocation } from '@/lib/captureLocation';
-import { computePOVariance } from '@/lib/poVariance';
 import type { SurveyPhoto, BoardMarking, WorkItem, POWorkContext, POLineItemWorkContext } from '@/lib/types';
 import {
   Home, Briefcase, MapPin, Bell, User, Camera, Navigation, CheckCircle2,
@@ -37,24 +42,159 @@ const EXCEPTION_REASONS = [
 // by the wizard's own "today's queue" progress strip/next-job advance.
 const READY_STATUSES = ['production_done', 'production_ready', 'dispatched', 'installation_pending', 'installing'];
 
+
+function InstallerEntry({ shopId, onExit }: { shopId: string; onExit: (nextShopId?: string) => void }) {
+  const { profile } = useAuth();
+  const { data, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ['installer-entry-context', shopId, profile?.id],
+    queryFn: async () => {
+      const [corrections, selectedShop] = await Promise.all([
+        supabase.from('field_corrections').select('id', { count: 'exact', head: true }).eq('shop_id', shopId).eq('stage', 'installation').eq('assigned_to', profile!.id).eq('status', 'open'),
+        supabase.from('shops').select('id,status').eq('id', shopId).maybeSingle(),
+      ]);
+      // Do not treat a failed correction query as zero corrections: that
+      // could send a returned job down the new-install path.
+      if (corrections.error) throw new Error(`Unable to check installation corrections: ${corrections.error.message}`);
+      if (selectedShop.error) throw new Error(`Unable to load shop: ${selectedShop.error.message}`);
+      if (!selectedShop.data) throw new Error('Shop is unavailable or you do not have access.');
+      return { correctionCount: corrections.count || 0, shopStatus: selectedShop.data.status || null };
+    }, enabled: !!profile?.id,
+  });
+  if (isLoading) return <div className="p-8 text-center text-slate-500 text-sm">Loading installation…</div>;
+  if (isError && !data) return <div className="mx-auto max-w-md p-4"><div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><p className="font-semibold">Cannot open this job yet</p><p className="mt-2 break-words">{error instanceof Error ? error.message : 'Unable to load the job.'}</p><div className="mt-3 flex gap-2"><button type="button" onClick={() => void refetch()} className="rounded-lg bg-slate-900 px-3 py-2 font-medium text-white">Retry</button><button type="button" onClick={() => onExit()} className="rounded-lg border border-slate-300 bg-white px-3 py-2">Back to jobs</button></div></div></div>;
+  if ((data?.correctionCount || 0) > 0) return <InstallationWizard shopId={shopId} onExit={onExit} />;
+  if (!READY_STATUSES.includes(data?.shopStatus || '')) return <InstallationSubmissionViewer shopId={shopId} onExit={() => onExit()} />;
+  return <InstallationWizard shopId={shopId} onExit={onExit} />;
+}
+
+function InstallationSubmissionViewer({ shopId, onExit }: { shopId: string; onExit: () => void }) {
+  const { profile } = useAuth();
+  const { data: shop } = useQuery({
+    queryKey: ['installer-view-shop', shopId],
+    queryFn: async () => {
+      return loadAssignedFieldShop(shopId, profile!.id, profile!.organization_id, 'installer');
+    },
+    enabled: !!shopId && !!profile?.id,
+  });
+  const { data: workItems = [] } = useQuery({
+    queryKey: ['installer-view-items', shopId],
+    queryFn: async () => {
+      const { data } = await supabase.from('work_items').select('*').eq('shop_id', shopId).order('created_at');
+      return (data || []) as WorkItem[];
+    },
+    enabled: !!shopId,
+  });
+  const { data: latestJob } = useQuery({
+    queryKey: ['installer-view-job', shopId],
+    queryFn: async () => {
+      const { data } = await supabase.from('installation_jobs').select('id,status,started_at,completed_at,notes').eq('shop_id', shopId).eq('installer_id', profile!.id).order('completed_at', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).limit(1).maybeSingle();
+      return data as any;
+    },
+    enabled: !!shopId && !!profile?.id,
+  });
+  const { data: proofs = [] } = useQuery({
+    queryKey: ['installer-view-proofs', latestJob?.id],
+    queryFn: async () => {
+      const { data } = await supabase.from('installation_proofs').select('id,photo_url,work_item_id,angle,photo_type').eq('installation_job_id', latestJob!.id).order('captured_at');
+      return (data || []) as { id: string; photo_url: string; work_item_id?: string | null; angle?: string | null; photo_type?: string | null }[];
+    },
+    enabled: !!latestJob?.id,
+  });
+
+  const { data: referencePhotos = [] } = useQuery({
+    queryKey: ['installer-submission-marked-reference', shopId],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('survey_photos').select('*').eq('shop_id', shopId).order('created_at');
+      if (error) throw error;
+      return (data || []) as SurveyPhoto[];
+    }, enabled: !!shopId,
+  });
+  const { data: referenceMarkings = [] } = useQuery({
+    queryKey: ['installer-submission-markings', shopId, referencePhotos.map((photo) => photo.id).join(',')],
+    queryFn: async () => {
+      if (!referencePhotos.length) return [] as BoardMarking[];
+      const { data, error } = await supabase.from('board_markings').select('*')
+        .in('survey_photo_id', referencePhotos.map((photo) => photo.id));
+      if (error) throw error;
+      return (data || []) as BoardMarking[];
+    }, enabled: referencePhotos.length > 0,
+  });
+
+  return (
+    <div className="min-h-screen bg-slate-50 pb-24 max-w-md mx-auto">
+      <div className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
+        <div className="flex items-center justify-between px-4 py-3">
+          <button onClick={onExit} className="text-sm font-medium text-slate-600">Back</button>
+          <p className="text-sm font-semibold text-slate-900">Submitted Installation</p>
+          <button type="button" onClick={() => navigateToShop(shop)} className="text-sm font-medium text-blue-600">Map</button>
+        </div>
+      </div>
+      <div className="p-4 space-y-4">
+        <Card className="p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-lg font-semibold text-slate-900">{shop?.name || 'Shop'}</p>
+              <p className="mt-1 text-sm text-slate-500">{shop?.clients?.name || 'Client'}{shop?.purchase_orders ? ` · ${shop.purchase_orders.name || shop.purchase_orders.po_number || 'Work Order'}` : ''}</p>
+            </div>
+            <StatusBadge status={latestJob?.status || shop?.status || 'installation_review'} />
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><p className="text-slate-500">Work items</p><p className="mt-1 font-semibold text-slate-900">{workItems.length}</p></div>
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><p className="text-slate-500">Photos</p><p className="mt-1 font-semibold text-slate-900">{proofs.length}</p></div>
+            <div className="rounded-xl bg-slate-50 px-3 py-2"><p className="text-slate-500">Completed</p><p className="mt-1 font-semibold text-slate-900">{latestJob?.completed_at ? new Date(latestJob.completed_at).toLocaleDateString() : '—'}</p></div>
+          </div>
+          {latestJob?.notes && <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"><p className="font-semibold">Submission note</p><p className="mt-1">{latestJob.notes}</p></div>}
+          <p className="mt-3 text-xs text-slate-500">This installation is already submitted. Crew can still reopen this screen later to verify what was uploaded.</p>
+        </Card>
+
+        {referencePhotos.length > 0 && <Card className="p-3">
+          <h2 className="text-sm font-semibold text-slate-900">Approved marked survey reference</h2>
+          <p className="mt-1 mb-3 text-xs text-slate-500">Original boards and markings used for installation.</p>
+          <MarkedPhotoGrid photos={referencePhotos} markings={referenceMarkings} workItems={workItems} />
+        </Card>}
+        <Card className="p-4">
+          <h2 className="text-sm font-semibold text-slate-900">Installed work items</h2>
+          <div className="mt-3 space-y-3">
+            {workItems.length === 0 && <p className="text-xs text-slate-500">No work items found.</p>}
+            {workItems.map((item, idx) => {
+              const itemProofs = proofs.filter((p) => p.work_item_id === item.id || (!p.work_item_id && workItems.length === 1));
+              return <div key={item.id} className="rounded-2xl border border-slate-200 bg-white p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">{item.work_type_name || item.material || `Work Item ${idx + 1}`}</p>
+                    <p className="mt-1 text-xs text-slate-500">{itemSizeLabel(item, item.installed_width != null && item.approved_width == null ? 'installed' : 'approved')}{(item.approved_quantity || item.installed_quantity) ? ` · Qty ${item.approved_quantity || item.installed_quantity}` : ''}</p>
+                  </div>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">{itemProofs.length} photo{itemProofs.length === 1 ? '' : 's'}</span>
+                </div>
+                {!!item.notes && <p className="mt-2 text-xs text-slate-600">{item.notes}</p>}
+                {itemProofs.length > 0 && <div className="mt-3 grid grid-cols-3 gap-2">{itemProofs.map((p) => <div key={p.id} className="aspect-[4/3] overflow-hidden rounded-xl bg-slate-100"><img src={p.photo_url} alt="Installation proof" className="h-full w-full object-contain" /></div>)}</div>}
+              </div>;
+            })}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 export default function InstallerPage() {
   const { profile, signOut } = useAuth();
-  const [tab, setTab] = useState<MobileTab>('home');
+  const [tab, setTab] = useState<MobileTab>('work');
   const [activeJob, setActiveJob] = useState<string | null>(null);
   const [directInstallOpen, setDirectInstallOpen] = useState(false);
 
   if (activeJob) {
-    return <InstallationWizard shopId={activeJob} onExit={(nextShopId) => setActiveJob(nextShopId || null)} />;
+    return <><InstallerEntry shopId={activeJob} onExit={(nextShopId) => setActiveJob(nextShopId || null)} /></>;
   }
 
   if (directInstallOpen) {
-    return <DirectInstallWizard onExit={() => setDirectInstallOpen(false)} />;
+    return <><DirectInstallWizard onExit={() => setDirectInstallOpen(false)} /></>;
   }
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20 max-w-md mx-auto">
-      {tab === 'home' && <InstallerHome onStart={(shopId) => setActiveJob(shopId)} onDirectInstall={() => setDirectInstallOpen(true)} />}
-      {tab === 'work' && <InstallerWork onStart={(shopId) => setActiveJob(shopId)} />}
+      
+      {(tab === 'home' || tab === 'work') && <InstallerWork onStart={(shopId) => setActiveJob(shopId)} onDirectInstall={() => setDirectInstallOpen(true)} />}
       {tab === 'map' && <FieldMapView />}
       {tab === 'notifications' && <NotificationsView />}
       {tab === 'profile' && <ProfileView onSignOut={signOut} />}
@@ -80,13 +220,7 @@ function InstallerHome({ onStart, onDirectInstall }: { onStart: (shopId: string)
   const { data: assignments } = useQuery({
     queryKey: ['installer-assignments', profile?.id],
     queryFn: async () => {
-      const { data } = await supabase
-        .from('shop_assignments')
-        .select('*, shops(*, clients(name))')
-        .eq('user_id', profile!.id)
-        .eq('role', 'installer')
-        .order('assigned_at', { ascending: false });
-      return data;
+      return loadFieldAssignments(profile!.id, profile!.organization_id, 'installer');
     },
     enabled: !!profile?.id,
   });
@@ -205,40 +339,49 @@ function InstallerHome({ onStart, onDirectInstall }: { onStart: (shopId: string)
   );
 }
 
-function InstallerWork({ onStart }: { onStart: (shopId: string) => void }) {
+function InstallerWork({ onStart, onDirectInstall }: { onStart: (shopId: string) => void; onDirectInstall: () => void }) {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
 
   const { data: assignments } = useQuery({
     queryKey: ['installer-work', profile?.id],
     queryFn: async () => {
-      const { data } = await supabase
-        .from('shop_assignments')
-        .select('*, shops(*, clients(name))')
-        .eq('user_id', profile!.id)
-        .eq('role', 'installer')
-        .order('assigned_at', { ascending: false });
-      return data;
+      return loadFieldAssignments(profile!.id, profile!.organization_id, 'installer');
     },
     enabled: !!profile?.id,
   });
 
   useRealtimeInvalidate(['shop_assignments', 'shops', 'installation_jobs', 'field_corrections'], orgId, [['installer-work', profile?.id], ['installer-open-corrections', profile?.id]]);
 
+  // Preserve existing Direct Install jobs even though the duplicate Home screen is gone.
+  const { data: directInstallPOs = [] } = useQuery({
+    queryKey: ['direct-install-pos', orgId, profile?.id],
+    queryFn: async () => {
+      const { data: assigned, error: assignmentError } = await supabase.from('po_assignments')
+        .select('purchase_order_id').eq('user_id', profile!.id).eq('role', 'installer');
+      if (assignmentError) throw assignmentError;
+      const ids = (assigned || []).map((row) => row.purchase_order_id);
+      if (!ids.length) return [];
+      const { data, error } = await supabase.from('v_po_work_context').select('id,name,po_number')
+        .eq('organization_id', orgId).eq('status','active').eq('fulfillment_type','direct_install').in('id',ids);
+      if (error) throw error;
+      return data || [];
+    }, enabled: !!profile?.id && !!orgId,
+  });
   const shopIds = (assignments || []).map((a) => a.shop_id);
 
   // Open redo tasks are authoritative. A shop can be in installation_review and
   // still must immediately re-open for this installer when Owner/Admin sends a
   // specific Work Item back. Do not rely on shop status alone.
-  const { data: openCorrections = [] } = useQuery({
+  const { data: openCorrections = [], isError: correctionsListFailed, error: correctionsListError, refetch: retryCorrectionsList } = useQuery({
     queryKey: ['installer-open-corrections', profile?.id],
     queryFn: async () => {
       const { data, error } = await supabase.from('field_corrections')
         .select('id,shop_id,work_item_id,installation_proof_id,issue_type,note,created_at')
         .eq('stage','installation').eq('assigned_to',profile!.id).eq('status','open')
         .order('created_at',{ascending:false});
-      if (error && /field_corrections|schema cache/i.test(error.message||'')) return [];
-      if (error) throw error; return data || [];
+      if (error) throw error;
+      return data || [];
     }, enabled: !!profile?.id,
   });
   const correctionsByShop = new Map<string, any[]>();
@@ -269,7 +412,10 @@ function InstallerWork({ onStart }: { onStart: (shopId: string) => void }) {
 
   return (
     <div className="p-4">
-      <h1 className="text-xl font-bold text-slate-900 mb-4">My Installations</h1>
+      <div className="mb-3 flex items-center justify-between gap-2"><h1 className="text-lg font-semibold text-slate-900">My Installations</h1>
+        {directInstallPOs.length > 0 && <button type="button" onClick={onDirectInstall} className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">Direct install</button>}
+      </div>
+      {correctionsListFailed && <div role="alert" className="mb-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900"><p className="font-semibold">Correction status unavailable</p><p className="mt-1">{correctionsListError instanceof Error ? correctionsListError.message : 'Could not load returned jobs.'}</p><button type="button" className="mt-2 rounded-lg bg-white px-3 py-1.5 font-semibold ring-1 ring-amber-200" onClick={() => void retryCorrectionsList()}>Retry</button></div>}
       <AssignedShopList
         assignments={assignments || []}
         getButtonState={(a) => {
@@ -278,15 +424,15 @@ function InstallerWork({ onStart }: { onStart: (shopId: string) => void }) {
           const isInstalled = shopStatus === 'installed';
           const isAwaitingApproval = shopStatus === 'installation_review';
           const isReady = READY_STATUSES.includes(shopStatus);
-          if (redo.length) return { label: `Fix Redo (${redo.length})`, disabled: false };
-          if (isInstalled) return { label: 'Installed', disabled: true, done: true };
-          if (isAwaitingApproval) return { label: 'Awaiting Approval', disabled: true };
-          if (!isReady) return { label: 'Not Ready Yet', disabled: true };
-          return { label: 'Start Install', disabled: false };
+          if (redo.length) return { label: `Fix Redo (${redo.length})`, disabled: false, tone: 'amber' as const };
+          if (isInstalled) return { label: 'View Submission', disabled: false, done: true, tone: 'slate' as const };
+          if (isAwaitingApproval) return { label: 'View Submission', disabled: false, done: true, tone: 'slate' as const };
+          if (!isReady) return { label: 'Not Ready Yet', disabled: true, tone: 'slate' as const };
+          return { label: 'Start Install', disabled: false, tone: 'blue' as const };
         }}
         onStart={onStart}
         emptyLabel="No installations assigned"
-        renderExtra={(a) => { const redo=correctionsByShop.get(a.shop_id)||[]; if(!redo.length)return null; return <div className="mt-2 rounded-xl border border-amber-300 bg-amber-50 p-2.5"><p className="text-xs font-bold text-amber-900">Redo requested · {redo.length} item{redo.length===1?'':'s'}</p><p className="text-[11px] text-amber-700 mt-0.5">Open this shop to fix only the Work Item(s) returned by Owner/Admin.</p>{redo.slice(0,2).map((c:any)=><p key={c.id} className="text-[11px] text-amber-800 mt-1">• {c.note||'Installation evidence needs correction'}</p>)}</div> }}
+        renderExtra={(a) => { const redo=correctionsByShop.get(a.shop_id)||[]; if(!redo.length)return null; return <div className="mt-2 rounded-xl border border-amber-300 bg-amber-50 p-2.5"><p className="text-xs font-bold text-amber-900">Redo requested · {redo.length} item{redo.length===1?'':'s'}</p><p className="text-[11px] text-amber-700 mt-0.5">Open this shop to see the full redo context and fix only the Work Item(s) returned by Owner/Admin.</p>{redo.slice(0,2).map((c:any)=><p key={c.id} className="text-[11px] text-amber-800 mt-1">• {c.note||'Installation evidence needs correction'}</p>)}</div> }}
       />
     </div>
   );
@@ -335,7 +481,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   const [materialLoadedQty, setMaterialLoadedQty] = useState<Record<string, string>>({});
   const [materialCheckConfirmed, setMaterialCheckConfirmed] = useState(false);
   const [materialCheckSaving, setMaterialCheckSaving] = useState(false);
-  const [proofPhotos, setProofPhotos] = useState<{ id?: string; storagePath?: string; url: string; type: string; angle: 'front' | 'side' | 'other'; workItemId?: string }[]>([]);
+  const [proofPhotos, setProofPhotos] = useState<{ id?: string; storagePath?: string; url: string; type: string; angle: 'front' | 'side' | 'other'; workItemId?: string; queued?: boolean }[]>([]);
+  const [queuedCount, setQueuedCount] = useState(0);
   const [bulkGalleryFiles, setBulkGalleryFiles] = useState<File[]>([]);
   const [bulkGalleryMap, setBulkGalleryMap] = useState<Record<number, string>>({});
   const [bulkUploading, setBulkUploading] = useState(false);
@@ -355,6 +502,11 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   const [selectedProofWorkItemId, setSelectedProofWorkItemId] = useState('');
   const [expandedInstallItemId, setExpandedInstallItemId] = useState<string | null>(null);
   const [jobBlockedReason, setJobBlockedReason] = useState<string | null>(null);
+  const online = useOnlineStatus();
+  const [redoDrafts, setRedoDrafts] = useState<Record<string, RedoDraft>>({});
+  const [redoBusy, setRedoBusy] = useState<string | null>(null);
+  const [redoError, setRedoError] = useState('');
+  const redoAutoSyncAttempted = useRef(new Set<string>());
   const [unavail, setUnavail] = useState<{ item: WorkItem; reason: string; note: string; file: File | null } | null>(null);
   const [unavailBusy, setUnavailBusy] = useState(false);
 
@@ -363,26 +515,114 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   // installer moving in real time, same as the surveyor flow.
   useLiveLocationTracking(true, profile?.id, profile?.organization_id);
 
-  const { data: correctionTasks } = useQuery({
+  const { data: correctionTasks, isLoading: correctionsLoading, isError: correctionsFailed, error: correctionsError, refetch: retryCorrections } = useQuery({
     queryKey: ['installation-field-corrections', shopId, profile?.id],
-    queryFn: async () => { const { data, error } = await supabase.from('field_corrections').select('id, issue_type, note, work_item_id, installation_proof_id, created_at').eq('shop_id', shopId).eq('stage', 'installation').eq('assigned_to', profile!.id).eq('status', 'open').order('created_at'); if (error && /field_corrections|schema cache/i.test(error.message||'')) return []; if (error) throw error; return data || []; },
+    queryFn: async () => {
+      // First fetch only columns in migration 0057, so normal installations do
+      // not query replacement_saved_at (introduced later in migration 0091).
+      const { data: base, error: baseError } = await supabase.from('field_corrections')
+        .select('id,issue_type,note,work_item_id,installation_proof_id,created_at')
+        .eq('shop_id', shopId).eq('stage', 'installation').eq('assigned_to', profile!.id)
+        .eq('status', 'open').order('created_at');
+      if (baseError) throw new Error(`Could not check returned work: ${baseError.message}`);
+      if (!base?.length) return [];
+      // The server acknowledgement is mandatory for redo submission. If 0091
+      // has not been deployed, do NOT hide returned jobs or assume they are saved.
+      const { data: saved, error: savedError } = await supabase.from('field_corrections')
+        .select('id,replacement_saved_at').in('id', base.map((item) => item.id));
+      if (savedError) throw new Error(`Redo confirmation is unavailable. Check that migration 0091 is applied. ${savedError.message}`);
+      const savedById = new Map((saved || []).map((item) => [item.id, item.replacement_saved_at]));
+      return base.map((item) => ({ ...item, replacement_saved_at: savedById.get(item.id) ?? null }));
+    },
     enabled: !!shopId && !!profile?.id,
   });
+
+  useEffect(() => {
+    if (!profile?.id) return;
+    let active = true;
+    loadRedoDrafts(profile.id, shopId, 'installation').then((drafts) => {
+      if (active) setRedoDrafts(Object.fromEntries(drafts.map((draft) => [draft.correctionId, draft])));
+    }).catch((err) => setRedoError(String(err)));
+    return () => { active = false; };
+  }, [profile?.id, shopId]);
+
+  async function uploadSavedRedo(draft: RedoDraft) {
+    if (!online) return;
+    setRedoBusy(draft.correctionId); setRedoError('');
+    try {
+      await syncRedoDraft(draft);
+      setRedoDrafts((current) => { const next = { ...current }; delete next[draft.correctionId]; return next; });
+      await queryClient.invalidateQueries({ queryKey: ['installation-field-corrections', shopId] });
+      await queryClient.invalidateQueries({ queryKey: ['shop-installation-proofs'] });
+      // The previous submission photo ID stays intact; reload the canonical server rows.
+      await queryClient.invalidateQueries({ queryKey: ['installer-view-proofs'] });
+      if (jobId) { try { setProofPhotos(await loadInstallationProofs(jobId)); } catch { /* retry on refresh */ } }
+    } catch (err: any) { setRedoError(err?.message || 'Upload failed. Your image is still saved on this device.'); }
+    finally { setRedoBusy(null); }
+  }
+
+  useEffect(() => {
+    if (!online) { redoAutoSyncAttempted.current.clear(); return; }
+    const draft = Object.values(redoDrafts).find((item) => item.payload.ready && !redoAutoSyncAttempted.current.has(item.correctionId));
+    if (!draft || redoBusy) return;
+    redoAutoSyncAttempted.current.add(draft.correctionId);
+    void uploadSavedRedo(draft);
+  }, [online, redoDrafts, redoBusy]);
+
+  async function queueRedoImage(c: any, dataUrl: string, fileName: string) {
+    if (!profile) return;
+    setCameraFor(null);
+    setRedoError('');
+    try {
+      // Keep geo-stamp while preserving a durable original capture locally until the RPC acknowledges it.
+      let stamped = dataUrl;
+      try { stamped = await stampGeoTag(await ensureLandscape(dataUrl), {
+        siteName: shop?.name, addressLine: [shop?.address, shop?.city, shop?.state].filter(Boolean).join(', '),
+        lat: gps?.lat ?? null, lng: gps?.lng ?? null, accuracy: gps?.accuracy ?? null,
+      }); } catch { /* Keep the original captured file if stamping is unavailable. */ }
+      const draft: RedoDraft = { id: redoDraftId(profile.id, c.id), userId: profile.id, shopId,
+        stage: 'installation', correctionId: c.id, status: 'queued', updatedAt: new Date().toISOString(),
+        payload: { dataUrl: stamped, fileName, organizationId: profile.organization_id, angle: 'front', ready: true },
+      };
+      await queueRedoDraft(draft);
+      setRedoDrafts((previous) => ({ ...previous, [c.id]: draft }));
+      if (online) { redoAutoSyncAttempted.current.add(c.id); await uploadSavedRedo(draft); }
+    } catch (err: any) { setRedoError(err?.message || 'Unable to save replacement image'); }
+  }
+
+  async function chooseRedoImage(c: any, file: File) {
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error || new Error('Could not read photo'));
+        reader.readAsDataURL(file);
+      });
+      await queueRedoImage(c, dataUrl, file.name);
+    } catch (err: any) { setRedoError(err?.message || 'Could not save photo'); }
+  }
+
+  async function submitRedo() {
+    setRedoBusy('submit'); setRedoError('');
+    try {
+      await submitCorrections('installation', shopId);
+      await queryClient.invalidateQueries();
+      await queryClient.invalidateQueries();
+      setCompleted(true);
+    } catch (err: any) { setRedoError(err?.message || 'Could not submit corrected work'); }
+    finally { setRedoBusy(null); }
+  }
 
   const { data: shop } = useQuery({
     queryKey: ['shop', shopId],
     queryFn: async () => {
-      const { data } = await supabase.from('shops').select('*, clients(name)').eq('id', shopId).maybeSingle();
-      return data;
+      return loadAssignedFieldShop(shopId, profile!.id, profile!.organization_id, 'installer');
     },
   });
 
-  // §9.4 Step 6 — "today's queue" progress strip + auto-advance to the
-  // next job on submit. Same query key as "My Installations" (shares its
-  // cache), filtered to the same READY_STATUSES gate that screen already
-  // uses to decide what's actually startable right now.
+  // The compact queue query has a different response shape from the main
+  // installation list. A distinct query key prevents corrupting that cache.
   const { data: pendingJobAssignments } = useQuery({
-    queryKey: ['installer-work', profile?.id],
+    queryKey: ['installer-ready-job-queue', profile?.id],
     queryFn: async () => {
       const { data } = await supabase
         .from('shop_assignments')
@@ -417,7 +657,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   async function markItemAvailability(item: WorkItem, unavailable: boolean) {
     if (!profile) return;
     if (!unavailable) {
-      try { await setAvailability(item.id, false, null, null); } catch (e: any) { alert(e.message); return; }
+      try { await setAvailability(item.id, false, null, null); } catch (e: any) { fieldNotice(e.message); return; }
       await queryClient.invalidateQueries({ queryKey: ['shop-work-items-install', shopId] });
       await queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
       return;
@@ -428,8 +668,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   async function saveUnavailable() {
     if (!unavail) return;
     const { item, reason, note, file } = unavail;
-    if (!reason.trim()) { alert('A reason is required.'); return; }
-    if (!file) { alert('A site photo is required.'); return; }
+    if (!reason.trim()) { fieldNotice('A reason is required.'); return; }
+    if (!file) { fieldNotice('A site photo is required.'); return; }
     setUnavailBusy(true);
     try {
       const dataUrl = await new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result)); r.onerror = () => reject(r.error); r.readAsDataURL(file); });
@@ -439,7 +679,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       setUnavail(null);
       await queryClient.invalidateQueries({ queryKey: ['shop-work-items-install', shopId] });
       await queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] });
-    } catch (e: any) { alert(`Could not mark not available: ${e?.message || e}`); } finally { setUnavailBusy(false); }
+    } catch (e: any) { fieldNotice(`Could not mark not available: ${e?.message || e}`); } finally { setUnavailBusy(false); }
   }
 
   // Phase 8 — the Production-side Vehicle Load record for this shop, if
@@ -552,7 +792,11 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     async function createJob() {
       if (!profile || !shop || jobId) return;
       const existing = await supabase.from('installation_jobs').select('id').eq('shop_id', shopId).eq('installer_id', profile.id).order('created_at', { ascending: false }).limit(1);
+      if (existing.error) { setJobBlockedReason(`Cannot load installation job: ${existing.error.message}`); return; }
       if (existing.data && existing.data.length) { setJobId(existing.data[0].id); return; }
+      // Never create a new installation job while redo state is unresolved,
+      // or for a returned correction that must update the existing job.
+      if (correctionsLoading || correctionsFailed || (correctionTasks || []).length > 0) return;
       const { data, error } = await supabase.from('installation_jobs').insert({
         organization_id: profile.organization_id,
         shop_id: shopId,
@@ -571,7 +815,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       }
     }
     createJob();
-  }, [profile, shop, shopId, jobId]);
+  }, [profile, shop, shopId, jobId, correctionsLoading, correctionsFailed, correctionTasks]);
 
   // Resume an interrupted shop exactly from persisted server evidence.
   // Photos are uploaded immediately, so switching to another shop never
@@ -581,25 +825,64 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   useEffect(() => {
     if (!jobId) return;
     let cancelled = false;
-    (async () => {
-      const { data, error } = await supabase
-        .from('installation_proofs')
-        .select('id,storage_path,photo_url,photo_type,angle,work_item_id')
-        .eq('installation_job_id', jobId)
-        .order('captured_at');
-      if (cancelled) return;
-      if (error) {
-        // work_item_id may be absent on an older schema cache; retry legacy.
-        if (/work_item_id|schema cache|column/i.test(error.message || '')) {
-          const legacy = await supabase.from('installation_proofs').select('id,storage_path,photo_url,photo_type,angle').eq('installation_job_id', jobId).order('captured_at');
-          if (!cancelled && !legacy.error) setProofPhotos((legacy.data || []).map((p: any) => ({ id: p.id, storagePath: p.storage_path, url: p.photo_url, type: p.photo_type || 'installed', angle: p.angle || 'other' })));
-        }
-        return;
-      }
-      setProofPhotos((data || []).map((p: any) => ({ id: p.id, storagePath: p.storage_path, url: p.photo_url, type: p.photo_type || 'installed', angle: p.angle || 'other', workItemId: p.work_item_id || undefined })));
-    })();
+    void loadInstallationProofs(jobId)
+      .then(remote=>{if (!cancelled) setProofPhotos(current=>[...remote,...current.filter(p=>p.queued)]);})
+      .catch(error=>{if(!cancelled) console.warn('Unable to refresh installation photos',error);});
     return () => { cancelled = true; };
   }, [jobId]);
+
+  // Keep locally queued photos visible after closing/reopening, including
+  // their original Work Item mapping, until the server confirms them.
+  useEffect(() => {
+    if (!profile?.id) return;
+    let cancelled = false;
+    const refresh = async () => {
+      const pending = await pendingInstallationPhotos(profile.id, shopId);
+      if (cancelled) return;
+      setQueuedCount(pending.length);
+      setProofPhotos(current => {
+        const remote = current.filter(p => !p.queued);
+        return [...remote,...pending.map(p => ({id:`local:${p.id}`,url:p.dataUrl,type:'installed',angle:p.angle,workItemId:p.workItemId||undefined,queued:true}))];
+      });
+    };
+    void refresh();
+    const onResume = () => void refresh();
+    window.addEventListener('focus',onResume);
+    return () => { cancelled = true;window.removeEventListener('focus',onResume); };
+  }, [profile?.id, shopId]);
+
+  useEffect(() => {
+    if (!profile?.id || !online) return;
+    let cancelled = false;
+    const flush = async () => {
+      const results = await syncInstallationPhotos(profile.id);
+      if (cancelled) return;
+      if (results.length) {
+        const remoteById = new Map(results.map(item=>[`local:${item.localId}`,item.remote]));
+        setProofPhotos(current=>current.map(p=>{
+          const uploaded = remoteById.get(p.id || '');
+          return uploaded ? {id:uploaded.id,url:uploaded.url,storagePath:uploaded.storagePath,
+            type:'installed',angle:uploaded.angle,workItemId:uploaded.workItemId} : p;
+        }));
+      }
+      const remaining=await pendingInstallationPhotos(profile.id,shopId);
+      if (cancelled) return;
+      setQueuedCount(remaining.length);
+      if (jobId) {
+        try {
+          const remote=await loadInstallationProofs(jobId);
+          if (cancelled) return;
+          const stillQueued=new Set(remaining.map(x=>`local:${x.id}`));
+          setProofPhotos(current=>[...remote,...current.filter(p=>p.queued&&stillQueued.has(p.id||''))]);
+        } catch (error) { console.warn('Photo sync completed but refresh failed',error); }
+      }
+      if (results.length) void queryClient.invalidateQueries({queryKey:['shop',shopId]});
+    };
+    void flush().catch((error) => console.warn('Photo sync deferred; evidence remains stored on this device:', error));
+    const onReconnect = () => void flush().catch((error) => console.warn('Photo sync retry deferred:', error));
+    window.addEventListener('online', onReconnect);
+    return () => { cancelled = true; window.removeEventListener('online', onReconnect); };
+  }, [profile?.id, shopId, jobId, online, queryClient]);
 
   // Lightweight per-shop UI draft. Uploaded photos themselves live in
   // Supabase (above); this only restores where the installer was in the UI.
@@ -663,7 +946,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       setStep(3);
     } catch (err: any) {
       console.error('[confirmMaterialCheck] failed:', err);
-      alert(`Could not save the material check: ${err?.message || 'Unknown error'}. Please try again.`);
+      fieldNotice(`Could not save the material check: ${err?.message || 'Unknown error'}. Please try again.`);
     } finally {
       setMaterialCheckSaving(false);
     }
@@ -700,87 +983,34 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       console.error('[handlePhotoCaptured] geo-tag stamp failed (non-fatal, uploading unstamped):', stampErr);
     }
 
-    const res = await fetch(uploadDataUrl);
-    const blob = await res.blob();
-    const file = new File([blob], fileName, { type: blob.type });
-    const path = `${profile.organization_id}/${jobId}/installed-${angle}-${Date.now()}-${fileName}`;
-    const { error } = await supabase.storage.from('installation-proof').upload(path, file);
-    if (error) { alert('Upload failed: ' + error.message); return; }
-    const { data: urlData } = supabase.storage.from('installation-proof').getPublicUrl(path);
-
-    // Section 7 — perceptual hash + duplicate-across-shops check. Hashed
-    // from the ORIGINAL (pre-stamp) photo, not the geo-tagged upload — the
-    // stamp's timestamp/address text is different on every capture by
-    // definition, which would poison the perceptual hash and make a truly
-    // reused photo look unique. Never blocks the upload; only flags the
-    // row (and pings Admin/Owner) so a reused photo is visible at
-    // Installation Review, not silently accepted. Wrapped defensively — a
-    // hashing failure should never stop an installer from submitting real
-    // work.
-    let phash: string | null = null;
-    let duplicateFlag = false;
-    let duplicateOf: string | null = null;
-    try {
-      phash = await computeImageHash(dataUrl);
-      if (phash) {
-        const { data: existingHashes } = await supabase
-
-          .from('installation_proofs')
-          .select('id, phash, shop_id')
-          .eq('organization_id', profile.organization_id)
-          .not('phash', 'is', null)
-          .neq('shop_id', shopId)
-          .limit(500);
-        for (const candidate of existingHashes || []) {
-          if (candidate.phash && hammingDistance(phash, candidate.phash) <= DUPLICATE_HASH_THRESHOLD) {
-            duplicateFlag = true;
-            duplicateOf = candidate.id;
-            break;
-          }
-        }
-      }
-    } catch (hashErr) {
-      console.error('[handlePhotoCaptured] duplicate-hash check failed (non-fatal):', hashErr);
-    }
-
-    const proofPayload: any = {
-      organization_id: profile.organization_id,
-      installation_job_id: jobId,
-      shop_id: shopId,
-      storage_path: path,
-      photo_url: urlData.publicUrl,
-      photo_type: 'installed',
-      caption: caption || null,
-      work_item_id: explicitWorkItemId || selectedProofWorkItemId || (approvedItems.length === 1 ? approvedItems[0].id : null),
-      angle,
-      phash,
-      duplicate_flag: duplicateFlag,
-      duplicate_of: duplicateOf,
-      gps_lat: photoGps?.lat ?? null,
-      gps_lng: photoGps?.lng ?? null,
-      gps_accuracy: photoGps?.accuracy ?? null,
+    // Durable-first: do not start a network upload until IndexedDB confirms
+    // that the original marked/geostamped photo is saved on this device.
+    const id = newLocalId();
+    let originalHash: string | null = null;
+    try { originalHash = await computeImageHash(dataUrl); } catch { /* optional duplicate detection */ }
+    const cleanName = fileName.replace(/[^a-zA-Z0-9._-]/g,'_').slice(-90);
+    const entry: PendingInstallationPhoto = {
+      id, workerId:profile.id, organizationId:profile.organization_id,
+      shopId, jobId, path:`${profile.organization_id}/${jobId}/installed-${angle}-${id}-${cleanName}`,
+      dataUrl:uploadDataUrl, originalHash, angle,
+      workItemId: explicitWorkItemId || selectedProofWorkItemId || (approvedItems.length===1?approvedItems[0].id:null),
+      caption:caption || null, gps:photoGps, createdAt:new Date().toISOString(),
     };
-    let insertResult = await supabase.from('installation_proofs').insert(proofPayload).select('id').single();
-    // Compatibility with deployments where the work_item_id migration has not
-    // reached PostgREST's schema cache yet. The proof itself must never be lost.
-    if (insertResult.error && /work_item_id|schema cache|column/i.test(insertResult.error.message || '')) {
-      const { work_item_id: _ignored, ...legacyPayload } = proofPayload;
-      insertResult = await supabase.from('installation_proofs').insert(legacyPayload).select('id').single();
-    }
-    if (insertResult.error) {
-      await supabase.storage.from('installation-proof').remove([path]);
-      throw new Error(`Could not save installation photo: ${insertResult.error.message}`);
-    }
-    const inserted = insertResult.data;
-
-    if (duplicateFlag && inserted) {
-      const { data: admins } = await supabase.from('profiles').select('id').eq('organization_id', profile.organization_id).in('role', ['agency_owner', 'admin']);
-      for (const admin of admins || []) {
-        await createNotification(admin.id, 'Duplicate Installation Photo Suspected', `An installation photo for ${shop?.name || 'a shop'} looks like it may have been reused from another site — review before approving.`, 'warning', '/installation-review');
+    try { await offlineDb.installationPhotos.put(entry); }
+    catch (error) { fieldNotice('Device storage is full or unavailable. The captured photo could not be saved. Free up space and try again.'); throw error; }
+    setQueuedCount(count=>count+1);
+    setProofPhotos(current=>[...current,{id:`local:${id}`,url:uploadDataUrl,type:'installed',angle,
+      workItemId:entry.workItemId||undefined,queued:true}]);
+    if (navigator.onLine) {
+      const synced = await syncInstallationPhoto(entry);
+      if (synced) {
+        setQueuedCount(count=>Math.max(0,count-1));
+        setProofPhotos(current=>current.map(p=>p.id===`local:${id}`
+          ? {id:synced.id,storagePath:synced.storagePath,url:synced.url,type:'installed',
+              angle:synced.angle,workItemId:synced.workItemId} : p));
       }
     }
 
-    setProofPhotos((current) => [...current, { id: inserted?.id, storagePath: path, url: urlData.publicUrl, type: 'installed', angle, workItemId: explicitWorkItemId || selectedProofWorkItemId || (approvedItems.length === 1 ? approvedItems[0].id : undefined) }]);
   }
 
 
@@ -788,7 +1018,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     if (!files?.length) return;
     const targetWorkItemId = explicitWorkItemId || selectedProofWorkItemId;
     if (approvedItems.length > 1 && !targetWorkItemId) {
-      alert('Select the exact work item / measurement before uploading photos.');
+      fieldNotice('Select the exact work item / measurement before uploading photos.');
       return;
     }
     const selected = Array.from(files);
@@ -809,11 +1039,20 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
         failures.push(`${file.name}: ${err?.message || 'Upload failed'}`);
       }
     }
-    if (failures.length) alert(`${uploaded} of ${selected.length} photos uploaded.\n${failures.join('\n')}`);
+    if (failures.length) fieldNotice(`${uploaded} of ${selected.length} photos uploaded.\n${failures.join('\n')}`);
   }
 
   async function deleteInstallationPhoto(photo: { id?: string; storagePath?: string; url: string }) {
-    if (!window.confirm('Delete this installation photo? This will not delete the work item.')) return;
+    if (photo.id?.startsWith('local:')) {
+      const localId = photo.id.slice(6);
+      if (isInstallationPhotoSyncing(localId)) {fieldNotice('This photo is uploading. Retry after it has synced.'); return;}
+      if (!await fieldConfirm('Remove this unsent photo from this device? It cannot be recovered.', 'Remove unsent photo?')) return;
+      await offlineDb.installationPhotos.delete(localId);
+      setQueuedCount(c=>Math.max(0,c-1));
+      setProofPhotos(current=>current.filter(p=>p.id!==photo.id));
+      return;
+    }
+    if (!await fieldConfirm('Remove this installation photo? Its work item remains unchanged.', 'Remove photo?')) return;
     try {
       if (photo.id) {
         const { error } = await supabase.from('installation_proofs').delete().eq('id', photo.id);
@@ -825,14 +1064,14 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       if (photo.storagePath) await supabase.storage.from('installation-proof').remove([photo.storagePath]);
       setProofPhotos((current) => current.filter((p) => p !== photo));
     } catch (err: any) {
-      alert(`Could not delete photo: ${err?.message || 'Unknown error'}`);
+      fieldNotice(`Could not delete photo: ${err?.message || 'Unknown error'}`);
     }
   }
 
   async function uploadMappedGallery() {
     if (!bulkGalleryFiles.length) return;
     const missing = bulkGalleryFiles.findIndex((_, i) => !bulkGalleryMap[i]);
-    if (missing >= 0) { alert(`Choose a work item for photo ${missing + 1}.`); return; }
+    if (missing >= 0) { fieldNotice(`Choose a work item for photo ${missing + 1}.`); return; }
     setBulkUploading(true);
     const failures: string[] = [];
     let uploaded = 0;
@@ -846,7 +1085,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     }
     setBulkUploading(false);
     if (uploaded === bulkGalleryFiles.length) { setBulkGalleryFiles([]); setBulkGalleryMap({}); }
-    if (failures.length) alert(`${uploaded} of ${bulkGalleryFiles.length} photos uploaded.\n${failures.join('\n')}`);
+    if (failures.length) fieldNotice(`${uploaded} of ${bulkGalleryFiles.length} photos uploaded.\n${failures.join('\n')}`);
   }
 
 
@@ -970,10 +1209,54 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       setCompleted(true);
     } catch (err: any) {
       console.error('[completeInstallation] failed:', err);
-      alert(`Failed to complete installation: ${err?.message || 'Unknown error'}. Nothing was marked done — please try again.`);
+      fieldNotice(`Failed to complete installation: ${err?.message || 'Unknown error'}. Nothing was marked done — please try again.`);
     } finally {
       setSubmitting(false);
     }
+  }
+
+  // A redo is NOT a fresh installation. Show the returned evidence, approved
+  // measurements and marked survey references, then replace only the linked proof.
+  // This bypasses the new-install wizard and prevents duplicate submissions.
+  if (correctionsLoading) return <div className="mx-auto max-w-md p-6 text-center text-sm text-slate-500">Checking installation status…</div>;
+  if (correctionsFailed && correctionTasks === undefined) return <div className="mx-auto max-w-md p-4"><div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><p className="font-semibold">Unable to verify corrections</p><p className="mt-2 break-words">{correctionsError instanceof Error ? correctionsError.message : 'Please retry when connected.'}</p><div className="mt-3 flex gap-2"><button type="button" onClick={() => void retryCorrections()} className="rounded-lg bg-slate-900 px-3 py-2 font-medium text-white">Retry</button><button type="button" onClick={() => onExit()} className="rounded-lg border border-slate-300 bg-white px-3 py-2">Back</button></div></div></div>;
+
+  if ((correctionTasks || []).length > 0 && !completed) {
+    const ready = correctionTasks!.every((c: any) => !!c.replacement_saved_at && !redoDrafts[c.id]);
+    return <div className="mx-auto min-h-screen max-w-md bg-slate-50 pb-28">
+      <div className="sticky top-0 z-30 flex items-center gap-3 border-b border-slate-200 bg-white px-4 py-3">
+        <button type="button" onClick={() => onExit()} className="rounded-lg p-1 text-slate-600" aria-label="Back"><ChevronLeft className="h-5 w-5" /></button>
+        <div className="min-w-0"><h1 className="truncate text-sm font-semibold text-slate-900">Installation corrections</h1><p className="truncate text-xs text-slate-500">{shop?.name || 'Shop'} · {(correctionTasks || []).length} returned</p></div>
+      </div>
+      <CameraCapture open={!!cameraFor?.startsWith('redo:')} onClose={() => setCameraFor(null)} title="Replacement installation proof"
+        onCapture={(dataUrl, name) => { const selected = correctionTasks!.find((c: any) => c.id === cameraFor?.slice(5)); if (selected) void queueRedoImage(selected, dataUrl, name); }} />
+      <div className="space-y-3 p-3">
+        {!online && <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800">Offline — captured evidence remains on this device and will retry on reconnect.</div>}
+        <p className="text-xs leading-5 text-slate-600">Only returned items need correction. Approved records stay unchanged. Replacement proof takes the place of the old submitted proof when saved.</p>
+        {correctionTasks!.map((c: any, index: number) => {
+          const originalProof = proofPhotos.find((proof) => proof.id === c.installation_proof_id);
+          const itemId = c.work_item_id || originalProof?.workItemId;
+          const item = approvedItems.find((work) => work.id === itemId);
+          const linkedPhotoIds = new Set((boardMarkings || []).filter((mark) => mark.work_item_id === itemId).map((mark) => mark.survey_photo_id));
+          for (const link of surveyPhotoItemLinks || []) if (link.work_item_id === itemId) linkedPhotoIds.add(link.survey_photo_id);
+          const refPhotos = (surveyPhotos || []).filter((photo) => linkedPhotoIds.has(photo.id));
+          const refMarks = (boardMarkings || []).filter((mark) => linkedPhotoIds.has(mark.survey_photo_id));
+          const local = redoDrafts[c.id];
+          const saved = !!c.replacement_saved_at && !local;
+          return <section key={c.id} className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+            <div className="flex items-start justify-between gap-2"><div className="min-w-0"><h2 className="text-sm font-semibold text-slate-900">{index + 1}. {item?.work_type_name || item?.material || 'Installation proof'}</h2><p className="mt-1 text-xs text-slate-500">{item ? `${itemSizeLabel(item)} · Qty ${item.approved_quantity || 1}` : 'Submitted installation evidence'}</p></div><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${saved ? 'bg-emerald-50 text-emerald-700' : local ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-800'}`}>{saved ? 'Saved' : local ? 'Queued' : 'Redo'}</span></div>
+            {c.note && <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900"><strong>Reviewer feedback:</strong> {c.note}</p>}
+            {refPhotos.length > 0 && <div className="mt-3"><p className="mb-2 text-xs font-semibold text-slate-600">Approved marked survey reference</p><MarkedPhotoGrid photos={refPhotos} markings={refMarks} workItems={approvedItems} /></div>}
+            {originalProof?.url && <div className="mt-3"><p className="mb-2 text-xs font-semibold text-slate-600">Previous installation proof</p><img src={originalProof.url} alt="Previously submitted installation proof" className="h-40 w-full rounded-lg bg-slate-100 object-contain" /></div>}
+            {local && <div className="mt-3"><p className="mb-2 text-xs font-semibold text-blue-700">Replacement waiting to sync</p><img src={String(local.payload.dataUrl)} alt="Saved replacement proof" className="h-40 w-full rounded-lg bg-slate-100 object-contain" /></div>}
+            {!saved && <div className="mt-3 flex items-center gap-2"><button onClick={() => setCameraFor(`redo:${c.id}`)} className="flex-1 rounded-xl bg-blue-700 px-3 py-2.5 text-sm font-semibold text-white">Take replacement photo</button><label className="cursor-pointer rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-semibold text-slate-700">Gallery<input type="file" accept="image/*" className="sr-only" onChange={(e) => { const f = e.target.files?.[0]; if (f) void chooseRedoImage(c, f); e.currentTarget.value = ''; }} /></label></div>}
+            {local && <button disabled={!online || redoBusy===c.id} onClick={() => void uploadSavedRedo(local)} className="mt-2 text-xs font-semibold text-blue-700 disabled:opacity-40">{redoBusy===c.id ? 'Syncing…' : 'Retry upload'}</button>}
+          </section>;
+        })}
+        {redoError && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">{redoError}</div>}
+        <button type="button" disabled={!ready || !online || !!redoBusy} onClick={() => void submitRedo()} className="w-full rounded-xl bg-emerald-700 px-3 py-3 text-sm font-semibold text-white disabled:bg-slate-300 disabled:text-slate-600">{redoBusy==='submit' ? 'Submitting…' : ready ? 'Submit corrected installation' : 'Save all returned evidence to submit'}</button>
+      </div>
+    </div>;
   }
 
   if (jobBlockedReason) {
@@ -983,7 +1266,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
           <AlertCircle className="w-16 h-16 text-amber-500 mx-auto mb-4" />
           <h2 className="text-xl font-bold text-slate-900 mb-2">Can't Start Yet</h2>
           <p className="text-sm text-slate-500 mb-6">{jobBlockedReason}</p>
-          <button onClick={() => onExit()} className="w-full bg-slate-900 text-white font-medium py-3 rounded-lg">Back</button>
+          <button onClick={() => onExit()} className="w-full bg-slate-900 text-white text-sm font-medium py-2.5 rounded-lg">Back</button>
         </Card>
       </div>
     );
@@ -1045,15 +1328,15 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
         <div className="fixed inset-0 z-[60] bg-black/60 flex items-end sm:items-center justify-center p-3">
           <div className="bg-white w-full max-w-md rounded-2xl p-4 space-y-3">
             <p className="font-bold text-slate-900">Not Installed — {unavail.item.work_type_name || unavail.item.material || 'work item'}</p>
-            <p className="text-xs text-slate-500">Reason + site ki photo dein. Yeh kaam installed sq.ft / qty / billing me excluded from totals, par history me reason aur photo dikhegi.</p>
+            <p className="text-xs text-slate-500">Provide a reason and a site photo. This work item will be excluded from installed totals; the reason and evidence remain in the audit trail.</p>
             <select value={['Site renovation','Shop closed / Owner unavailable','Permission not granted','Site unavailable / Obstructed','Removed from scope'].includes(unavail.reason) ? unavail.reason : ''} onChange={(e) => setUnavail({ ...unavail, reason: e.target.value })} className="w-full border rounded-lg px-3 py-2 text-sm bg-white">
-              <option value="">Reason chuniye…</option>
+              <option value="">Choose a reason…</option>
               {['Site renovation','Shop closed / Owner unavailable','Permission not granted','Site unavailable / Obstructed','Removed from scope'].map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
-            <input value={unavail.reason} onChange={(e) => setUnavail({ ...unavail, reason: e.target.value })} placeholder="Ya apna reason likhiye" className="w-full border rounded-lg px-3 py-2 text-sm" />
+            <input value={unavail.reason} onChange={(e) => setUnavail({ ...unavail, reason: e.target.value })} placeholder="Or enter a reason" className="w-full border rounded-lg px-3 py-2 text-sm" />
             <input value={unavail.note} onChange={(e) => setUnavail({ ...unavail, note: e.target.value })} placeholder="Comment (optional)" className="w-full border rounded-lg px-3 py-2 text-sm" />
             <label className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-blue-300 bg-blue-50 text-blue-700 text-sm font-semibold py-3 rounded-xl cursor-pointer">
-              <Camera className="w-4 h-4" /> {unavail.file ? `Photo: ${unavail.file.name}` : 'Site ki photo lein / chunein (zaroori)'}
+              <Camera className="w-4 h-4" /> {unavail.file ? `Photo: ${unavail.file.name}` : 'Take or select a site photo (required)'}
               <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => setUnavail({ ...unavail, file: e.target.files?.[0] || null })} />
             </label>
             <div className="flex gap-2">
@@ -1064,6 +1347,14 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
         </div>
       )}
 
+      {(!online || queuedCount > 0) && <div role="status" className="mx-4 mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        {queuedCount > 0 ? `${queuedCount} captured photo(s) saved on this device, waiting to sync.` : 'Offline — photos are saved locally; final submission needs internet.'}
+        {online && queuedCount > 0 && <button type="button" className="ml-2 font-semibold underline" onClick={() => void syncInstallationPhotos(profile!.id).then(async () => {
+          const remaining = await pendingInstallationPhotos(profile!.id, shopId);
+          setQueuedCount(remaining.length);
+          if (jobId) { const remote = await loadInstallationProofs(jobId); setProofPhotos([...remote, ...remaining.map((p) => ({id:`local:${p.id}`,url:p.dataUrl,type:'installed',angle:p.angle,workItemId:p.workItemId||undefined,queued:true}))]); }
+        })}>Retry now</button>}
+      </div>}
       <div className="p-4">
         {step === 1 && shop && (
           <div className="space-y-4">
@@ -1103,10 +1394,19 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                   {proofPhotos.map((p, i) => (
                     <div key={`${p.url}-${i}`} className="relative rounded-lg overflow-hidden bg-slate-100 aspect-[4/3]">
                       <img src={p.url} alt="Installation proof" className="w-full h-full object-contain bg-slate-100" />
-                      <button onClick={() => void deleteInstallationPhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5 shadow" aria-label="Delete photo"><Trash2 className="w-3 h-3" /></button>
+                      
                     </div>
                   ))}
                 </div>
+                <details className="mt-3 rounded-xl border border-slate-200 bg-white p-2">
+                  <summary className="min-h-9 cursor-pointer px-2 py-1.5 text-xs font-medium text-slate-600">Manage photos</summary>
+                  <div className="mt-2 space-y-1 border-t border-slate-100 pt-2">
+                    {proofPhotos.map((photo, i) => <div key={photo.id || photo.storagePath || i} className="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-xs">
+                      <span className="truncate text-slate-600">Photo {i+1} {photo.queued ? '· upload pending' : ''}</span>
+                      <button type="button" onClick={() => void deleteInstallationPhoto(photo)} className="min-h-9 rounded-lg border border-rose-200 px-3 py-1.5 font-medium text-rose-700">Remove</button>
+                    </div>)}
+                  </div>
+                </details>
               </Card>
             )}
 
@@ -1136,8 +1436,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                   ? installableItems.filter((it) => correctionTasks.some((c: any) => c.work_item_id === it.id || (c.installation_proof_id && proofPhotos.some((p) => p.id === c.installation_proof_id && p.workItemId === it.id))))
                   : installableItems;
                 const missingPhoto = targetItems.filter((it) => !proofPhotos.some((p) => p.workItemId === it.id) && !(installableItems.length === 1 && proofPhotos.length > 0));
-                if (missingPhoto.length) { alert(`Photo pending hai: ${missingPhoto.map((it) => it.work_type_name || it.material || 'Work item').join(', ')}.\nCapture a photo for each available item or mark the item as unavailable.`); return; }
-                if (installableItems.length === 0 && unavailableItems.length === 0 && proofPhotos.length === 0) { alert('Add at least one installation photo.'); return; }
+                if (missingPhoto.length) { fieldNotice(`Photos required for: ${missingPhoto.map((it) => it.work_type_name || it.material || 'Work item').join(', ')}.\nCapture a photo for each available item or mark the item as unavailable.`); return; }
+                if (installableItems.length === 0 && unavailableItems.length === 0 && proofPhotos.length === 0) { fieldNotice('Add at least one installation photo.'); return; }
                 setStep(4);
               }}
               className="w-full bg-slate-900 text-white font-semibold py-3.5 rounded-xl"
@@ -1163,7 +1463,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <div className="flex items-start gap-2.5 bg-emerald-50 border-2 border-emerald-300 rounded-xl px-3.5 py-3">
                 <Package className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
                 <div className="min-w-0">
-                  <p className="text-sm font-bold text-emerald-800">Gaadi Load Ho Chuki Hai</p>
+                  <p className="text-sm font-bold text-emerald-800">Vehicle load confirmed</p>
                   <p className="text-xs text-emerald-700 mt-0.5">
                     Vehicle <span className="font-semibold">{vehicleLoad?.vehicle_number}</span>
                     {vehicleLoad?.driver_name ? ` · Driver ${vehicleLoad?.driver_name}` : ''} — quantities shown below are the recorded loaded quantities.
@@ -1220,7 +1520,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               onClick={() => {
                 if (materialCheckConfirmed) { setStep(3); return; }
                 const missing = approvedItems.some((it) => materialLoadedQty[it.id] === undefined || materialLoadedQty[it.id] === '');
-                if (missing) { alert('Enter the loaded quantity for every work item before continuing.'); return; }
+                if (missing) { fieldNotice('Enter the loaded quantity for every work item before continuing.'); return; }
                 confirmMaterialCheck();
               }}
               disabled={materialCheckSaving}
@@ -1238,7 +1538,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
           <div className="space-y-4">
             <p className="text-sm text-slate-600">After installation, capture or upload proof photos. At least one photo is required; add as many angles as the client requires.</p>
 
-            {approvedItems.length > 0 && <Card className="p-3"><div className="flex items-start justify-between gap-2 mb-2"><div><p className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Installation work items</p><p className="text-[11px] text-slate-500 mt-0.5">Install available items. If a surveyed location is unavailable today, mark only that item — it stays in history but is excluded from installed/billing calculations.</p></div></div><div className="space-y-2">{approvedItems.map((it, idx) => { const unavailable = it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active'); return <div key={it.id} className={`rounded-xl border p-3 ${unavailable?'border-amber-300 bg-amber-50':'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-2"><button disabled={!!unavailable} onClick={() => { setSelectedProofWorkItemId(it.id); setCameraFor('installed'); }} className="min-w-0 flex-1 text-left disabled:cursor-default"><p className="font-semibold text-slate-900 text-sm">{it.work_type_name || it.material || `Work Item ${idx + 1}`}</p><p className="text-xs text-slate-500 mt-0.5">{itemSizeLabel(it)} · {Math.round((it.approved_area || 0) * 100) / 100} sq.ft · Qty {it.approved_quantity || 1}</p>{unavailable?<><p className="text-xs font-semibold text-amber-800 mt-1">Not available for installation · excluded from calculation</p><p className="text-[11px] text-amber-700">{it.execution_reason}{it.execution_note?` · ${it.execution_note}`:''}</p></>:<p className="text-xs text-blue-600 font-medium mt-1">Tap to take photo</p>}</button><button type="button" onClick={() => void markItemAvailability(it, !unavailable)} className={`shrink-0 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border ${unavailable?'border-emerald-300 bg-white text-emerald-700':'border-amber-300 bg-amber-50 text-amber-800'}`}>{unavailable?'Make available':'Not available'}</button></div></div>})}</div></Card>}
+            {approvedItems.length > 0 && <Card className="p-3"><div className="flex items-start justify-between gap-2 mb-2"><div><p className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Installation work items</p><p className="text-[11px] text-slate-500 mt-0.5">Install available items. If a surveyed location is unavailable today, mark only that item — it stays in history but is excluded from installed/billing calculations.</p></div></div><div className="space-y-2">{approvedItems.map((it, idx) => { const unavailable = it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active'); return <div key={it.id} className={`rounded-xl border p-3 ${unavailable?'border-amber-300 bg-amber-50':'border-slate-200 bg-white'}`}><div className="flex items-start justify-between gap-2"><button disabled={!!unavailable} onClick={() => { setSelectedProofWorkItemId(it.id); setCameraFor('installed'); }} className="min-w-0 flex-1 text-left disabled:cursor-default"><p className="font-semibold text-slate-900 text-sm">{it.work_type_name || it.material || `Work Item ${idx + 1}`}</p><p className="text-xs text-slate-500 mt-0.5">{itemSizeLabel(it)} · Qty {it.approved_quantity || 1}</p>{unavailable?<><p className="text-xs font-semibold text-amber-800 mt-1">Not available for installation · excluded from calculation</p><p className="text-[11px] text-amber-700">{it.execution_reason}{it.execution_note?` · ${it.execution_note}`:''}</p></>:<p className="text-xs text-blue-600 font-medium mt-1">Tap to take photo</p>}</button><button type="button" onClick={() => void markItemAvailability(it, !unavailable)} className={`shrink-0 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border ${unavailable?'border-emerald-300 bg-white text-emerald-700':'border-amber-300 bg-amber-50 text-amber-800'}`}>{unavailable?'Make available':'Not available'}</button></div></div>})}</div></Card>}
 
             <Card className="p-3 border-slate-200"><label className="block text-xs font-semibold text-slate-700 mb-1">Gallery upload: choose work item</label><select value={selectedProofWorkItemId} onChange={(e) => setSelectedProofWorkItemId(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"><option value="">Select work item...</option>{installableItems.map((it, idx) => <option key={it.id} value={it.id}>{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {itemSizeLabel(it)}</option>)}</select></Card>
 
@@ -1251,27 +1551,28 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <div className="grid grid-cols-3 gap-2">
                 {proofPhotos.map((p, i) => (
                   <div key={i} className="relative rounded-lg overflow-hidden">
-                    <img src={p.url} alt={`${p.angle} installation`} className="w-full h-20 object-cover" />
+                    <img src={p.url} alt={`${p.angle} installation`} className="w-full h-24 object-contain bg-slate-100" />
                     <span className="absolute bottom-1 left-1 bg-black/60 text-white text-[9px] font-medium px-1 py-0.5 rounded capitalize">{p.angle}</span>
-                    <button
-                      onClick={() => setProofPhotos(proofPhotos.filter((_, idx) => idx !== i))}
-                      className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-0.5"
-                      aria-label="Remove photo"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
+                    
                   </div>
                 ))}
               </div>
             )}
+            {proofPhotos.length > 0 && <details className="rounded-xl border border-slate-200 bg-white p-2">
+              <summary className="cursor-pointer px-2 py-1.5 text-xs font-medium text-slate-600">Manage uploaded photos</summary>
+              <div className="mt-2 space-y-1 border-t border-slate-100 pt-2">{proofPhotos.map((photo, index) => <div key={photo.id || photo.storagePath || index} className="flex items-center justify-between gap-2 px-2 py-1 text-xs">
+                <span className="text-slate-600">Photo {index+1}</span>
+                <button type="button" onClick={() => void deleteInstallationPhoto(photo)} className="min-h-9 rounded-lg border border-rose-200 px-3 font-medium text-rose-700">Remove</button>
+              </div>)}</div>
+            </details>}
 
             <button
               onClick={() => {
                 const missingProof = installableItems.find((it) => !proofPhotos.some((p) => p.workItemId === it.id));
-                if (missingProof) { alert(`Add at least one installation photo for ${missingProof.work_type_name || missingProof.material || 'each available work item'}, or mark that work item Not available.`); return; }
+                if (missingProof) { fieldNotice(`Add at least one installation photo for ${missingProof.work_type_name || missingProof.material || 'each available work item'}, or mark that work item Not available.`); return; }
                 setStep(4);
               }}
-              className="w-full bg-slate-900 text-white font-medium py-3 rounded-lg"
+              className="w-full bg-slate-900 text-white text-sm font-medium py-2.5 rounded-lg"
             >
               Continue
             </button>
@@ -1296,8 +1597,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                 <div className="space-y-2">
                   {approvedItems.map((it) => { const unavailable = it.excluded_from_calculations || (it.execution_state && it.execution_state !== 'active'); return (
                     <div key={it.id} className={`rounded-lg px-3 py-2 text-sm border ${unavailable?'bg-amber-50 border-amber-200':'bg-slate-50 border-transparent'}`}>
-                      <div className="flex items-center justify-between gap-2"><div><p className="font-medium text-slate-900">{it.material || it.work_type_name || 'Item'}</p><p className="text-xs text-slate-500">{itemSizeLabel(it)} · Qty {it.approved_quantity || 1}</p></div>{unavailable?<span className="text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-1 rounded-full">NOT INSTALLED · EXCLUDED</span>:<p className="text-xs font-semibold text-blue-600">{it.approved_area != null ? Math.round(it.approved_area) : ''} sq.ft</p>}</div>
-                      {unavailable && <p className="text-[11px] text-amber-700 mt-1">{it.execution_reason || 'Site unavailable'}{it.execution_note?` · ${it.execution_note}`:''} · 0 installed sq.ft / qty for billing</p>}
+                      <div className="flex items-center justify-between gap-2"><div><p className="font-medium text-slate-900">{it.material || it.work_type_name || 'Item'}</p><p className="text-xs text-slate-500">{itemSizeLabel(it)} · Qty {it.approved_quantity || 1}</p></div>{unavailable?<span className="text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-1 rounded-full">NOT INSTALLED</span>:null}</div>
+                      {unavailable && <p className="text-[11px] text-amber-700 mt-1">{it.execution_reason || 'Site unavailable'}{it.execution_note?` · ${it.execution_note}`:''} · Marked not installed</p>}
                     </div>
                   );})}
                 </div>
@@ -1307,7 +1608,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <p className="text-xs text-slate-400 mt-2">These are the measurements approved by your Admin/Owner during survey review — installed as-is, no need to re-enter them.</p>
               <div className="mt-4 border-t border-slate-100 pt-4">
                 <div className="flex items-center justify-between mb-3"><p className="text-sm font-semibold text-slate-900">Installation Photo Review</p><span className="text-xs font-semibold text-blue-600">{proofPhotos.length} photos</span></div>
-                <div className="space-y-3">{approvedItems.map((it, idx) => { const ps = proofPhotos.filter((p) => p.workItemId === it.id); if (!ps.length) return null; return <div key={it.id}><p className="text-xs font-semibold text-slate-600 mb-1.5">{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {ps.length} photo{ps.length > 1 ? 's' : ''}</p><div className="grid grid-cols-3 gap-2">{ps.map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt="Installation proof" className="w-full h-full object-contain bg-slate-100"/><button type="button" onClick={() => void deleteInstallationPhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5" aria-label="Delete photo"><Trash2 className="w-3 h-3"/></button></div>)}</div></div>; })}</div>
+                <div className="space-y-3">{approvedItems.map((it, idx) => { const ps = proofPhotos.filter((p) => p.workItemId === it.id); if (!ps.length) return null; return <div key={it.id}><p className="text-xs font-semibold text-slate-600 mb-1.5">{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {ps.length} photo{ps.length > 1 ? 's' : ''}</p><div className="grid grid-cols-3 gap-2">{ps.map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt="Installation proof" className="w-full h-full object-contain bg-slate-100"/>{p.queued && <span className="absolute bottom-0 inset-x-0 bg-amber-700 px-1 py-0.5 text-center text-[10px] text-white">Upload pending</span>}</div>)}</div></div>; })}</div>
               </div>
               <div className="mt-3">
                 <Textarea label="Note for reviewer (optional)" value={installNotes} onChange={setInstallNotes} rows={2} />
@@ -1318,7 +1619,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <button onClick={() => setStep(1)} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
                 <ChevronLeft className="w-4 h-4" /> Back
               </button>
-              <button onClick={completeInstallation} disabled={submitting} className="bg-blue-600 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex-1">{submitting ? 'Submitting...' : 'Final Submit'}</button>
+              <button onClick={completeInstallation} disabled={submitting || queuedCount>0 || !online} className="bg-blue-600 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex-1">{submitting ? 'Submitting...' : 'Final Submit'}</button>
             </div>
           </div>
         )}
@@ -1337,7 +1638,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <button onClick={() => { setException(null); setStep(1); }} className="flex items-center justify-center gap-1 bg-slate-200 text-slate-700 font-medium py-3 rounded-lg flex-1">
                 <ChevronLeft className="w-4 h-4" /> Back
               </button>
-              <button onClick={completeInstallation} disabled={submitting} className="bg-red-600 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex-1">{submitting ? 'Submitting...' : 'Submit Exception'}</button>
+              <button onClick={completeInstallation} disabled={submitting || queuedCount>0 || !online} className="bg-red-600 disabled:opacity-50 text-white font-semibold py-3 rounded-lg flex-1">{submitting ? 'Submitting...' : 'Submit Exception'}</button>
             </div>
           </div>
         )}
@@ -1455,7 +1756,7 @@ function ApprovedSpecsCard({
                 <div className="mx-4 mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5">
                   <p className="text-[11px] font-bold text-amber-900">NOT INSTALLED — excluded from totals</p>
                   <p className="text-[11px] text-amber-800 mt-0.5">Reason: {it.execution_reason || 'not given'}{it.execution_note ? ` · ${it.execution_note}` : ''}</p>
-                  <button type="button" onClick={() => onRestore(it)} className="mt-1.5 text-xs font-semibold text-blue-700 underline">Wapas installable karein</button>
+                  <button type="button" onClick={() => onRestore(it)} className="mt-1.5 text-xs font-semibold text-blue-700 underline">Restore availability</button>
                 </div>
               ) : (
                 <div className="px-4 pb-2.5 -mt-1 flex justify-end">
@@ -1465,10 +1766,10 @@ function ApprovedSpecsCard({
 
               {open && (
                 <div className="px-4 pb-4 space-y-3">
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-2 gap-2">
                     <div className="rounded-lg bg-white border border-slate-200 p-2.5"><p className="text-[10px] uppercase tracking-wide text-slate-400">Size</p><p className="text-xs font-semibold text-slate-800 mt-1">{itemSizeLabel(it)}</p></div>
                     <div className="rounded-lg bg-white border border-slate-200 p-2.5"><p className="text-[10px] uppercase tracking-wide text-slate-400">Quantity</p><p className="text-xs font-semibold text-slate-800 mt-1">{it.approved_quantity || 1}</p></div>
-                    <div className="rounded-lg bg-white border border-slate-200 p-2.5"><p className="text-[10px] uppercase tracking-wide text-slate-400">Area</p><p className="text-xs font-semibold text-slate-800 mt-1">{it.approved_area != null ? `${Math.round(it.approved_area * 100) / 100} sq.ft` : '—'}</p></div>
+
                   </div>
                   <div className="rounded-xl bg-white border border-slate-200 p-3">
                     <p className="text-[11px] font-bold tracking-wide text-slate-500 uppercase mb-2">Survey reference</p>
@@ -1479,7 +1780,7 @@ function ApprovedSpecsCard({
                     )}
                   </div>
 
-                  {installedCount > 0 && <div className="rounded-xl bg-white border border-slate-200 p-3"><div className="flex items-center justify-between mb-2"><p className="text-[11px] font-bold tracking-wide text-slate-500 uppercase">Installation photos</p><span className="text-[10px] font-semibold text-emerald-700">{installedCount} added</span></div><div className="grid grid-cols-3 gap-2">{proofPhotos.filter((p) => p.workItemId === it.id).map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt={`${label} installation`} className="w-full h-full object-contain bg-slate-100"/><button type="button" onClick={() => onDeletePhoto(p)} className="absolute top-1 right-1 bg-red-600/90 text-white rounded-full p-1.5 shadow" aria-label="Delete installation photo"><Trash2 className="w-3 h-3"/></button></div>)}</div></div>}
+                  {installedCount > 0 && <div className="rounded-xl bg-white border border-slate-200 p-3"><div className="flex items-center justify-between mb-2"><p className="text-[11px] font-bold tracking-wide text-slate-500 uppercase">Installation photos</p><span className="text-[10px] font-semibold text-emerald-700">{installedCount} added</span></div><div className="grid grid-cols-3 gap-2">{proofPhotos.filter((p) => p.workItemId === it.id).map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt={`${label} installation`} className="w-full h-full object-contain bg-slate-100"/></div>)}</div></div>}
 
                   <div className="grid grid-cols-2 gap-2">
                     <button type="button" onClick={() => onTakePhoto(it.id)} className="flex items-center justify-center gap-2 bg-blue-600 active:bg-blue-700 text-white font-semibold py-3 rounded-xl text-sm">
@@ -1542,6 +1843,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
   const [width, setWidth] = useState('');
   const [height, setHeight] = useState('');
   const [unit, setUnit] = useState('ft');
+  const [heightUnit, setHeightUnit] = useState('ft');
   const [quantity, setQuantity] = useState('1');
   const [notes, setNotes] = useState('');
 
@@ -1616,7 +1918,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
         .select('*')
         .eq('purchase_order_id', poId)
         .order('description');
-      if (error) throw new Error(`Could not load this Work Order's budget lines: ${error.message}`);
+      if (error) throw new Error(`Could not load this Work Order's work items: ${error.message}`);
       return data as POLineItemWorkContext[];
     },
     enabled: !!poId,
@@ -1646,44 +1948,11 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
     ? (workTypes || []).find((wt) => wt.id === selectedLineItem.work_type_id)?.name || selectedLineItem.description
     : null;
 
-  // How much has already been logged against every line item on this PO —
-  // summed straight off work_items (org-scoped, no financial lock, unlike
-  // v_po_line_item_utilization which carries `rate`). Powers the live
-  // budget-vs-logged banner exactly like the Surveyor's PO variance banner.
-  const { data: loggedByLineItem } = useQuery({
-    queryKey: ['direct-install-logged', poId, (lineItems || []).map((li) => li.id).join(',')],
-    queryFn: async () => {
-      const ids = (lineItems || []).map((li) => li.id);
-      if (ids.length === 0) return new Map<string, number>();
-      const { data, error } = await supabase
-        .from('work_items')
-        .select('po_line_item_id, installed_area, installed_quantity')
-        .in('po_line_item_id', ids);
-      if (error) { console.error('[DirectInstallWizard] could not load logged-so-far totals:', error.message); return new Map<string, number>(); }
-      const map = new Map<string, number>();
-      for (const row of data || []) {
-        if (!row.po_line_item_id) continue;
-        const li = (lineItems || []).find((l) => l.id === row.po_line_item_id);
-        const areaBased = li ? li.uom === 'sqft' : true;
-        const value = areaBased ? (row.installed_area || 0) : (row.installed_quantity || 0);
-        map.set(row.po_line_item_id, (map.get(row.po_line_item_id) || 0) + value);
-      }
-      return map;
-    },
-    enabled: !!lineItems && lineItems.length > 0,
-  });
-
   const isAreaUom = selectedLineItem ? selectedLineItem.uom === 'sqft' : true;
   const widthNum = parseFloat(width) || 0;
   const heightNum = parseFloat(height) || 0;
   const qtyNum = Math.max(1, parseInt(quantity, 10) || 1);
-  const computedArea = isAreaUom && widthNum > 0 && heightNum > 0 ? areaSqFt(widthNum, unit, heightNum, unit) * qtyNum : 0;
-  const thisMeasurement = isAreaUom ? computedArea : qtyNum;
-
-  const variance = selectedLineItem
-    ? computePOVariance(selectedLineItem, loggedByLineItem?.get(selectedLineItem.id) || 0, thisMeasurement)
-    : null;
-
+  const computedArea = isAreaUom && widthNum > 0 && heightNum > 0 ? areaSqFt(widthNum, unit, heightNum, heightUnit) * qtyNum : 0;
   const canContinueStep1 = !!poId && !!lineItemId;
   const canContinueStep2 = siteName.trim().length > 0 && (isAreaUom ? widthNum > 0 && heightNum > 0 : qtyNum > 0);
 
@@ -1717,9 +1986,14 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
         work_type_id: selectedLineItem.work_type_id,
         work_type_name: workTypeName,
         po_line_item_id: selectedLineItem.id,
-        installed_width: isAreaUom ? widthNum : null,
-        installed_height: isAreaUom ? heightNum : null,
-        installed_unit: isAreaUom ? unit : null,
+        // Store canonical feet for owner-side tally, but retain the exact entered units for display.
+        installed_width: isAreaUom ? toFeet(widthNum, unit) : null,
+        installed_height: isAreaUom ? toFeet(heightNum, heightUnit) : null,
+        installed_unit: isAreaUom ? 'ft' : null,
+        entered_width: isAreaUom ? widthNum : null,
+        entered_height: isAreaUom ? heightNum : null,
+        entered_width_unit: isAreaUom ? unit : null,
+        entered_height_unit: isAreaUom ? heightUnit : null,
         installed_quantity: qtyNum,
         installed_area: isAreaUom ? computedArea : null,
         installed_notes: notes.trim() || null,
@@ -1799,7 +2073,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
       const file = new File([blob], fileName, { type: blob.type });
       const path = `${profile.organization_id}/${jobId}/direct-${angle}-${Date.now()}-${fileName}`;
       const { error: uploadError } = await supabase.storage.from('installation-proof').upload(path, file);
-      if (uploadError) { alert('Photo upload failed: ' + uploadError.message); return; }
+      if (uploadError) { fieldNotice('Photo upload failed: ' + uploadError.message); return; }
       const { data: urlData } = supabase.storage.from('installation-proof').getPublicUrl(path);
 
       const { error: insertError } = await supabase.from('installation_proofs').insert({
@@ -1814,7 +2088,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
         gps_lng: photoGps?.lng ?? null,
         gps_accuracy: photoGps?.accuracy ?? null,
       });
-      if (insertError) { alert('Could not save the photo record: ' + insertError.message); return; }
+      if (insertError) { fieldNotice('Could not save the photo record: ' + insertError.message); return; }
 
       setPhotos((prev) => [...prev, { url: urlData.publicUrl, storagePath: path, angle }]);
       // Cycle front -> side -> other -> other..., matching Section 7's
@@ -1822,7 +2096,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
       setNextAngle((a) => (a === 'front' ? 'side' : 'other'));
     } catch (err: any) {
       console.error('[DirectInstallWizard] handlePhotoCaptured failed:', err);
-      alert(`Could not save that photo: ${err?.message || 'Unknown error'}. Please try again.`);
+      fieldNotice(`Could not save that photo: ${err?.message || 'Unknown error'}. Please try again.`);
     }
   }
 
@@ -1965,14 +2239,12 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
 
             {poId && (
               <>
-                <p className="text-sm font-medium text-slate-700 pt-2">Which budget line does this site count against?</p>
+                <p className="text-sm font-medium text-slate-700 pt-2">Choose the assigned work type for this site</p>
                 {(lineItems || []).length === 0 ? (
-                  <p className="text-xs text-slate-400">Loading budget lines...</p>
+                  <p className="text-xs text-slate-400">Loading work items...</p>
                 ) : (
                   <div className="space-y-2">
                     {(lineItems || []).map((li) => {
-                      const logged = loggedByLineItem?.get(li.id) || 0;
-                      const budget = li.uom === 'sqft' ? li.budgeted_area : li.budgeted_qty;
                       return (
                         <button
                           key={li.id}
@@ -1980,11 +2252,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
                           className={`w-full text-left p-3 rounded-xl border-2 transition ${lineItemId === li.id ? 'border-amber-500 bg-amber-50' : 'border-slate-200 bg-white'}`}
                         >
                           <p className="font-medium text-slate-900 text-sm">{li.description}</p>
-                          {budget != null && (
-                            <p className="text-xs text-slate-500 mt-0.5">
-                              {logged.toLocaleString('en-IN')} / {budget.toLocaleString('en-IN')} {li.uom === 'sqft' ? 'sqft' : li.uom} logged so far
-                            </p>
-                          )}
+
                         </button>
                       );
                     })}
@@ -2050,27 +2318,22 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
               {isAreaUom ? (
                 <div className="grid grid-cols-3 gap-2 mb-2">
                   <Input label="Width" type="number" value={width} onChange={setWidth} placeholder="0" />
+                  <Select label="Width unit" value={unit} onChange={setUnit} options={LENGTH_UNIT_OPTIONS} />
                   <Input label="Height" type="number" value={height} onChange={setHeight} placeholder="0" />
-                  <Select label="Unit" value={unit} onChange={setUnit} options={LENGTH_UNIT_OPTIONS} />
+                  <Select label="Height unit" value={heightUnit} onChange={setHeightUnit} options={LENGTH_UNIT_OPTIONS} />
                 </div>
               ) : null}
               <div className="grid grid-cols-2 gap-2">
                 <Input label="Quantity" type="number" value={quantity} onChange={setQuantity} placeholder="1" />
                 {isAreaUom && (
                   <div className="flex flex-col justify-end">
-                    <p className="text-xs text-slate-400 mb-1">Total Area</p>
-                    <p className="text-lg font-bold text-slate-900">{computedArea > 0 ? `${computedArea.toFixed(1)} sqft` : '—'}</p>
+                    <p className="text-xs text-slate-500 mb-1">Recorded measurements</p>
+                    <p className="text-sm font-medium text-slate-900">{width || '—'} {unit} × {height || '—'} {heightUnit}</p>
                   </div>
                 )}
               </div>
 
-              {variance && variance.budgeted != null && (
-                <div className={`mt-3 rounded-lg p-3 text-xs ${variance.exceeds ? 'bg-amber-50 border border-amber-200 text-amber-700' : 'bg-slate-50 border border-slate-200 text-slate-600'}`}>
-                  {variance.exceeds && <AlertCircle className="w-4 h-4 inline mr-1" />}
-                  Running total after this site: {variance.runningTotal.toLocaleString('en-IN')} / {variance.budgeted.toLocaleString('en-IN')} {variance.isAreaUom ? 'sqft' : ''} budgeted
-                  {variance.exceeds ? ` — ${variance.exceedsBy.toLocaleString('en-IN')} over budget. You can still submit; flagging this for the office to see.` : ''}
-                </div>
-              )}
+
 
               <div className="mt-3">
                 <Textarea label="Notes (optional)" value={notes} onChange={setNotes} rows={2} placeholder="Anything the office should know" />

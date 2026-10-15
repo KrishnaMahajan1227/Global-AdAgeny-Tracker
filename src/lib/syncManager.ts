@@ -43,6 +43,9 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
         .single();
       if (error || !data) throw new Error(error?.message || 'Could not create survey record');
       surveyId = data.id;
+      draft.surveyId = data.id;
+      draft.isLocalSurveyId = false;
+      await offlineDb.surveyDrafts.update(draft.id, {surveyId:data.id,isLocalSurveyId:false});
       await supabase.from('shops').update({ status: 'survey_started' }).eq('id', draft.shopId);
     }
 
@@ -57,37 +60,45 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
         uploadedPhotoIdByLocalId.set(photo.localId, photo.photoId);
         continue;
       }
-      const file = dataUrlToFile(photo.dataUrl, photo.fileName);
-      const path = `${draft.organizationId}/${surveyId}/${Date.now()}-${photo.fileName}`;
-      const { error: uploadError } = await supabase.storage.from('survey-photos').upload(path, file);
-      if (uploadError) throw new Error(`Photo upload failed: ${uploadError.message}`);
-      const { data: urlData } = supabase.storage.from('survey-photos').getPublicUrl(path);
-      const { data: photoRow, error: photoInsertError } = await supabase
-        .from('survey_photos')
-        .insert({
-          organization_id: draft.organizationId,
-          survey_id: surveyId,
-          shop_id: draft.shopId,
-          storage_path: path,
-          photo_url: urlData.publicUrl,
-          photo_type: 'survey',
-          capture_lat: photo.captureLat ?? null, capture_lng: photo.captureLng ?? null,
-          capture_accuracy: photo.captureAccuracy ?? null, captured_at: photo.capturedAt ?? null,
-        })
-        .select()
-        .single();
-      if (photoInsertError || !photoRow) throw new Error(photoInsertError?.message || 'Could not save photo record');
+      // Stable storage path and server read-before-insert: after a network
+      // timeout we must resume the same photo, not create another copy.
+      const path = `${draft.organizationId}/${surveyId}/offline-${photo.localId}-${photo.fileName.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+      let lookup = await supabase.from('survey_photos').select('id,photo_url')
+        .eq('survey_id',surveyId).eq('storage_path',path).maybeSingle();
+      if (lookup.error) throw new Error(lookup.error.message);
+      let photoRow = lookup.data;
+      if (!photoRow) {
+        const file = dataUrlToFile(photo.dataUrl, photo.fileName);
+        const { error: uploadError } = await supabase.storage.from('survey-photos').upload(path, file);
+        if (uploadError && !/already exists|duplicate|409|resource exists/i.test(uploadError.message))
+          throw new Error(`Photo upload failed: ${uploadError.message}`);
+        const { data: urlData } = supabase.storage.from('survey-photos').getPublicUrl(path);
+        const inserted = await supabase.from('survey_photos').insert({
+          organization_id:draft.organizationId, survey_id:surveyId, shop_id:draft.shopId,
+          storage_path:path, photo_url:urlData.publicUrl, photo_type:'survey',
+          capture_lat:photo.captureLat??null, capture_lng:photo.captureLng??null,
+          capture_accuracy:photo.captureAccuracy??null, captured_at:photo.capturedAt??null,
+        }).select('id,photo_url').single();
+        if (inserted.error) {
+          lookup = await supabase.from('survey_photos').select('id,photo_url')
+            .eq('survey_id',surveyId).eq('storage_path',path).maybeSingle();
+          if (lookup.error || !lookup.data) throw new Error(inserted.error.message);
+          photoRow = lookup.data;
+        } else photoRow = inserted.data;
+      }
+      if (!photoRow) throw new Error('Photo row was not confirmed');
       photo.uploaded = true;
       photo.storagePath = path;
-      photo.photoUrl = urlData.publicUrl;
+      photo.photoUrl = photoRow.photo_url;
       photo.photoId = photoRow.id;
       uploadedPhotoIdByLocalId.set(photo.localId, photoRow.id);
+      await offlineDb.surveyDrafts.update(draft.id,{photos:draft.photos});
     }
 
     // 3) Work items — and, for any board that was marked, its
     // board_markings row (points as % of the image, linked to the exact
     // survey_photo it was drawn on).
-    for (const item of draft.workItems) {
+    for (const [itemIndex,item] of draft.workItems.entries()) {
       const wRaw = parseFloat(item.width) || 0;
       const hRaw = parseFloat(item.height) || 0;
       const qty = parseInt(item.quantity) || 1;
@@ -99,7 +110,10 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
       // produced a wrong number, which converting first avoids.
       const w = toFeet(wRaw, item.unit);
       const h = toFeet(hRaw, item.heightUnit || item.unit);
-      const { data: workItemRow, error: workItemError } = await supabase
+      const savedId = draft.syncedWorkItems?.[String(itemIndex)];
+      let workItemRow: {id:string} | null = savedId ? {id:savedId} : null;
+      if (!savedId) {
+        const { data, error: workItemError } = await supabase
         .from('work_items')
         .insert({
           organization_id: draft.organizationId,
@@ -108,32 +122,20 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
           work_type_id: item.work_type_id || null,
           work_type_name: item.work_type_name || 'Other',
           material: item.material || null,
-          survey_width: w,
-          survey_height: h,
-          survey_unit: 'ft',
-          entered_width: wRaw,
-          entered_height: hRaw,
+          survey_width: w, survey_height: h, survey_unit: 'ft',
+          entered_width: wRaw, entered_height: hRaw,
           entered_width_unit: item.unit || 'ft',
           entered_height_unit: item.heightUnit || item.unit || 'ft',
-          survey_quantity: qty,
-          // w and h are already rounded (toFeet does it), but their
-          // product can still land on more than 2 decimals (e.g.
-          // 6.56 * 3.28 = 21.5168) — round the area too so it's never
-          // the odd-one-out decimal on a screen that otherwise shows
-          // clean numbers.
-          survey_area: Math.round(w * h * qty * 100) / 100,
-          survey_notes: item.notes || null,
-          status: 'surveyed',
-          // Section 8 — auto-resolved in the wizard when the shop's PO has
-          // exactly one line item for this work type, so the PO-aware
-          // budget comparison (live in the wizard, and again on Survey
-          // Review) has something to compare against from the moment the
-          // work item exists, without waiting on a separate manual link.
+          survey_quantity: qty, survey_area: Math.round(w * h * qty * 100) / 100,
+          survey_notes: item.notes || null, status: 'surveyed',
           po_line_item_id: item.po_line_item_id || null,
-        })
-        .select()
-        .single();
-      if (workItemError) throw new Error(workItemError.message);
+        }).select('id').single();
+        if (workItemError || !data) throw new Error(workItemError?.message || 'Could not save work item');
+        workItemRow = data;
+        draft.syncedWorkItems = {...draft.syncedWorkItems,[String(itemIndex)]:data.id};
+        // A successfully created item is now resumed, not created again.
+        await offlineDb.surveyDrafts.update(draft.id,{syncedWorkItems:draft.syncedWorkItems});
+      }
 
       // Auto-seed the BOM/consumables checklist from this work type's
       // default consumables (Owner Console template) — same pattern
@@ -143,7 +145,7 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
       // source='consumable' so Production can group/label them apart from
       // hand-added components while using the exact same ready/pending
       // gate (migration 0028).
-      if (item.work_type_id && workItemRow) {
+      if (!savedId && item.work_type_id && workItemRow) {
         const { data: defaultConsumables, error: consumablesError } = await supabase
           .from('work_type_consumables')
           .select('consumable_name, qty_per_unit')
@@ -169,8 +171,12 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
       if (item.photoLocalId && workItemRow) {
         const linkedPhotoId = uploadedPhotoIdByLocalId.get(item.photoLocalId);
         if (linkedPhotoId) {
-          const { error: linkErr } = await supabase.from('survey_photo_items').insert({ organization_id: draft.organizationId, survey_photo_id: linkedPhotoId, work_item_id: workItemRow.id });
-          if (linkErr && !/duplicate|survey_photo_items|schema cache/i.test(linkErr.message || '')) console.error('[syncDraft] photo link failed:', linkErr.message);
+          const existingLink = await supabase.from('survey_photo_items').select('survey_photo_id')
+            .eq('survey_photo_id',linkedPhotoId).eq('work_item_id',workItemRow.id).limit(1);
+          if (!existingLink.error && !existingLink.data?.length) {
+            const {error:linkErr}=await supabase.from('survey_photo_items').insert({organization_id:draft.organizationId,survey_photo_id:linkedPhotoId,work_item_id:workItemRow.id});
+            if (linkErr && !/duplicate|survey_photo_items|schema cache/i.test(linkErr.message||'')) throw new Error(linkErr.message);
+          } else if (existingLink.error && !/survey_photo_items|schema cache/i.test(existingLink.error.message)) throw new Error(existingLink.error.message);
         }
       }
 
@@ -182,13 +188,16 @@ export async function syncDraft(draft: SurveyDraft): Promise<{ ok: boolean; erro
           // the actual photo and computes its real dimensions at render
           // time, so we don't need to (and shouldn't block submission to)
           // measure it here.
-          await supabase.from('board_markings').insert({
-            organization_id: draft.organizationId,
-            survey_photo_id: surveyPhotoId,
-            work_item_id: workItemRow?.id || null,
-            points: item.points,
-            version: 1,
-          });
+          const existingMark = await supabase.from('board_markings').select('id')
+            .eq('survey_photo_id',surveyPhotoId).eq('work_item_id',workItemRow?.id).limit(1);
+          if (existingMark.error) throw new Error(existingMark.error.message);
+          if (!existingMark.data?.length) {
+            const {error:markError} = await supabase.from('board_markings').insert({
+              organization_id:draft.organizationId,survey_photo_id:surveyPhotoId,
+              work_item_id:workItemRow?.id||null,points:item.points,version:1,
+            });
+            if (markError) throw new Error(markError.message);
+          }
         }
       }
     }

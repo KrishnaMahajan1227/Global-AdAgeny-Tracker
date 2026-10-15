@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
@@ -9,7 +9,7 @@ import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { LayoutDashboard, Building2, FileCheck, Palette,
   Printer, Wrench, FileText, IndianRupee, Settings, LogOut, Menu, X, PanelLeftClose, PanelLeftOpen,
-  Map as MapIcon, ClipboardCheck, ClipboardList, Truck, Route as RouteIcon, User,
+  Map as MapIcon, ClipboardCheck, ClipboardList, Route as RouteIcon, User, ChevronRight,
 } from 'lucide-react';
 
 export default function AdminLayout() {
@@ -26,6 +26,8 @@ export default function AdminLayout() {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Restore the existing navigation history, scoped per agency user.
+  const [recentPages, setRecentPages] = useState<{ path: string; label: string }[]>([]);
   const orgId = profile?.organization_id;
 
   const isOwner = profile?.role === 'agency_owner';
@@ -90,7 +92,6 @@ export default function AdminLayout() {
     { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, show: isAdmin || isAccounts },
     { to: '/clients', label: 'Clients', icon: Building2, show: isAdmin },
     { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts, badge: pendingCounts?.clientRequests },
-    { to: '/supply-orders', label: 'Supply Orders', icon: Truck, show: isAdmin || isAccounts },
     { to: '/survey-review', label: 'Survey Review', icon: FileCheck, show: isAdmin, badge: pendingCounts?.survey },
     { to: '/design', label: 'Design Queue', icon: Palette, show: isAdmin || isDesigner, badge: (isAdmin || isDesigner) ? pendingCounts?.design : undefined },
     { to: '/production', label: 'Production', icon: Printer, show: isAdmin || isProduction, badge: (isAdmin || isProduction) ? pendingCounts?.production : undefined },
@@ -102,6 +103,31 @@ export default function AdminLayout() {
     { to: '/owner', label: 'Owner Console', icon: Settings, show: isOwner },
     { to: '/account', label: 'My Account', icon: User, show: true },
   ].filter((item) => item.show);
+
+  useEffect(() => {
+    if (!profile?.id || !profile.organization_id) return;
+    const key = `adroute-admin-recent:${profile.organization_id}:${profile.id}`;
+    const labels: Record<string, string> = {
+      '/dashboard': 'Dashboard', '/clients': 'Clients', '/purchase-orders': 'Work Orders',
+      '/supply-orders': 'Work Orders', '/survey-review': 'Survey Review', '/design': 'Design Queue',
+      '/production': 'Production', '/installation-review': 'Installation Review',
+      '/field-map': 'Field Map', '/route-planning': 'Route Planning', '/reports': 'Reports',
+      '/billing': 'Billing', '/owner': 'Owner Console', '/account': 'My Account', '/shops': 'Shops',
+    };
+    const label = labels[location.pathname] ||
+      Object.entries(labels).find(([prefix]) => location.pathname.startsWith(prefix + '/'))?.[1] || 'Details';
+    const currentPath = location.pathname + location.search;
+    let previous: { path: string; label: string }[] = [];
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem(key) || '[]');
+      if (Array.isArray(parsed)) previous = parsed.filter((p: any) =>
+        typeof p?.path === 'string' && p.path.startsWith('/') && typeof p.label === 'string');
+    } catch { /* Storage may be unavailable; navigation still works. */ }
+    const next = [...previous.filter(p => p.path.split('?')[0] !== location.pathname),
+      { path: currentPath, label }].slice(-3);
+    setRecentPages(next);
+    try { sessionStorage.setItem(key, JSON.stringify(next)); } catch { /* Storage unavailable. */ }
+  }, [location.pathname, location.search, profile?.id, profile?.organization_id]);
 
   async function handleSignOut() {
     await signOut();
@@ -179,7 +205,12 @@ export default function AdminLayout() {
             <button onClick={() => setSidebarOpen(true)} className="lg:hidden text-slate-600">
               <Menu className="w-6 h-6" />
             </button>
-            <div className="flex-1" />
+            <nav aria-label="Recently visited pages" className="ml-3 flex min-w-0 flex-1 items-center gap-1 overflow-hidden text-xs sm:ml-0">
+              {recentPages.map((page, index) => <span key={`${page.path}:${index}`} className="flex min-w-0 items-center gap-1">
+                {index > 0 && <ChevronRight className="h-3 w-3 shrink-0 text-slate-300" />}
+                <Link to={page.path} aria-current={index === recentPages.length - 1 ? 'page' : undefined} title={page.label} className={`max-w-[85px] truncate rounded px-1 py-1 hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-blue-500 sm:max-w-[150px] ${index === recentPages.length - 1 ? 'font-semibold text-slate-900' : 'text-slate-500'}`}>{page.label}</Link>
+              </span>)}
+            </nav>
             <NotificationBell />
           </div>
         </header>

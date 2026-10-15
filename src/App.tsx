@@ -11,7 +11,6 @@ import DashboardPage from '@/pages/DashboardPage';
 import OwnerConsolePage from '@/pages/OwnerConsolePage';
 import { ClientsPage, CampaignsPage, ShopsPage, ShopDetailPage } from '@/pages/ShopsPages';
 import PurchaseOrdersPage from '@/pages/PurchaseOrdersPage';
-import SupplyOrdersPage from '@/pages/SupplyOrdersPage';
 import SurveyReviewPage from '@/pages/SurveyReviewPage';
 import DesignerPage from '@/pages/DesignerPage';
 import ProductionPage from '@/pages/ProductionPage';
@@ -194,7 +193,7 @@ function AppRoutes() {
           <ProtectedRoute allowedRoles={FINANCIAL_ROLES}><PurchaseOrdersPage /></ProtectedRoute>
         } />
         <Route path="/supply-orders" element={
-          <ProtectedRoute allowedRoles={FINANCIAL_ROLES}><SupplyOrdersPage /></ProtectedRoute>
+          <ProtectedRoute allowedRoles={FINANCIAL_ROLES}><Navigate to="/purchase-orders?type=supply_only&workflow=supply" replace /></ProtectedRoute>
         } />
         <Route path="/shops" element={
           <ProtectedRoute allowedRoles={FINANCIAL_ROLES}><ShopsPage /></ProtectedRoute>

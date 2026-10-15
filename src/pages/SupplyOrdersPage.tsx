@@ -1,6 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Link, useSearchParams } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
+import { fetchAllPages } from '@/lib/paginatedQuery';
 import { useAuth } from '@/lib/auth';
 import { Card, StatusBadge, EmptyState, PageHeader, Modal, Input, Select, Textarea } from '@/components/ui';
 import { logAudit, createNotification } from '@/lib/helpers';
@@ -12,46 +14,73 @@ import {
 
 type Tab = 'entries' | 'dispatch';
 
-export default function SupplyOrdersPage() {
-  const [tab, setTab] = useState<Tab>('entries');
+type Props = { embedded?: boolean; workOrderId?: string; initialTab?: Tab };
+
+/** Reuses the existing supply-only entry and dispatch flows inside Work Orders.
+ *  No duplicate route or second supply-specific Work Order list is created. */
+export default function SupplyOrdersPage({ embedded = false, workOrderId = '', initialTab = 'entries' }: Props) {
+  const [routeParams, setRouteParams] = useSearchParams();
+  const [tab, setTab] = useState<Tab>(initialTab);
+  useEffect(() => { setTab(initialTab); }, [initialTab]);
+  const openTab = (nextTab: Tab) => {
+    setTab(nextTab);
+    if (embedded) {
+      const next = new URLSearchParams(routeParams);
+      if (nextTab === 'dispatch') next.set('step', 'dispatch');
+      else next.delete('step');
+      setRouteParams(next, { replace: true });
+    }
+  };
 
   return (
     <div>
-      <PageHeader
-        title="Supply Orders"
-        subtitle="Supply Only POs (tape, nails, flex printing...) — Design → BOM → Production → Packing → zone-wise dispatch. No field survey or on-site install job."
-      />
+      {embedded ? (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
+          <div>
+            <Link className="text-xs font-medium text-blue-700 hover:underline" to={workOrderId ? `/purchase-orders?type=supply_only&order=${encodeURIComponent(workOrderId)}` : '/purchase-orders?type=supply_only'}>← Work Orders</Link>
+            <p className="mt-1 text-sm font-semibold text-slate-900">Supply Only · Execution</p>
+            <p className="text-xs text-slate-500">Design → Production → Dispatch. Work Order selection is maintained across steps.</p>
+          </div>
+          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">Supply Only</span>
+        </div>
+      ) : (
+        <PageHeader title="Supply Only · Execution" subtitle="Design → Production → Dispatch for your existing Supply Only Work Orders." />
+      )}
 
       <div className="flex gap-2 mb-6 border-b border-slate-200">
         <button
-          onClick={() => setTab('entries')}
+          onClick={() => openTab('entries')}
           className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition ${tab === 'entries' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
         >
           <Boxes className="w-4 h-4" /> PO Entries &amp; Design
         </button>
         <button
-          onClick={() => setTab('dispatch')}
+          onClick={() => openTab('dispatch')}
           className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition ${tab === 'dispatch' ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
         >
           <Truck className="w-4 h-4" /> Zone-wise Dispatch
         </button>
       </div>
 
-      {tab === 'entries' ? <ProductionEntriesTab /> : <DispatchTab />}
+      {tab === 'entries' ? <ProductionEntriesTab workOrderId={workOrderId} /> : <DispatchTab workOrderId={workOrderId} />}
     </div>
   );
 }
 
-function ProductionEntriesTab() {
+function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm] = useState({
-    purchase_order_id: '', po_line_item_id: '', shop_mode: 'existing', shop_id: '', new_shop_name: '',
+    purchase_order_id: workOrderId, po_line_item_id: '', shop_mode: 'existing', shop_id: '', new_shop_name: '',
     new_shop_contact_person: '', new_shop_contact_phone: '', new_shop_address: '',
     quantity: '', designer_id: '', notes: '',
   });
+
+  useEffect(() => {
+    setForm(previous => ({ ...previous, purchase_order_id: workOrderId, po_line_item_id: '', shop_id: '' }));
+  }, [workOrderId]);
 
   useRealtimeInvalidate(['purchase_orders', 'shops', 'work_items', 'design_tasks', 'work_item_components'], orgId, [
     ['supply-only-pos', orgId],
@@ -76,18 +105,15 @@ function ProductionEntriesTab() {
     enabled: !!orgId,
   });
 
-  const { data: supplyPOs } = useQuery({
+  const { data: supplyPOs, isLoading: poLoading, error: poError } = useQuery({
     queryKey: ['supply-only-pos', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('purchase_orders')
-        .select('*, clients(name), po_line_items(*, work_types(name))')
-        .eq('organization_id', orgId)
-        .eq('fulfillment_type', 'supply_only')
-        .eq('status', 'active')
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      return data as (PurchaseOrder & { clients: { name: string } | null; po_line_items: (POLineItem & { work_types: { name: string } | null })[] })[];
+      return fetchAllPages<PurchaseOrder & { clients: { name: string } | null; po_line_items: (POLineItem & { work_types: { name: string } | null })[] }>(
+        (from, to) => supabase.from('purchase_orders')
+          .select('*, clients(name), po_line_items(*, work_types(name))')
+          .eq('organization_id', orgId).eq('fulfillment_type', 'supply_only').eq('status', 'active')
+          .order('created_at', { ascending: false }).range(from, to),
+      );
     },
     enabled: !!orgId,
   });
@@ -108,10 +134,12 @@ function ProductionEntriesTab() {
   const { data: producedByLineItem } = useQuery({
     queryKey: ['supply-produced-by-line-item', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('work_items').select('po_line_item_id, produced_quantity, approved_quantity').eq('organization_id', orgId).not('po_line_item_id', 'is', null);
-      if (error) throw error;
+      const data = await fetchAllPages<{ po_line_item_id: string | null; produced_quantity: number | null; approved_quantity: number | null }>(
+        (from, to) => supabase.from('work_items').select('po_line_item_id, produced_quantity, approved_quantity')
+          .eq('organization_id', orgId).not('po_line_item_id', 'is', null).order('id').range(from, to),
+      );
       const map = new Map<string, { produced: number; ordered: number }>();
-      for (const row of data || []) {
+      for (const row of data) {
         if (!row.po_line_item_id) continue;
         const cur = map.get(row.po_line_item_id) || { produced: 0, ordered: 0 };
         cur.produced += row.produced_quantity || 0;
@@ -123,6 +151,7 @@ function ProductionEntriesTab() {
     enabled: !!orgId,
   });
 
+  const visibleSupplyPOs = workOrderId ? (supplyPOs || []).filter(po => po.id === workOrderId) : (supplyPOs || []);
   const selectedPO = (supplyPOs || []).find((po) => po.id === form.purchase_order_id) || null;
   const selectedLineItem = selectedPO?.po_line_items.find((li) => li.id === form.po_line_item_id) || null;
 
@@ -285,12 +314,14 @@ function ProductionEntriesTab() {
       queryClient.invalidateQueries({ queryKey: ['supply-produced-by-line-item', orgId] });
       queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
       setModalOpen(false);
-      setForm({ purchase_order_id: '', po_line_item_id: '', shop_mode: 'existing', shop_id: '', new_shop_name: '', new_shop_contact_person: '', new_shop_contact_phone: '', new_shop_address: '', quantity: '', designer_id: '', notes: '' });
+      setForm({ purchase_order_id: workOrderId, po_line_item_id: '', shop_mode: 'existing', shop_id: '', new_shop_name: '', new_shop_contact_person: '', new_shop_contact_phone: '', new_shop_address: '', quantity: '', designer_id: '', notes: '' });
     },
   });
 
   return (
     <div>
+      {poLoading && <p role="status" className="mb-3 text-sm text-slate-500">Loading Supply Only Work Orders…</p>}
+      {poError && <p role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Could not load Supply Only Work Orders. Refresh to retry.</p>}
       <div className="flex justify-between items-center mb-4">
         <p className="text-sm text-slate-500 max-w-xl">
           Pick a Supply Only PO's line item, set a quantity, and assign a designer — it goes to the Designer's queue first (artwork/layout for foam sheet, vinyl, logo, desk mat...),
@@ -302,7 +333,7 @@ function ProductionEntriesTab() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {supplyPOs?.map((po) => (
+        {visibleSupplyPOs.map((po) => (
           <Card key={po.id} className="p-5">
             <div className="flex items-start justify-between mb-3">
               <div>
@@ -336,7 +367,7 @@ function ProductionEntriesTab() {
             </div>
           </Card>
         ))}
-        {supplyPOs?.length === 0 && (
+        {!poLoading && !poError && visibleSupplyPOs.length === 0 && (
           <Card className="col-span-full">
             <EmptyState icon={<Package className="w-12 h-12" />} title="No Supply Only POs yet" subtitle="Create one from the Purchase Orders page with fulfillment type 'Supply Only'" />
           </Card>
@@ -463,7 +494,7 @@ function ProductionEntriesTab() {
   );
 }
 
-function DispatchTab() {
+function DispatchTab({ workOrderId }: { workOrderId: string }) {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
@@ -474,6 +505,7 @@ function DispatchTab() {
     dispatch_mode: 'staff', transport_mode: '', tracking_reference: '',
   });
   const [createOpen, setCreateOpen] = useState(false);
+  useEffect(() => { setSelectedShopIds(new Set()); }, [workOrderId]);
 
   useRealtimeInvalidate(['shops', 'routes', 'route_stops'], orgId, [
     ['dispatch-ready-shops', orgId],
@@ -481,7 +513,7 @@ function DispatchTab() {
   ]);
 
   const { data: readyShops } = useQuery({
-    queryKey: ['dispatch-ready-shops', orgId],
+    queryKey: ['dispatch-ready-shops', orgId, workOrderId],
     queryFn: async () => {
       const { data, error } = await supabase
         .from('shops')
@@ -491,7 +523,7 @@ function DispatchTab() {
         .order('name');
       if (error) throw error;
       return (data as (Shop & { clients: { name: string } | null; zones: { name: string } | null; purchase_orders: { fulfillment_type: string } | null })[])
-        .filter((s) => s.purchase_orders?.fulfillment_type === 'supply_only');
+        .filter((s) => s.purchase_orders?.fulfillment_type === 'supply_only' && (!workOrderId || s.purchase_order_id === workOrderId));
     },
     enabled: !!orgId,
   });

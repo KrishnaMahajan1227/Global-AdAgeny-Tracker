@@ -116,7 +116,7 @@ export function MarkedPhotoGrid({ photos, markings, workItems }: { photos: Surve
 
   return (
     <div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-2 gap-3">
         {photos.map((photo) => {
           const photoMarkings = markingsByPhotoId.get(photo.id) || [];
           const hasPendingMark = photoMarkings.some((m) => m.points.length >= 3) && !renderedById[photo.id] && !renderFailedIds[photo.id];
@@ -144,7 +144,7 @@ export function MarkedPhotoGrid({ photos, markings, workItems }: { photos: Surve
                 <img
                   src={src}
                   alt="Survey"
-                  className="w-full aspect-square object-contain"
+                  className="w-full aspect-[4/3] object-cover"
                   onError={() => setFailedIds((prev) => ({ ...prev, [photo.id]: true }))}
                 />
                 {hasPendingMark && (
@@ -158,7 +158,7 @@ export function MarkedPhotoGrid({ photos, markings, workItems }: { photos: Surve
                   </span>
                 )}
               </div>
-              {label && <p className="text-[10px] text-slate-500 mt-1 truncate">{label}</p>}
+              {label && <p className="text-xs text-slate-600 mt-1 line-clamp-2">{label}</p>}
             </button>
           );
         })}

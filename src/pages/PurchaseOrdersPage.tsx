@@ -1,6 +1,7 @@
 import { useState, useRef, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams, Link } from 'react-router-dom';
+import SupplyOrdersPage from '@/pages/SupplyOrdersPage';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import {
@@ -80,7 +81,20 @@ function getPrimaryStatus(po: PoRow): { status: string; label: string } {
   return { status: po.status, label: PO_STATUS_LABELS[po.status] || po.status };
 }
 
+/** Existing Supply Only execution is surfaced as a mode of the canonical Work Orders route. */
 export default function PurchaseOrdersPage() {
+  const [routeParams] = useSearchParams();
+  if (routeParams.get('workflow') === 'supply') {
+    return <SupplyOrdersPage
+      embedded
+      workOrderId={routeParams.get('po') || ''}
+      initialTab={routeParams.get('step') === 'dispatch' ? 'dispatch' : 'entries'}
+    />;
+  }
+  return <WorkOrdersList />;
+}
+
+function WorkOrdersList() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
@@ -118,7 +132,25 @@ export default function PurchaseOrdersPage() {
       return next;
     }, { replace: true });
   };
-  const [fulfillmentFilter, setFulfillmentFilter] = useState('');
+  // Fulfillment is a primary filter: persist it in the URL for sharing and refresh.
+  const urlFulfillment = searchParams.get('type') || '';
+  const [fulfillmentFilter, setFulfillmentFilter] = useState(() =>
+    FULFILLMENT_OPTIONS.some(option => option.value === urlFulfillment) ? urlFulfillment : ''
+  );
+  useEffect(() => {
+    setFulfillmentFilter(FULFILLMENT_OPTIONS.some(option => option.value === urlFulfillment) ? urlFulfillment : '');
+  }, [urlFulfillment]);
+  const changeFulfillmentFilter = (type: string) => {
+    if (type && !FULFILLMENT_OPTIONS.some(option => option.value === type)) return;
+    setFulfillmentFilter(type);
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous);
+      if (type) next.set('type', type);
+      else next.delete('type');
+      next.delete('order');
+      return next;
+    }, { replace: true });
+  };
   // Combined "Campaign" filter value — either `proj:<project id>` (this
   // agency's own campaign) or `camp:<client campaign id>` (a client's
   // campaign), since a PO's campaign grouping can be either depending on
@@ -593,9 +625,9 @@ export default function PurchaseOrdersPage() {
 
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div><h1 className="text-xl font-semibold tracking-tight text-slate-900">Work orders</h1><p className="mt-1 text-xs text-slate-500">Track delivery, items and site execution</p></div>
-        <button onClick={openAdd} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"><Plus className="h-4 w-4"/> Add work order</button>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-lg font-semibold tracking-tight text-slate-900">Work Orders</h1>
+        <button type="button" onClick={openAdd} className="inline-flex h-8 items-center gap-1.5 rounded-md bg-blue-600 px-3 text-xs font-medium text-white hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"><Plus className="h-3.5 w-3.5"/> Add Work Order</button>
       </div>
 
       {notice && (
@@ -641,12 +673,19 @@ export default function PurchaseOrdersPage() {
             className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
+        <select aria-label="Filter by fulfillment type" value={fulfillmentFilter} onChange={(e) => changeFulfillmentFilter(e.target.value)} className="min-w-[164px] max-w-full rounded-lg border border-blue-200 bg-blue-50/50 px-3 py-2 text-sm font-medium text-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+          <option value="">All Work Types</option>
+          {FULFILLMENT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
         <select aria-label="Filter work orders by status" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
           <option value="">All statuses</option><option value="active">Active</option><option value="awaiting_response">Awaiting response</option><option value="closed">Closed</option><option value="cancelled">Cancelled</option>
         </select>
         <select aria-label="Sort work orders" value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
           {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>Sort: {o.label}</option>)}
         </select>
+        {fulfillmentFilter === 'supply_only' && (
+          <Link to="/purchase-orders?type=supply_only&workflow=supply" className="inline-flex items-center rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">Supply Workflow →</Link>
+        )}
         <FilterButton activeCount={activeFilterCount} onClick={() => setFilterDrawerOpen(true)} />
         <span className="ml-auto text-xs tabular-nums text-slate-500" role="status">{ordersLoading ? 'Loading…' : `${visiblePos.length.toLocaleString('en-IN')} work orders`}</span>
       </div>
@@ -654,7 +693,7 @@ export default function PurchaseOrdersPage() {
       <FilterDrawer
         open={filterDrawerOpen}
         onClose={() => setFilterDrawerOpen(false)}
-        onClear={() => { setStatusFilter(''); changeClientFilter(''); setFulfillmentFilter(''); setCampaignFilterValue(''); setZoneFilter(''); }}
+        onClear={() => { setStatusFilter(''); changeClientFilter(''); changeFulfillmentFilter(''); setCampaignFilterValue(''); setZoneFilter(''); }}
         activeCount={activeFilterCount}
         resultCount={filteredPos.length}
         resultLabel="Work Orders"
@@ -693,12 +732,6 @@ export default function PurchaseOrdersPage() {
             <p className="text-[11px] text-slate-400 mt-1">Matches Work Orders that have at least one shop in this zone.</p>
           </FilterSection>
         )}
-        <FilterSection label="Fulfillment Type">
-          <select value={fulfillmentFilter} onChange={(e) => setFulfillmentFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Types</option>
-            {FULFILLMENT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        </FilterSection>
       </FilterDrawer>
 
       {clientRequests.length > 0 && (
@@ -753,13 +786,20 @@ export default function PurchaseOrdersPage() {
           {!ordersLoading && !ordersError && pagedPos.map(po => {
             const { completionPct, lineCount } = getPoMetrics(po, utilization || []);
             const primary = getPrimaryStatus(po);
-            return <button type="button" key={po.id} onClick={() => openWorkOrder(po.id)} className="block w-full px-4 py-3 text-left hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
-              <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium text-slate-900">{po.name || po.po_number}</p><p className="mt-0.5 text-xs text-slate-500">{po.po_number} · {po.clients?.name || 'Client not set'}</p></div><StatusBadge status={primary.status} label={primary.label}/></div>
+            return <div key={po.id}>
+              <button type="button" onClick={() => openWorkOrder(po.id)} className="block w-full px-4 py-3 text-left hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+              <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium text-slate-900">{po.name || po.po_number}</p><p className="mt-0.5 text-xs text-slate-500">{po.po_number} · {po.clients?.name || 'Client not set'} · {fulfillmentTypeLabel(po.fulfillment_type)}</p></div><StatusBadge status={primary.status} label={primary.label}/></div>
               <div className="mt-3 flex items-center justify-between gap-3 text-xs text-slate-500"><span>{lineCount} items · {shopCountByPo.get(po.id) || 0} sites</span><span>{new Date(po.po_date).toLocaleDateString('en-IN')}</span></div>
               {completionPct == null
                 ? <p className="mt-2 text-xs text-slate-500">Set planned scope to calculate work completion</p>
                 : <div className="mt-2 flex items-center gap-2"><ProgressBar pct={completionPct} className="flex-1"/><span className="w-10 text-right text-xs text-slate-600">{`${Math.round(completionPct)}%`}</span></div>}
-            </button>;
+              </button>
+              {po.fulfillment_type === 'supply_only' && (
+                <div className="px-4 pb-3">
+                  <Link to={`/purchase-orders?type=supply_only&workflow=supply&po=${encodeURIComponent(po.id)}`} className="inline-flex rounded-md bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100">Manage Supply →</Link>
+                </div>
+              )}
+            </div>;
           })}
           {ordersLoading && <p className="px-4 py-8 text-center text-sm text-slate-500" role="status">Loading work orders…</p>}
           {!ordersLoading && !ordersError && !pagedPos.length && <p className="px-4 py-8 text-center text-sm text-slate-500">No matching work orders.</p>}
@@ -794,7 +834,7 @@ export default function PurchaseOrdersPage() {
                   >
                     <td className="px-4 py-3.5">
                       {po.name && <p className="font-semibold text-slate-900">{po.name}</p>}
-                      <p className={po.name ? 'text-xs text-slate-400 mt-0.5' : 'font-semibold text-slate-900'}>{po.po_number}</p>
+                      <p className={po.name ? 'text-xs text-slate-500 mt-0.5' : 'font-semibold text-slate-900'}>{po.po_number} <span className="ml-1.5 text-[11px] font-medium text-blue-700">· {fulfillmentTypeLabel(po.fulfillment_type)}</span></p>
                       <p className="text-xs text-slate-400 mt-0.5">
                         {lineCount} item{lineCount === 1 ? '' : 's'}{shopCount > 0 ? ` · ${shopCount} shop${shopCount === 1 ? '' : 's'}` : ''}
                       </p>
@@ -825,7 +865,15 @@ export default function PurchaseOrdersPage() {
                     </td>
                     <td className="px-4 py-3.5 text-slate-500 text-xs whitespace-nowrap">{new Date(po.po_date).toLocaleDateString('en-IN')}</td>
                     <td className="px-4 py-3.5">
-                      <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-blue-500 transition-colors" />
+                      {po.fulfillment_type === 'supply_only' ? (
+                        <Link
+                          to={`/purchase-orders?type=supply_only&workflow=supply&po=${encodeURIComponent(po.id)}`}
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => event.stopPropagation()}
+                          aria-label={`Manage supply for ${po.name || po.po_number}`}
+                          className="inline-block whitespace-nowrap rounded-md px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"
+                        >Manage Supply →</Link>
+                      ) : <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-blue-500 transition-colors" />}
                     </td>
                   </tr>
                 );
@@ -1170,7 +1218,7 @@ function WorkOrderDetailDrawer({
 
   return (
     <Drawer open={!!po} onClose={onClose} title={po.name || po.po_number} subtitle={po.name ? `${po.po_number}${po.clients?.name ? ` · ${po.clients.name}` : ''}` : (po.clients?.name || undefined)} width="xl">
-      <div className="space-y-6">
+      <div className="space-y-4">
         <div className="flex flex-wrap items-center gap-1.5">
           <StatusBadge status={primary.status} label={primary.label} />
           <StatusBadge status={po.fulfillment_type} label={fulfillmentTypeLabel(po.fulfillment_type)} />
@@ -1211,24 +1259,32 @@ function WorkOrderDetailDrawer({
             drawer to do (edit it, manage line items, see the shops on it)
             were the last thing you could reach. */}
         <div className="flex flex-wrap gap-2">
-          <button onClick={onEdit} className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition">
+          <button onClick={onEdit} className="inline-flex items-center gap-1.5 rounded-md bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
             <Pencil className="w-4 h-4" /> Edit
           </button>
-          <button onClick={onManageLineItems} className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition">
+          <button onClick={onManageLineItems} className="inline-flex items-center gap-1.5 rounded-md bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
             <ListChecks className="w-4 h-4" /> Line Items & Rates
           </button>
-          <Link to={`/shops?po=${po.id}`} className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition">
+          {po.fulfillment_type === 'supply_only' && (
+            <Link to={`/purchase-orders?type=supply_only&workflow=supply&po=${encodeURIComponent(po.id)}`} className="inline-flex items-center rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">Manage Supply →</Link>
+          )}
+          <Link to={`/shops?po=${po.id}`} className="inline-flex items-center gap-1.5 rounded-md bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
             <Store className="w-4 h-4" /> View Shops{shopCount > 0 ? ` (${shopCount})` : ''}
           </Link>
           {canDelete && (
-            <button
-              onClick={onDelete}
-              title={canHardDelete ? 'No shops or invoices attached — safe to permanently delete' : 'Has shops and/or invoices attached — deleting this Work Order permanently deletes all of them too'}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm font-medium transition bg-red-50 hover:bg-red-100 text-red-600"
-            >
-              <Trash2 className="w-4 h-4" />
-              Delete Work Order
-            </button>
+            <details className="group relative ml-auto self-center">
+              <summary className="cursor-pointer list-none rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">More actions ▾</summary>
+              <div className="absolute right-0 top-full z-10 mt-1 w-48 rounded-md border border-slate-200 bg-white p-1 shadow-lg">
+                <button
+                  type="button"
+                  onClick={onDelete}
+                  title={canHardDelete ? 'Delete permanently (cannot undo)' : 'Caution: this Work Order has linked shops/invoices and records'}
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs font-medium text-red-700 hover:bg-red-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-600"
+                >
+                  <Trash2 className="h-3.5 w-3.5" /> Delete Work Order…
+                </button>
+              </div>
+            </details>
           )}
         </div>
 

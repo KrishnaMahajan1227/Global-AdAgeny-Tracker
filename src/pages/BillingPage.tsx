@@ -11,6 +11,8 @@ import { Plus, FileText, Download, Trash2, ChevronRight, ShoppingCart, AlertTria
 import type { Organization, Client, Invoice, InvoiceItem, PurchaseOrder, POLineItemUtilization, Project } from '@/lib/types';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
 import { buildPendingAllocations, consolidateInvoiceLines, isFinalizedShop, billingStageLabel, type BilledRow, type CompletedWorkRow, type RateRow } from '@/lib/poBilling';
+import { getShopCompletion } from '@/lib/workCompletion';
+import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 
 // Every line item bills by EITHER quantity OR area, never both blindly
 // multiplied together — 'basis' says which one the rate actually applies
@@ -75,6 +77,12 @@ export default function BillingPage() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
+  // Work stage changes must refresh the current billing scope without a full reload.
+  useRealtimeInvalidate(['shops', 'work_items', 'invoice_items', 'invoices', 'po_line_items'], orgId, [
+    ['billing-completed-shops', orgId], ['billing-completed-work-items', orgId],
+    ['billing-work-item-history', orgId], ['po-line-rates-for-billing', orgId],
+    ['invoices', orgId],
+  ]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null);
   const [viewInvoice, setViewInvoice] = useState<any | null>(null);
@@ -182,7 +190,7 @@ export default function BillingPage() {
       const mainShops = await fetchAllPages<any>((a,b) => supabase.from('shops')
         .select('id,name,status,client_id,purchase_order_id')
         .eq('organization_id', orgId!).eq('purchase_order_id', form.purchase_order_id)
-        .in('status', ['installed', 'dispatched', 'billed']).order('id').range(a,b));
+        .order('id').range(a,b));
       // Some backfilled/imported work items were linked to the PO line but
       // the shop header was never assigned purchase_order_id. Find those
       // without broadening access to other clients / other work orders.
@@ -208,6 +216,7 @@ export default function BillingPage() {
     },
     enabled: !!orgId && !!form.purchase_order_id && !!selectedPO && !!poRateData && !editingInvoiceId,
   });
+  const workOrderCompletion = getShopCompletion(completionShopsData ?? EMPTY_SHOPS, selectedPO?.fulfillment_type);
   const completionShops = (completionShopsData ?? EMPTY_SHOPS).filter((shop: any) =>
     isFinalizedShop(selectedPO?.fulfillment_type, shop.status));
   // The shop is an eligibility filter, not a billing unit. Every completed
@@ -924,12 +933,17 @@ export default function BillingPage() {
                       <p className="text-sm font-semibold text-slate-900">{form.bill_to_name || 'Client'}</p>
                       <p className="text-xs text-slate-500">Work Order {selectedPO.po_number} · Completed work eligible for billing</p>
                     </div>
-                    <span className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200">{selectedShopIds.length} {billingStageLabel(selectedPO.fulfillment_type).toLowerCase()} shops included</span>
+                    <span className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200">{workOrderCompletion.completed}/{workOrderCompletion.total} shops completed · {selectedShopIds.length} billable selected</span>
                   </div>
                   {canSelectShops && completionShops.length === 0 &&
                     <p className="mt-2 text-xs text-slate-600">No shops have reached the final {billingStageLabel(selectedPO.fulfillment_type).toLowerCase()} stage for this Work Order.</p>}
-                  {canSelectShops && needsReconciliation.length > 0 &&
-                    <p role="status" className="mt-2 text-xs text-amber-700">{needsReconciliation.length} finalized shop(s) have missing/unmatched completed line-item data or no remaining billable work. Verify their PO linkage and completed measurements before invoicing them.</p>}
+                  {canSelectShops && needsReconciliation.length > 0 && (
+                    <div role="status" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      <p className="font-semibold">{needsReconciliation.length} completed shop(s) require measurement / Work Order linkage verification.</p>
+                      <p className="mt-1">A completed shop counts toward delivery progress, but its quantity is not invented for billing. Record the finished PO work item and its installed quantity or area before invoicing.</p>
+                      <a className="mt-1.5 inline-flex rounded-md px-2 py-1 font-semibold text-blue-700 underline hover:bg-white focus-visible:ring-2 focus-visible:ring-blue-500" href={`/shops?po=${encodeURIComponent(selectedPO.id)}`}>Review these shops in existing Shops screen →</a>
+                    </div>
+                  )}
                   {!poRatesLoading && !poRatesError && poRates.length === 0 &&
                     <p role="alert" className="mt-2 text-xs text-red-700">This Work Order has no line-item rate records. Add PO line items and rates first.</p>}
                   {!canSelectShops && <p role="status" className="mt-2 text-xs text-amber-700">{completionShopsError || completedItemsError || billedWorkError || poRatesError ? 'Could not fetch completed work or Work Order rates. Check permissions, PO links and connection; then retry.' : 'Loading completion and billing history…'}</p>}
@@ -1075,7 +1089,7 @@ export default function BillingPage() {
                         <td className="px-3 py-2.5 text-right font-semibold tabular-nums whitespace-nowrap">₹{Number(item.amount).toLocaleString('en-IN')}</td>
                       </tr>;
                     })}
-                    {!groupedInvoiceItems.length && <tr><td colSpan={7} className="px-3 py-5 text-center text-slate-500">Choose a Work Order with completed, unbilled work.</td></tr>}
+                    {!groupedInvoiceItems.length && <tr><td colSpan={7} className="px-3 py-5 text-center text-slate-500">{workOrderCompletion.completed > 0 ? `${workOrderCompletion.completed} shops finished, but no recorded unbilled work quantity is ready yet. Review the completion records above.` : 'No shops at the final fulfillment stage yet.'}</td></tr>}
                   </tbody>
                 </table>
               </div>

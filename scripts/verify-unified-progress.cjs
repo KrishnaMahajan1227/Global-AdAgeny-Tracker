@@ -1,0 +1,24 @@
+const fs=require('fs'),path=require('path'),ts=require(require.resolve('typescript', {paths:[process.argv[2] || process.cwd(), '/mnt/data/report_billing_work']}));
+const source=fs.readFileSync(path.join(__dirname,'../src/lib/workCompletion.ts'),'utf8');
+const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+const mod={exports:{}};new Function('module','exports',js)(mod,mod.exports);const h=mod.exports;
+function check(ok,msg){if(!ok)throw new Error(msg);console.log('PASS '+msg)}
+const mk=(type,stages)=>h.getShopCompletion(stages.map(status=>({status})),type);
+check(mk('survey_install',['installed','installed','installation_review','surveyed']).completed===2,'Survey+Install final stages');
+check(mk('survey_install',['installation_pending','installing']).completed===0,'Pending installation is not completed');
+check(mk('direct_install',['installed','billed']).percentage===100,'Direct installation final statuses');
+check(mk('supply_only',['dispatched','production_done','delivered']).completed===2,'Supply Only dispatch completion');
+check(mk('survey_install',['cancelled','installed','rejected']).total===1,'Cancelled and rejected excluded');
+check(mk('survey_install',[]).percentage===0,'Zero denominator safe');
+check(h.shopStage('survey_install','installation_review')==='review','Review stays in review bucket');
+check(h.shopStage('supply_only','dispatched')==='complete','Supply dispatch is complete');
+check(h.shopStage('survey_install','dispatched')==='dispatch','Install PO dispatch is not complete');
+const orders=[{id:'a',fulfillment_type:'survey_install',status:'active'},{id:'b',fulfillment_type:'supply_only',status:'active'}];
+const shops=[{purchase_order_id:'a',status:'installed'},{purchase_order_id:'a',status:'surveyed'},{purchase_order_id:'b',status:'dispatched'}];
+const map=h.groupShopCompletion(orders,shops);
+check(map.get('a').percentage===50 && map.get('b').percentage===100,'Per-PO grouping');
+check(h.ordersOperationalPercent(orders,map)===75,'Client/order weighted operational mean');
+check(!h.orderOperationalDone(orders[0],map.get('a'))&&h.orderOperationalDone(orders[1],map.get('b')),'Order done computation');
+check(h.orderOperationalPercent({id:'z',status:'active'},undefined)===0,'Missing shops do not invent progress');
+check(mk('survey_install',[...Array(96).fill('installed'),...Array(48).fill('installation_review')]).percentage===67,'96 of 144 installed shops = 67 percent');
+console.log('ALL 14 REGRESSIONS PASSED');

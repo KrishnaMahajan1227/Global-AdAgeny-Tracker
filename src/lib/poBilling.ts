@@ -1,11 +1,11 @@
+import { isShopFinished } from './workCompletion';
 /** PO-first invoicing: shop IDs are internal evidence, never customer invoice labels. */
 export const money2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 export const qty4 = (value: number): number => Math.round((value + Number.EPSILON) * 10000) / 10000;
 
 /** Last stage is fulfillment-specific; a dispatch is NOT final for installation orders. */
 export function isFinalizedShop(type: string | null | undefined, status: string | null | undefined): boolean {
-  if (type === 'supply_only') return status === 'dispatched' || status === 'billed';
-  return status === 'installed' || status === 'billed';
+  return isShopFinished(type, status);
 }
 
 export function billingStageLabel(type: string | null | undefined): string {
@@ -91,7 +91,11 @@ export function buildPendingAllocations(
     const matches = item.work_type_id
       ? rateRows.filter(row => row.work_type_id && row.work_type_id === item.work_type_id)
       : rateRows.filter(row => row.description.trim().toLowerCase() === (item.work_type_name || '').trim().toLowerCase());
-    return matches.length === 1 ? matches[0] : undefined;
+    if (matches.length === 1) return matches[0];
+    // Many historical imports omit both work-type and PO-line links.
+    // Only a PO with exactly ONE valid line has an unambiguous destination.
+    if (!item.po_line_item_id && rateRows.length === 1) return rateRows[0];
+    return undefined;
   }
   const invoicesByWork = new Map<string, BilledRow[]>();
   const ambiguousShops = new Set<string>();
@@ -130,7 +134,7 @@ export function buildPendingAllocations(
     }
     if (!po) { issues.push('A completed work item has no uniquely matching PO line/rate. Review its Work Order linkage.'); continue; }
     const uom = (po.uom || '').trim().toLowerCase();
-    const basis: 'area' | 'quantity' = ['sqft', 'sq.ft', 'sq ft', 'ft2', 'square feet'].includes(uom) ? 'area' : 'quantity';
+    const basis: 'area' | 'quantity' = ['sqft', 'sq.ft', 'sq ft', 'ft2', 'ft²', 'square feet', 'square foot', 'sq. ft.', 'sq feet'].includes(uom) ? 'area' : 'quantity';
     // Supply-only production records track finished pieces. For sqft POs,
     // derive produced area proportionally from APPROVED measured area/qty.
     // Never use the full approved area when only a subset is produced.

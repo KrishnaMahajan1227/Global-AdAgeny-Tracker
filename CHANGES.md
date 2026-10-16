@@ -1,11 +1,10 @@
-# Changes — Billing only
-- `src/pages/BillingPage.tsx`: compact professional Work Order invoice list, direct Client/PO/Payment/Period filters, pagination, small actions, owner/admin-only typed removal; fix status-update error reporting.
-- `src/lib/poBilling.ts`: unchanged final completed-work calculation helper, included for self-consistent previous-patch baseline.
-- `supabase/migrations/20261026110000_0096_invoice_archive_delete_rpc.sql`: additive private archive + authenticated owner/admin RPC; migration alone deletes no records.
-- `supabase/manual/PREVIEW_OLD_BILLING.sql`: read-only counts/amounts scoped by organization.
-- `supabase/manual/ARCHIVE_AND_CLEAR_OLD_BILLING.sql`: explicitly confirmed transactional agency-only archive and active invoice cleanup.
-- `RESET_OLD_BILLING.ps1`: database password prompt, external backup, preview, confirmation, scoped cleanup.
-- `scripts/verify-po-billing-final.mjs`: existing billing calculation tests.
-- `scripts/verify-billing-safe-ui.mjs`: source/database safety regression checks.
-- `APPLY_MAIN.ps1`, `README.md`, `QA_CHECKLIST.md`: guarded install and QA instructions.
-- No changed dependencies, lockfiles, navigation, reports, shop stage records, payment history tables or unrelated source files.
+# Files the installer will modify (all existing screens reused)
+
+- `src/pages/PurchaseOrdersPage.tsx`: final-stage shop percent in list/mobile/modal and centered modal in place of Work Order drawer.
+- `src/pages/DashboardPage.tsx`: stage-aware live operational shop progress and partial client delivery.
+- `src/pages/ShopsPages.tsx`: Client directory partial completion derived from shop statuses.
+- `src/pages/AgencyHierarchyPage.tsx`: client/campaign work-order delivery derived from linked shops.
+- `src/pages/WorkProgressPage.tsx`: stage-aware final status for dispatched supply-only vs installed installation work.
+- `src/lib/workCompletion.ts` (**added**): canonical calculation helper.
+
+No other file modified. No deletion. No DB migration. No dependencies. No updated source TSX is included directly in ZIP to avoid overwriting other changes: the installer generates it from the exact verified main files.

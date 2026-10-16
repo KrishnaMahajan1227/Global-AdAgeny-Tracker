@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { Card, PageHeader } from '@/components/ui';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
+import { isShopFinished } from '@/lib/workCompletion';
 
 type Stage = 'not_started' | 'survey' | 'design' | 'production' | 'installation' | 'install_review' | 'done' | 'rejected' | 'cancelled';
 const STAGES: { key: Stage; label: string; tone: string }[] = [
@@ -17,7 +18,8 @@ const STAGES: { key: Stage; label: string; tone: string }[] = [
   { key: 'done', label: 'Completed', tone: 'bg-emerald-100 text-emerald-800' },
   { key: 'rejected', label: 'Rejected', tone: 'bg-rose-100 text-rose-800' },
 ];
-function stageOf(status: string): Stage {
+function stageOf(status: string, fulfillmentType?: string | null): Stage {
+  if (isShopFinished(fulfillmentType, status)) return 'done';
   if (status === 'rejected') return 'rejected';
   if (['pending', 'assigned'].includes(status)) return 'not_started';
   if (['survey_started', 'surveyed', 'approval_pending', 'approved'].includes(status)) return 'survey';
@@ -59,17 +61,19 @@ export default function WorkProgressPage() {
     enabled: !!orgId,
     refetchInterval: 20000,
     queryFn: async () => {
-      const [shops, items, assigns] = await Promise.all([
-        fetchAll<any>((a, b) => supabase.from('shops').select('id,name,city,status,client_id,clients(name)').eq('organization_id', orgId!).neq('status', 'cancelled').order('created_at').range(a, b)),
-        fetchAll<any>((a, b) => supabase.from('work_items').select('id,shop_id,status,approved_area,survey_area,installed_area,excluded_from_calculations,execution_reason').eq('organization_id', orgId!).order('created_at').range(a, b)),
+      const [shops, items, assigns, workOrders] = await Promise.all([
+        fetchAll<any>((a, b) => supabase.from('shops').select('id,name,city,status,client_id,purchase_order_id,clients(name)').eq('organization_id', orgId!).neq('status', 'cancelled').order('created_at').range(a, b)),
+        fetchAll<any>((a, b) => supabase.from('work_items').select('id,shop_id,status,approved_area,survey_area,installed_area,produced_quantity,excluded_from_calculations,execution_reason').eq('organization_id', orgId!).order('created_at').range(a, b)),
         fetchAll<any>((a, b) => supabase.from('shop_assignments').select('shop_id,user_id,role,status,profiles(full_name)').eq('organization_id', orgId!).order('assigned_at').range(a, b)),
+        fetchAll<any>((a, b) => supabase.from('purchase_orders').select('id,fulfillment_type').eq('organization_id', orgId!).order('id').range(a, b)),
       ]);
-      return { shops, items, assigns };
+      return { shops, items, assigns, workOrders };
     },
   });
 
   const view = useMemo(() => {
     if (!data) return null;
+    const typeByPo = new Map((data.workOrders || []).map((po: any) => [po.id, po.fulfillment_type]));
     const itemsByShop = new Map<string, any[]>(); data.items.forEach((i) => { (itemsByShop.get(i.shop_id) || itemsByShop.set(i.shop_id, []).get(i.shop_id)!).push(i); });
     const assignByShop = new Map<string, any[]>(); data.assigns.forEach((a) => { (assignByShop.get(a.shop_id) || assignByShop.set(a.shop_id, []).get(a.shop_id)!).push(a); });
     const rows = data.shops.map((s) => {
@@ -78,10 +82,13 @@ export default function WorkProgressPage() {
       const unavailable = its.filter((i) => i.excluded_from_calculations);
       const planned = active.reduce((t, i) => t + num(i.approved_area ?? i.survey_area), 0);
       const done = active.reduce((t, i) => t + num(i.installed_area), 0);
-      const installedCount = active.filter((i) => i.status === 'installed' || num(i.installed_area) > 0).length;
-      const stage = stageOf(s.status);
+      const type = typeByPo.get(s.purchase_order_id);
+      const installedCount = active.filter((i) => type === 'supply_only' ? num(i.produced_quantity) > 0 : (i.status === 'installed' || num(i.installed_area) > 0)).length;
+      const stage = stageOf(s.status, typeByPo.get(s.purchase_order_id) as string | undefined);
       const people = assignByShop.get(s.id) || [];
       const who = (role: string) => people.filter((p) => p.role === role).map((p) => p.profiles?.full_name).filter(Boolean).join(', ');
+      // Physical shop completion comes from the last required stage; measured area
+      // remains unavailable until actual work-item measurements are recorded.
       const pct = stage === 'done' ? 100 : planned > 0 ? Math.min(100, Math.round((done / planned) * 100)) : 0;
       return { s, stage, its, active, unavailable, planned, done, remaining: stage === 'done' ? 0 : Math.max(0, planned - done), installedCount, pct,
         surveyor: who('surveyor'), designer: who('designer'), installer: who('installer'), people };
@@ -145,8 +152,8 @@ export default function WorkProgressPage() {
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-semibold text-slate-800">Operational overview</p><p className="text-xs text-slate-500 mt-1">Portfolio-wide shop completion and installation quantities</p></div><span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">Updated automatically</span></div><div className="mt-4 h-2.5 rounded-full bg-slate-100 overflow-hidden"><div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${totals.pct}%` }} /></div><p className="mt-2 text-xs text-slate-500">{totals.complete.toLocaleString('en-IN')} of {totals.shops.toLocaleString('en-IN')} shops completed ({totals.pct}%)</p></div>
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <Card className="p-4"><p className="text-xs text-slate-500">Total shops</p><p className="text-2xl font-bold text-slate-900">{totals.shops}</p></Card>
-        <Card className="p-4"><p className="text-xs text-slate-500">Complete (installed)</p><p className="text-2xl font-bold text-emerald-700">{totals.complete}</p><p className="text-[11px] text-slate-400">{totals.pct}% shops · {totals.shops - totals.complete} pending</p></Card>
-        <Card className="p-4"><p className="text-xs text-slate-500">Installed sq.ft</p><p className="text-2xl font-bold text-slate-900">{fmt(totals.done)}</p><p className="text-[11px] text-slate-400">planned {fmt(totals.planned)}</p></Card>
+        <Card className="p-4"><p className="text-xs text-slate-500">Completed shops</p><p className="text-2xl font-bold text-emerald-700">{totals.complete}</p><p className="text-[11px] text-slate-400">{totals.pct}% shops · {totals.shops - totals.complete} pending</p></Card>
+        <Card className="p-4"><p className="text-xs text-slate-500">Recorded installed sq.ft</p><p className="text-2xl font-bold text-slate-900">{fmt(totals.done)}</p><p className="text-[11px] text-slate-400">planned {fmt(totals.planned)}</p></Card>
         <Card className="p-4"><p className="text-xs text-slate-500">Remaining area (sq.ft)</p><p className="text-2xl font-bold text-amber-700">{fmt(totals.remaining)}</p></Card>
         <Card className="p-4"><p className="text-xs text-slate-500">Unavailable Items</p><p className="text-2xl font-bold text-slate-700">{totals.unavailableItems}</p><p className="text-[11px] text-slate-400">{fmt(totals.unavailableArea)} sq.ft excluded</p></Card>
       </div>
@@ -184,7 +191,7 @@ export default function WorkProgressPage() {
                 <tr key={r.s.id} onClick={() => navigate(`/shops/${r.s.id}`)} className="hover:bg-slate-50 cursor-pointer">
                   <td className="px-3 py-2.5"><p className="font-medium text-slate-900">{r.s.name}</p><p className="text-[11px] text-slate-400">{r.s.clients?.name}{r.s.city ? ` · ${r.s.city}` : ''}</p></td>
                   <td className="px-3 py-2.5"><span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${st?.tone}`}>{st?.label}</span></td>
-                  <td className="px-3 py-2.5 text-xs text-slate-700">{r.installedCount}/{r.active.length} installed{r.unavailable.length > 0 && <span className="block text-[11px] text-amber-700">{r.unavailable.length} not available{r.unavailable[0]?.execution_reason ? ` — ${r.unavailable[0].execution_reason}` : ''}</span>}</td>
+                  <td className="px-3 py-2.5 text-xs text-slate-700">{r.active.length ? `${r.installedCount}/${r.active.length} work items done` : (r.stage === 'done' ? 'Shop complete · measurements missing' : 'No work items recorded')}{r.unavailable.length > 0 && <span className="block text-[11px] text-amber-700">{r.unavailable.length} not available{r.unavailable[0]?.execution_reason ? ` — ${r.unavailable[0].execution_reason}` : ''}</span>}</td>
                   <td className="px-3 py-2.5 text-xs text-slate-700">{fmt(r.done)} / {fmt(r.planned)}<span className="block text-[11px] text-slate-400">Remaining {fmt(r.remaining)}</span></td>
                   <td className="px-3 py-2.5 w-36"><div className="h-2 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full ${r.pct === 100 ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{ width: `${r.pct}%` }} /></div><p className="text-[11px] text-slate-500 mt-0.5">{r.pct}%</p></td>
                   <td className="px-3 py-2.5 text-xs text-slate-600">{r.surveyor || '—'}</td>

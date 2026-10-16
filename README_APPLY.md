@@ -1,32 +1,32 @@
-# Install this patch on current `main`
+# Apply to existing AdRoute main
 
-Use this **targeted patch**, not a 54MB source snapshot, to preserve all previous AdRoute functionality. The installer is version-guarded and creates backup copies. No database SQL is included.
+1. Ensure local `main` is clean and based on the five source versions recorded in `APPLY_MAIN.ps1`. **Do not force-push or pull**.
+2. Unzip to Downloads, then in **PowerShell** (from any folder):
 
 ```powershell
-$project = 'D:\DarshanAdField'
-$zip = "$env:USERPROFILE\Downloads\AdRoute_Reports_Billing_Main_Refinement.zip"
-$temp = "$env:TEMP\AdRoute_Reports_Billing_Refinement"
+$zip = "$HOME\Downloads\AdRoute_Completed_Shops_Progress_Billing_MAIN_FIX.zip"
+$temp = Join-Path $env:TEMP 'AdRoute_Completion_Fix'
 Expand-Archive -LiteralPath $zip -DestinationPath $temp -Force
-& "$temp\APPLY_MAIN.ps1" -ProjectRoot $project -PatchRoot $temp
-Set-Location $project
-node scripts/verify-report-billing.mjs
+& "$temp\APPLY_MAIN.ps1" -ProjectRoot 'D:\DarshanAdField' -PatchRoot $temp
+Set-Location D:\DarshanAdField
+npm ci
+node scripts/verify-completed-work.cjs .
 npm run typecheck
 npm run lint --if-present
 npm run build
 npm run dev
 ```
 
-If any of the three baseline hashes mismatches, **stop**. Compare local code to this patch; do not force-overwrite newer changes.
+If a step fails, stop. A backup is saved in `%TEMP%`. Full production release requires staging verification with Supabase.
 
-After tests pass, use Git Bash:
+3. In **Git Bash**, only after review passes:
 
 ```bash
 cd /d/DarshanAdField
-git branch --show-current
 git diff --check
-git add src/pages/BillingPage.tsx src/pages/ReportsPage.tsx src/lib/reportPortfolio.ts scripts/verify-report-billing.mjs
-git commit -m "fix: portrait evidence reports and consolidated completed-shop billing"
+git add src/lib/workCompletion.ts src/lib/poBilling.ts src/pages/BillingPage.tsx src/pages/WorkProgressPage.tsx src/pages/PurchaseOrdersPage.tsx src/pages/DashboardPage.tsx scripts/verify-completed-work.cjs
+git commit -m "fix: reconcile shop completion across work orders and billing"
 git push origin main
 ```
 
-No pull, no new branch, and no force push required for this patch.
+There is **no automatic database change**. In Supabase SQL Editor you can run the `READ_ONLY_COMPLETION_AUDIT.sql` query for exact record counts. Backfill records missing real finished measurements require owner verification. `OPTIONAL_SAFE_SINGLE_LINE_LINK_REPAIR.sql` ends with ROLLBACK intentionally.

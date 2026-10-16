@@ -1,38 +1,21 @@
-# AdRoute — PO Billing Staging QA
+# Billing QA — manual acceptance checklist
 
-## Validation before main push
+- [ ] Owner/admin opens Billing; all 3 Work Order types appear with correct client/name/number.
+- [ ] Supply Only: production_done shops NOT ready; dispatched shops eligible, produced units and per-sqft proportions correct.
+- [ ] Survey + Installation: installation_review NOT eligible; installed shops and quantities available.
+- [ ] Direct Installation: installed final shops available; approved-only records NOT billable.
+- [ ] Legacy backfill with installed item status and approved measurement produces an explainable billable quantity.
+- [ ] Backfilled PO-linked work with missing shop purchase_order_id is discovered only for correct client/PO.
+- [ ] Missing measurements, PO line rate, ambiguous invoice allocations produce visible errors (not zero success).
+- [ ] PO has more than 1,000 linked work items/shops; no silent truncation.
+- [ ] Billing summary groups PO line items, NOT customer-facing shop names.
+- [ ] Previously billed work is deducted and cannot be double-invoiced.
+- [ ] GST type, GSTIN, HSN, taxable amount, invoice sequence, dates and payment terms verified.
+- [ ] Save uses only selected eligible completed work, rechecks fresh rates & amounts, and never changes shop operational status.
+- [ ] Old invoice preview performed with actual organization UUID; separate backup verified.
+- [ ] Manual archive/clear SQL tested on staging and counts reconciled; existing POs/shops/evidence unchanged.
+- [ ] PDF invoice accurately matches grouped totals and linked quantity/area.
+- [ ] Build, lint, typecheck pass on current main; browser/mobile tests pass.
+- [ ] Realtime refresh and direct URL role/RLS checks pass.
 
-- [ ] `git branch --show-current` = main, clean baseline before applying
-- [ ] `node scripts/verify-po-billing.mjs` passes all 17 arithmetic checks
-- [ ] `npm run typecheck`, `npm run lint`, `npm run build` all pass
-- [ ] No console errors in Billing or Work Orders
-
-## PO-first invoice UI
-
-- [ ] Select a Work Order directly (client auto-populates), with no required second Client click
-- [ ] Completed and unbilled shops auto-include; expand scope for a subset
-- [ ] One displayed invoice row per PO item (not one invoice per shop)
-- [ ] PO line shows planned, completed, previously invoiced, current invoice and rate
-- [ ] Printed PDF and View Invoice group by PO line; no new invoice description includes shop names
-- [ ] Every stored invoice_items row retains shop_id, work_item_id and po_line_item_id links
-- [ ] Existing invoice PDF, payment status and historical data stay unchanged
-
-## Data and security
-
-- [ ] Survey + Installation uses installed area/qty; not approved quantities
-- [ ] Supply Only uses produced quantities; sqft uses approved area ratio when needed
-- [ ] Non-completed shops never included
-- [ ] Previously billed item quantity deducted; repeat does not bill it again
-- [ ] Invoice-linked legacy items with no work_item_id block re-billing pending reconciliation
-- [ ] Owner/Admin creation works; field/client roles cannot create or query restricted money data
-- [ ] Verify GSTIN, HSN/SAC, intra/inter state GST, PO terms and tax invoice numbering
-- [ ] Verify actual invoice number is unique/serial and issued PDF is compliant
-- [ ] Marking invoice paid no longer offers client-side Delete action
-- [ ] No shop is moved into `billed` status by invoice creation
-- [ ] Test two concurrent invoice posts to the same PO and network failure / resume: current frontend precheck is not a transaction; **do not release for concurrent posting without server-side atomic enforcement**
-
-## Historical billing cleanup
-
-- [ ] Back up invoice and invoice_item tables with external immutable records
-- [ ] Review `BILLING_RECORDS_AUDIT.sql` counts, paid statuses, linked items and invoice numbers
-- [ ] Accountant confirms statutory retention and test-vs-issued status; no historical deletion is included or automatic
+NOT VERIFIED in this environment: live Supabase SQL execution, full Vite build, concurrent server posting and real invoice PDF review.

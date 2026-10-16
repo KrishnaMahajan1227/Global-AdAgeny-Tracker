@@ -2,11 +2,25 @@
 export const money2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 export const qty4 = (value: number): number => Math.round((value + Number.EPSILON) * 10000) / 10000;
 
+/** Last stage is fulfillment-specific; a dispatch is NOT final for installation orders. */
+export function isFinalizedShop(type: string | null | undefined, status: string | null | undefined): boolean {
+  if (type === 'supply_only') return status === 'dispatched' || status === 'billed';
+  return status === 'installed' || status === 'billed';
+}
+
+export function billingStageLabel(type: string | null | undefined): string {
+  return type === 'supply_only' ? 'Dispatched' : 'Installed';
+}
+
+
 export interface CompletedWorkRow {
   id: string;
   shop_id: string;
   po_line_item_id: string | null;
   work_type_name?: string | null;
+  work_type_id?: string | null;
+  shop_status?: string | null;
+  status?: string | null;
   installed_area?: number | null;
   approved_area?: number | null;
   approved_quantity?: number | null;
@@ -20,6 +34,9 @@ export interface RateRow {
   uom: string;
   rate: number | null;
   hsn_code?: string | null;
+  work_type_id?: string | null;
+  budgeted_qty?: number | null;
+  budgeted_area?: number | null;
 }
 export interface BilledRow {
   work_item_id?: string | null;
@@ -67,6 +84,15 @@ export function buildPendingAllocations(
 ): { allocations: BillingAllocation[]; issues: string[] } {
   const selected = new Set(selectedShopIds);
   const byPo = new Map(rateRows.map((row) => [row.po_line_item_id, row]));
+  // Legacy/backfilled items may lack po_line_item_id. Resolve only an unambiguous
+  // work type or exact description within the same PO. Never guess across lines.
+  function locateRate(item: CompletedWorkRow): RateRow | undefined {
+    if (item.po_line_item_id) return byPo.get(item.po_line_item_id);
+    const matches = item.work_type_id
+      ? rateRows.filter(row => row.work_type_id && row.work_type_id === item.work_type_id)
+      : rateRows.filter(row => row.description.trim().toLowerCase() === (item.work_type_name || '').trim().toLowerCase());
+    return matches.length === 1 ? matches[0] : undefined;
+  }
   const invoicesByWork = new Map<string, BilledRow[]>();
   const ambiguousShops = new Set<string>();
   const ambiguousPoLines = new Set<string>();
@@ -87,30 +113,40 @@ export function buildPendingAllocations(
   const seenIds = new Set<string>();
   for (const item of items) {
     if (!selected.has(item.shop_id) || item.excluded_from_calculations) continue;
+    if (item.shop_status && !isFinalizedShop(fulfillmentType, item.shop_status)) {
+      issues.push('Shop has not reached the final fulfillment stage for this Work Order.');
+      continue;
+    }
     if (seenIds.has(item.id)) continue;
     seenIds.add(item.id);
     if (ambiguousShops.has(item.shop_id)) {
       issues.push('An earlier invoice has no work-item allocation. Reconcile its linked work before creating another invoice.');
       continue;
     }
-    if (item.po_line_item_id && ambiguousPoLines.has(item.po_line_item_id)) {
+    const po = locateRate(item);
+    if (po && ambiguousPoLines.has(po.po_line_item_id)) {
       issues.push('A previous PO invoice lacks shop/work-item allocation. Reconcile that line before billing it again.');
       continue;
     }
-    const po = item.po_line_item_id ? byPo.get(item.po_line_item_id) : undefined;
-    if (!po) { issues.push('A completed work item is not linked to a Work Order line item.'); continue; }
+    if (!po) { issues.push('A completed work item has no uniquely matching PO line/rate. Review its Work Order linkage.'); continue; }
     const uom = (po.uom || '').trim().toLowerCase();
     const basis: 'area' | 'quantity' = ['sqft', 'sq.ft', 'sq ft', 'ft2', 'square feet'].includes(uom) ? 'area' : 'quantity';
     // Supply-only production records track finished pieces. For sqft POs,
     // derive produced area proportionally from APPROVED measured area/qty.
     // Never use the full approved area when only a subset is produced.
+    // Backfilled installed work may carry approved dimensions but missing installed
+    // fields. Use them ONLY if the work item is explicitly marked installed;
+    // a survey or approval alone is never billable.
+    const approvedInstalledFallback = fulfillmentType !== 'supply_only' && item.status === 'installed' && isFinalizedShop(fulfillmentType, item.shop_status);
+    const installedArea = nonNegative(item.installed_area) || (approvedInstalledFallback ? nonNegative(item.approved_area) : 0);
+    const installedQuantity = nonNegative(item.installed_quantity) || (approvedInstalledFallback ? nonNegative(item.approved_quantity) : 0);
     const completed = basis === 'area'
       ? fulfillmentType === 'supply_only'
         ? (nonNegative(item.approved_quantity) && nonNegative(item.approved_area)
           ? qty4(nonNegative(item.approved_area) * nonNegative(item.produced_quantity) / nonNegative(item.approved_quantity))
           : 0)
-        : nonNegative(item.installed_area)
-      : nonNegative(fulfillmentType === 'supply_only' ? item.produced_quantity : item.installed_quantity);
+        : installedArea
+      : nonNegative(fulfillmentType === 'supply_only' ? item.produced_quantity : installedQuantity);
     if (completed === 0) {
       if (basis === 'area' && fulfillmentType === 'supply_only' && nonNegative(item.produced_quantity)) {
         issues.push('A produced supply-only item is missing approved area/quantity needed for sq.ft billing.');
@@ -119,7 +155,7 @@ export function buildPendingAllocations(
     }
     let alreadyBilled = 0;
     for (const old of invoicesByWork.get(item.id) || []) {
-      if (old.po_line_item_id && old.po_line_item_id !== item.po_line_item_id) {
+      if (old.po_line_item_id && old.po_line_item_id !== po.po_line_item_id) {
         issues.push('Historical billing line has a mismatched Work Order item.');
         continue;
       }
@@ -135,7 +171,7 @@ export function buildPendingAllocations(
       description: po.description || item.work_type_name || 'Work item',
       hsn: po.hsn_code || '', uom: po.uom || (basis === 'area' ? 'sqft' : 'piece'),
       basis, completed,
-      displayQuantity: nonNegative(fulfillmentType === 'supply_only' ? item.produced_quantity : item.installed_quantity) || 1,
+      displayQuantity: nonNegative(fulfillmentType === 'supply_only' ? item.produced_quantity : installedQuantity) || 1,
       alreadyBilled, pending: remaining, rate, amount: money2(remaining * rate),
     });
   }

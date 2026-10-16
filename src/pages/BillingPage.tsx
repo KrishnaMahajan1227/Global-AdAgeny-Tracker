@@ -10,7 +10,7 @@ import { computeUtilization, formatRupees, UtilizationStage, defaultUtilizationS
 import { Plus, FileText, Download, Trash2, ChevronRight, ShoppingCart, AlertTriangle, Pencil, Info, Search } from 'lucide-react';
 import type { Organization, Client, Invoice, InvoiceItem, PurchaseOrder, POLineItemUtilization, Project } from '@/lib/types';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
-import { buildPendingAllocations, consolidateInvoiceLines, type BilledRow, type CompletedWorkRow, type RateRow } from '@/lib/poBilling';
+import { buildPendingAllocations, consolidateInvoiceLines, isFinalizedShop, billingStageLabel, type BilledRow, type CompletedWorkRow, type RateRow } from '@/lib/poBilling';
 
 // Every line item bills by EITHER quantity OR area, never both blindly
 // multiplied together — 'basis' says which one the rate actually applies
@@ -124,15 +124,10 @@ export default function BillingPage() {
 
   const { data: invoices, isLoading: invoicesLoading, error: invoicesError } = useQuery({
     queryKey: ['invoices', orgId],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('invoices')
-        .select('*, clients(name, address, city, state, gst_number), purchase_orders(po_number, name, payment_terms), invoice_items(*)')
-        .eq('organization_id', orgId)
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      return data;
-    },
+    queryFn: async () => fetchAllPages<any>((a,b) => supabase.from('invoices')
+      .select('*, clients(name, address, city, state, gst_number), purchase_orders(po_number, name, payment_terms), invoice_items(*)')
+      .eq('organization_id', orgId)
+      .order('created_at', { ascending: false }).order('id', { ascending: false }).range(a,b)),
     enabled: !!orgId,
   });
 
@@ -148,12 +143,30 @@ export default function BillingPage() {
     enabled: !!orgId,
   });
 
-  const { data: poUtilization, isLoading: poRatesLoading, error: poRatesError } = useQuery({
+  // PO rates are the authoritative source for billing. Do not rely on the
+  // aggregate utilization view, which may not be installed/accessible in
+  // some older organizations. All pages are loaded (Supabase defaults to 1k).
+  const { data: poRateData, isLoading: poRatesLoading, error: poRatesError } = useQuery({
+    queryKey: ['po-line-rates-for-billing', orgId, form.purchase_order_id],
+    queryFn: async () => {
+      const rows = await fetchAllPages<any>((a,b) => supabase.from('po_line_items')
+        .select('id,description,uom,rate,hsn_code,work_type_id,budgeted_qty,budgeted_area')
+        .eq('organization_id', orgId!).eq('purchase_order_id', form.purchase_order_id)
+        .order('id').range(a,b));
+      return rows.map(row => ({ ...row, po_line_item_id: row.id })) as RateRow[];
+    },
+    enabled: !!orgId && !!form.purchase_order_id,
+  });
+  const poRates = poRateData || [];
+  // Utilization view is presentation-only. A missing/stale view cannot block
+  // valid completed work or prevent an invoice from being prepared.
+  const { data: poUtilization = [] } = useQuery({
     queryKey: ['po-utilization-for-billing', orgId, form.purchase_order_id],
     queryFn: async () => {
-      const { data, error } = await supabase.from('v_po_line_item_utilization').select('*').eq('purchase_order_id', form.purchase_order_id);
-      if (error) throw error;
-      return data as POLineItemUtilization[];
+      try {
+        return await fetchAllPages<POLineItemUtilization>((a,b) => supabase.from('v_po_line_item_utilization')
+          .select('*').eq('purchase_order_id', form.purchase_order_id).order('po_line_item_id').range(a,b));
+      } catch { return [] as POLineItemUtilization[]; }
     },
     enabled: !!orgId && !!form.purchase_order_id,
   });
@@ -161,14 +174,39 @@ export default function BillingPage() {
   const selectedPO = (purchaseOrders || []).find((po) => po.id === form.purchase_order_id) || null;
   const poStage: UtilizationStage = defaultUtilizationStage(selectedPO?.fulfillment_type);
   const { data: completionShopsData, isLoading: completionShopsLoading, error: completionShopsError } = useQuery({
-    queryKey: ['billing-completed-shops', orgId, form.purchase_order_id],
-    queryFn: async () => fetchAllPages<any>((a,b) => supabase.from('shops')
-      .select('id,name,status,client_id,purchase_order_id')
-      .eq('organization_id', orgId!).eq('purchase_order_id', form.purchase_order_id)
-      .in('status', ['installed', 'dispatched', 'billed']).order('id').range(a,b)),
-    enabled: !!orgId && !!form.purchase_order_id && !editingInvoiceId,
+    queryKey: ['billing-completed-shops', orgId, form.purchase_order_id, poRateData],
+    queryFn: async () => {
+      const mainShops = await fetchAllPages<any>((a,b) => supabase.from('shops')
+        .select('id,name,status,client_id,purchase_order_id')
+        .eq('organization_id', orgId!).eq('purchase_order_id', form.purchase_order_id)
+        .in('status', ['installed', 'dispatched', 'billed']).order('id').range(a,b));
+      // Some backfilled/imported work items were linked to the PO line but
+      // the shop header was never assigned purchase_order_id. Find those
+      // without broadening access to other clients / other work orders.
+      const lineIds = (poRateData || []).map(row => row.po_line_item_id);
+      const found = new Map(mainShops.map(shop => [shop.id, shop]));
+      for (let start = 0; start < lineIds.length; start += 100) {
+        const workLinks = await fetchAllPages<{ shop_id: string }>((a,b) => supabase.from('work_items')
+          .select('shop_id').eq('organization_id', orgId!).in('po_line_item_id', lineIds.slice(start, start+100))
+          .order('id').range(a,b));
+        const missing = [...new Set(workLinks.map(row => row.shop_id).filter(id => !found.has(id)))];
+        for (let batchStart = 0; batchStart < missing.length; batchStart += 100) {
+          const { data, error } = await supabase.from('shops')
+            .select('id,name,status,client_id,purchase_order_id')
+            .eq('organization_id', orgId!).eq('client_id', selectedPO!.client_id)
+            .in('id', missing.slice(batchStart, batchStart + 100));
+          if (error) throw error;
+          for (const shop of data || []) {
+            if (!shop.purchase_order_id || shop.purchase_order_id === form.purchase_order_id) found.set(shop.id, shop);
+          }
+        }
+      }
+      return Array.from(found.values());
+    },
+    enabled: !!orgId && !!form.purchase_order_id && !!selectedPO && !!poRateData && !editingInvoiceId,
   });
-  const completionShops = completionShopsData ?? EMPTY_SHOPS;
+  const completionShops = (completionShopsData ?? EMPTY_SHOPS).filter((shop: any) =>
+    isFinalizedShop(selectedPO?.fulfillment_type, shop.status));
   // The shop is an eligibility filter, not a billing unit. Every completed
   // work-item is reconciled against its own historical invoice quantities.
   const { data: billedWorkData, isLoading: billedWorkLoading, error: billedWorkError } = useQuery({
@@ -184,12 +222,17 @@ export default function BillingPage() {
     queryKey: ['billing-completed-work-items', orgId, form.purchase_order_id],
     queryFn: async () => {
       const ids = completionShops.map((shop: any) => shop.id);
+      const statuses = new Map<string, string>(completionShops.map((shop: any) => [String(shop.id), String(shop.status)] as const));
       const rows: CompletedWorkRow[] = [];
       for (let start = 0; start < ids.length; start += 100) {
-        rows.push(...await fetchAllPages<CompletedWorkRow>((a,b) => supabase.from('work_items')
-          .select('id,shop_id,work_type_name,po_line_item_id,installed_area,approved_area,approved_quantity,installed_quantity,produced_quantity,excluded_from_calculations')
+        const batch = await fetchAllPages<CompletedWorkRow>((a,b) => supabase.from('work_items')
+          .select('id,shop_id,status,work_type_id,work_type_name,po_line_item_id,installed_area,approved_area,approved_quantity,installed_quantity,produced_quantity,excluded_from_calculations')
           .eq('organization_id', orgId!).in('shop_id', ids.slice(start, start + 100))
-          .order('id').range(a,b)));
+          .order('id').range(a,b));
+        rows.push(...batch.filter(item => {
+          const shop = completionShops.find((x:any)=>x.id === item.shop_id);
+          return !!shop?.purchase_order_id || !!poRates.find(r => r.po_line_item_id === item.po_line_item_id);
+        }).map(item => ({ ...item, shop_status: statuses.get(item.shop_id) as string | undefined })));
       }
       return rows;
     },
@@ -199,25 +242,30 @@ export default function BillingPage() {
   const canSelectShops = !completionShopsLoading && !completedItemsLoading && !billedWorkLoading && !poRatesLoading
     && !completionShopsError && !completedItemsError && !billedWorkError && !poRatesError;
   const calculatedBatch = useMemo(() => buildPendingAllocations(
-    completedWorkItems, (poUtilization || []) as RateRow[], billedWork,
+    completedWorkItems, poRates, billedWork,
     selectedShopIds, selectedPO?.fulfillment_type,
-  ), [completedWorkItems, poUtilization, billedWork, selectedShopIds, selectedPO?.fulfillment_type]);
+  ), [completedWorkItems, poRateData, billedWork, selectedShopIds, selectedPO?.fulfillment_type]);
   const eligibleShopIds = useMemo(() => new Set(buildPendingAllocations(
-    completedWorkItems, (poUtilization || []) as RateRow[], billedWork,
+    completedWorkItems, poRates, billedWork,
     completionShops.map((shop: any) => shop.id), selectedPO?.fulfillment_type,
-  ).allocations.map((row) => row.shopId)), [completedWorkItems, poUtilization, billedWork, completionShops, selectedPO?.fulfillment_type]);
+  ).allocations.map((row) => row.shopId)), [completedWorkItems, poRateData, billedWork, completionShops, selectedPO?.fulfillment_type]);
   const eligibleShops = completionShops.filter((shop: any) => eligibleShopIds.has(shop.id));
+  // Final-stage shops with no usable work measurement are not silently billed.
+  // Surface them separately so an admin can correct the underlying backfill.
+  const needsReconciliation = completionShops.filter((shop: any) => !eligibleShopIds.has(shop.id) &&
+    !completedWorkItems.some(row => row.shop_id === shop.id &&
+      billedWork.some(old => old.work_item_id === row.id)));
   const filteredEligibleShops = eligibleShops.filter((shop: any) => shop.name.toLowerCase().includes(shopSearch.trim().toLowerCase()));
 
   // First PO load selects its currently unbilled completed scope automatically.
   // Subsequent manual checkbox changes stay respected; no repeated auto-select.
   useEffect(() => {
-    if (editingInvoiceId || !modalOpen || !selectedPO || !canSelectShops || !poUtilization) return;
+    if (editingInvoiceId || !modalOpen || !selectedPO || !canSelectShops || !poRateData) return;
     if (initializedPO !== selectedPO.id) {
       setSelectedShopIds(Array.from(eligibleShopIds));
       setInitializedPO(selectedPO.id);
     }
-  }, [editingInvoiceId, modalOpen, selectedPO, canSelectShops, poUtilization, initializedPO, eligibleShopIds]);
+  }, [editingInvoiceId, modalOpen, selectedPO, canSelectShops, poRateData, initializedPO, eligibleShopIds]);
 
   // Auto-fill actual completed-and-unbilled PO work. Invoice data remains
   // item-linked in the database; only its *presentation* groups by PO line.
@@ -316,7 +364,7 @@ export default function BillingPage() {
         .eq('organization_id', orgId).in('id', selectedShopIds);
       if (verifyShopsError) throw verifyShopsError;
       if ((latestShops || []).length !== selectedShopIds.length || (latestShops || []).some(shop =>
-        shop.client_id !== form.client_id || shop.purchase_order_id !== form.purchase_order_id || !['installed','dispatched','billed'].includes(shop.status))) {
+        shop.client_id !== form.client_id || (shop.purchase_order_id && shop.purchase_order_id !== form.purchase_order_id) || !isFinalizedShop(selectedPO.fulfillment_type, shop.status))) {
         throw new Error('Shop completion changed while preparing the invoice. Refresh the list. No invoice was created.');
       }
       // Revalidate completed quantity and prior invoice lines just before writing.
@@ -324,14 +372,24 @@ export default function BillingPage() {
         .select('work_item_id,shop_id,po_line_item_id,quantity,area,rate,amount,invoices!inner(purchase_order_id)')
         .eq('organization_id', orgId).eq('invoices.purchase_order_id', form.purchase_order_id)
         .order('id').range(a,b));
+      const statuses = new Map<string, string>((latestShops || []).map((shop: any) => [String(shop.id), String(shop.status)] as const));
       const freshWork: CompletedWorkRow[] = [];
       for (let start = 0; start < selectedShopIds.length; start += 100) {
-        freshWork.push(...await fetchAllPages<CompletedWorkRow>((a,b) => supabase.from('work_items')
-          .select('id,shop_id,work_type_name,po_line_item_id,installed_area,approved_area,approved_quantity,installed_quantity,produced_quantity,excluded_from_calculations')
+        const batch = await fetchAllPages<CompletedWorkRow>((a,b) => supabase.from('work_items')
+          .select('id,shop_id,status,work_type_id,work_type_name,po_line_item_id,installed_area,approved_area,approved_quantity,installed_quantity,produced_quantity,excluded_from_calculations')
           .eq('organization_id', orgId).in('shop_id', selectedShopIds.slice(start, start + 100))
-          .order('id').range(a,b)));
+          .order('id').range(a,b));
+        freshWork.push(...batch.filter(item => {
+          const sh = (latestShops || []).find(shop => shop.id === item.shop_id);
+          return !!sh?.purchase_order_id || !!poRates.find(rate => rate.po_line_item_id === item.po_line_item_id);
+        }).map(item => ({ ...item, shop_status: statuses.get(item.shop_id) }))); 
       }
-      const latestBatch = buildPendingAllocations(freshWork, (poUtilization || []) as RateRow[], freshBilled, selectedShopIds, selectedPO.fulfillment_type);
+      const freshRateRows = await fetchAllPages<any>((a,b) => supabase.from('po_line_items')
+        .select('id,description,uom,rate,hsn_code,work_type_id,budgeted_qty,budgeted_area')
+        .eq('organization_id', orgId).eq('purchase_order_id', form.purchase_order_id)
+        .order('id').range(a,b));
+      const freshRates: RateRow[] = freshRateRows.map(row => ({ ...row, po_line_item_id: row.id }));
+      const latestBatch = buildPendingAllocations(freshWork, freshRates, freshBilled, selectedShopIds, selectedPO.fulfillment_type);
       if (latestBatch.issues.length || latestBatch.allocations.length !== items.length || items.some(item => !latestBatch.allocations.some(a => a.workItemId === item.work_item_id && Math.abs(a.amount - item.amount) < 0.01))) {
         throw new Error('Completed or invoiced Work Order quantities changed. Refresh before billing; no invoice was created.');
       }
@@ -404,6 +462,8 @@ export default function BillingPage() {
       setModalOpen(false);
       setSelectedShopIds([]);
       queryClient.invalidateQueries({ queryKey: ['billing-completed-shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['purchase-orders', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['work-progress'] });
       queryClient.invalidateQueries({ queryKey: ['billing-work-item-history', orgId] });
     },
   });
@@ -592,7 +652,7 @@ export default function BillingPage() {
   // the invoice amount is computed the same way that line item's budget
   // and utilization already are, instead of always defaulting to qty.
   function pickLineItemForRow(idx: number, lineItemId: string) {
-    const row = (poUtilization || []).find((r) => r.po_line_item_id === lineItemId);
+    const row = (poUtilization || []).find((r) => r.po_line_item_id === lineItemId) || poRates.find((r) => r.po_line_item_id === lineItemId);
     const items = form.items.map((it, i) => {
       if (i !== idx) return it;
       if (!row) return { ...it, po_line_item_id: '' };
@@ -603,8 +663,8 @@ export default function BillingPage() {
       // — not the budgeted figure — so the invoice starts out matching
       // what's really been done on the ground. Still fully editable
       // afterwards for partial billing.
-      const fig = computeUtilization(row, poStage);
-      const actual = fig.actualPrimary > 0 ? fig.actualPrimary.toString() : (basis === 'area' ? it.area : it.quantity);
+      const available = calculatedBatch.allocations.filter(a => a.poLineId === lineItemId).reduce((sum,a) => sum + a.pending,0);
+      const actual = available > 0 ? available.toString() : (basis === 'area' ? it.area : it.quantity);
       const updated = {
         ...it, po_line_item_id: lineItemId, description: row.description, rate, hsn_code: row.hsn_code || it.hsn_code, basis,
         quantity: basis === 'quantity' ? actual : it.quantity,
@@ -853,9 +913,15 @@ export default function BillingPage() {
                       <p className="text-sm font-semibold text-slate-900">{form.bill_to_name || 'Client'}</p>
                       <p className="text-xs text-slate-500">Work Order {selectedPO.po_number} · Completed work eligible for billing</p>
                     </div>
-                    <span className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200">{selectedShopIds.length} completed shops in scope</span>
+                    <span className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200">{selectedShopIds.length} {billingStageLabel(selectedPO.fulfillment_type).toLowerCase()} shops included</span>
                   </div>
-                  {!canSelectShops && <p role="status" className="mt-2 text-xs text-amber-700">{completionShopsError || completedItemsError || billedWorkError || poRatesError ? 'Could not fetch completed work or PO rates. Recheck the connection before billing.' : 'Loading completion and billing history…'}</p>}
+                  {canSelectShops && completionShops.length === 0 &&
+                    <p className="mt-2 text-xs text-slate-600">No shops have reached the final {billingStageLabel(selectedPO.fulfillment_type).toLowerCase()} stage for this Work Order.</p>}
+                  {canSelectShops && needsReconciliation.length > 0 &&
+                    <p role="status" className="mt-2 text-xs text-amber-700">{needsReconciliation.length} finalized shop(s) have missing/unmatched completed line-item data or no remaining billable work. Verify their PO linkage and completed measurements before invoicing them.</p>}
+                  {!poRatesLoading && !poRatesError && poRates.length === 0 &&
+                    <p role="alert" className="mt-2 text-xs text-red-700">This Work Order has no line-item rate records. Add PO line items and rates first.</p>}
+                  {!canSelectShops && <p role="status" className="mt-2 text-xs text-amber-700">{completionShopsError || completedItemsError || billedWorkError || poRatesError ? 'Could not fetch completed work or Work Order rates. Check permissions, PO links and connection; then retry.' : 'Loading completion and billing history…'}</p>}
                   {!!calculatedBatch.issues.length && <div role="alert" className="mt-2 text-xs text-red-700 space-y-1">{calculatedBatch.issues.map((issue) => <p key={issue}>{issue}</p>)}</div>}
                   <details className="mt-2 rounded-lg border border-slate-200 bg-white" >
                     <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-slate-600">Adjust completed shop scope (internal selection only)</summary>
@@ -981,11 +1047,11 @@ export default function BillingPage() {
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {groupedInvoiceItems.map((item, index) => {
-                      const poRow = (poUtilization || []).find(row => row.po_line_item_id === item.po_line_item_id);
+                      const poRow = poRates.find(row => row.po_line_item_id === item.po_line_item_id);
                       const isArea = poRow?.uom === 'sqft';
                       const suffix = isArea ? ' sq.ft' : ` ${poRow?.uom || 'qty'}`;
                       const planned = poRow ? (isArea ? poRow.budgeted_area : poRow.budgeted_qty) : null;
-                      const completed = poRow ? computeUtilization(poRow, poStage).actualPrimary : 0;
+                      const completed = calculatedBatch.allocations.filter(a => a.poLineId === item.po_line_item_id).reduce((sum, a) => sum + a.completed, 0);
                       const billed = billedWork.filter(row => row.po_line_item_id === item.po_line_item_id).reduce((sum,row) => sum + Number((isArea ? row.area : row.quantity) || 0),0);
                       const currentUnits = isArea ? Number(item.area || 0) : Number(item.quantity || 0);
                       return <tr key={`${item.po_line_item_id}-${index}`}>
@@ -1026,7 +1092,7 @@ export default function BillingPage() {
                 const pickedElsewhere = new Set(
                   form.items.filter((_, i) => i !== idx).map((it) => it.po_line_item_id).filter(Boolean)
                 );
-                const availableLineItems = (poUtilization || []).filter(
+                const availableLineItems = poRates.filter(
                   (row) => row.po_line_item_id === item.po_line_item_id || !!item.shop_id || !pickedElsewhere.has(row.po_line_item_id)
                 );
                 return (

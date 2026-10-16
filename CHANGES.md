@@ -1,11 +1,11 @@
-# Billing-only changes against the previous Work Order First Billing patch
-
-- `src/pages/BillingPage.tsx`: fixes completed-stage eligibility for each fulfillment type, PO rate reads, missing backfill linkage discovery, billable data preview and current-rate revalidation.
-- `src/lib/poBilling.ts`: canonical per-stage completion and quantity/area calculation with narrow final-stage backfill fallback.
-- `scripts/verify-po-billing-final.mjs`: expanded pure regression checks.
-- `supabase/manual/BILLING_RESET_PREVIEW_READ_ONLY.sql`: preview historical invoices without mutation.
-- `supabase/manual/ARCHIVE_AND_CLEAR_OLD_BILLING.sql`: optional manual archive and agency-specific active invoice removal; NOT automatically executed.
-- `supabase/manual/BACKFILL_FINAL_STAGE_RECONCILIATION_READ_ONLY.sql`: audit incomplete old production/installation stage metrics.
-- `BILLING_FINAL_README.md`, `QA_CHECKLIST.md`: apply and validation instructions.
-
-No unrelated routes, sidebar, breadcrumbs, reports, photos, shops, review panels, migrations, dependencies or lockfiles modified.
+# Changes — Billing only
+- `src/pages/BillingPage.tsx`: compact professional Work Order invoice list, direct Client/PO/Payment/Period filters, pagination, small actions, owner/admin-only typed removal; fix status-update error reporting.
+- `src/lib/poBilling.ts`: unchanged final completed-work calculation helper, included for self-consistent previous-patch baseline.
+- `supabase/migrations/20261026110000_0096_invoice_archive_delete_rpc.sql`: additive private archive + authenticated owner/admin RPC; migration alone deletes no records.
+- `supabase/manual/PREVIEW_OLD_BILLING.sql`: read-only counts/amounts scoped by organization.
+- `supabase/manual/ARCHIVE_AND_CLEAR_OLD_BILLING.sql`: explicitly confirmed transactional agency-only archive and active invoice cleanup.
+- `RESET_OLD_BILLING.ps1`: database password prompt, external backup, preview, confirmation, scoped cleanup.
+- `scripts/verify-po-billing-final.mjs`: existing billing calculation tests.
+- `scripts/verify-billing-safe-ui.mjs`: source/database safety regression checks.
+- `APPLY_MAIN.ps1`, `README.md`, `QA_CHECKLIST.md`: guarded install and QA instructions.
+- No changed dependencies, lockfiles, navigation, reports, shop stage records, payment history tables or unrelated source files.

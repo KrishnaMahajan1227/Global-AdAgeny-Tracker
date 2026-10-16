@@ -1,52 +1,42 @@
-param(
-  [Parameter(Mandatory=$true)][string]$ProjectRoot,
-  [Parameter(Mandatory=$true)][string]$PatchRoot
+[CmdletBinding()]
+param([Parameter(Mandatory=$true)][string]$ProjectRoot, [string]$PatchRoot=$PSScriptRoot)
+$ErrorActionPreference='Stop'
+Set-Location $ProjectRoot
+if (!(Test-Path 'package.json') -or !(Test-Path '.git')) { throw 'Not the AdRoute Git project root.' }
+if ((git branch --show-current).Trim() -ne 'main') { throw 'Switch to existing main first. Nothing changed.' }
+if (git status --porcelain) { throw 'Commit or safely stash existing changes before applying. Nothing changed.' }
+$expectedBilling='7257bf47cda1c3907900bec3f9f909d1147cda448a63e4d178b9c108058f5335'
+$expectedHelper='13e0669f73e34ca031ef23fb0dbf7cb924abcec79502041a49d30804c2c75cd3'
+$versions=@{
+  'src/pages/BillingPage.tsx'=$expectedBilling
+  'src/lib/poBilling.ts'=$expectedHelper
+}
+foreach($file in $versions.Keys) {
+  if (!(Test-Path $file)) { throw "Previous completed-work Billing patch is required: $file. Nothing changed." }
+  $actual=(Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+  if($actual -ne $versions[$file]) { throw "Source version differs: $file. Newer changes must be merged; no overwrite performed." }
+}
+$backup=Join-Path $ProjectRoot ('.git\billing-safe-backup-'+(Get-Date -Format 'yyyyMMdd-HHmmss'))
+New-Item -ItemType Directory -Force -Path $backup | Out-Null
+foreach($file in $versions.Keys) {
+  $out=Join-Path $backup $file
+  New-Item -ItemType Directory -Force -Path (Split-Path $out -Parent) | Out-Null
+  Copy-Item $file $out
+}
+$paths=@(
+ 'src/pages/BillingPage.tsx', 'src/lib/poBilling.ts',
+ 'scripts/verify-po-billing-final.mjs', 'scripts/verify-billing-safe-ui.mjs',
+ 'supabase/migrations/20261026110000_0096_invoice_archive_delete_rpc.sql',
+ 'supabase/manual/PREVIEW_OLD_BILLING.sql',
+ 'supabase/manual/ARCHIVE_AND_CLEAR_OLD_BILLING.sql',
+ 'RESET_OLD_BILLING.ps1', 'README.md', 'CHANGES.md', 'QA_CHECKLIST.md'
 )
-$ErrorActionPreference = 'Stop'
-$ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
-$PatchRoot = (Resolve-Path -LiteralPath $PatchRoot).Path
-if (!(Test-Path (Join-Path $ProjectRoot 'package.json'))) { throw 'Not an AdRoute project root.' }
-Push-Location $ProjectRoot
-try {
-  $branch = (git branch --show-current).Trim()
-  if ($LASTEXITCODE -ne 0 -or $branch -ne 'main') { throw "Expected main branch, found '$branch'." }
-  $dirty = git status --porcelain
-  if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Working tree is not clean. Commit/stash changes before applying this patch.' }
-  $expected = @{
-    'src/pages/BillingPage.tsx' = '5f63d5ff03ac008518fa5882cc032a719961e1b9bcdfc3b10a7e8ec46fa9d5ce'
-    'src/lib/poBilling.ts' = '28994175d4dad358e815772813354fdf76e4efb1eacc93f4c678b9f84d1ec9ca'
-  }
-  foreach ($entry in $expected.GetEnumerator()) {
-    $path = Join-Path $ProjectRoot $entry.Key
-    if (!(Test-Path -LiteralPath $path)) { throw "Missing $($entry.Key). Apply prior PO Billing patch first." }
-    $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($hash -ne $entry.Value) { throw "Version mismatch: $($entry.Key). No files changed. Merge manually against the latest main code." }
-  }
-  $backup = Join-Path $ProjectRoot ('.git\adroute-backups\billing-final-' + (Get-Date -Format 'yyyyMMddHHmmss'))
-  foreach ($entry in $expected.GetEnumerator()) {
-    $path = Join-Path $ProjectRoot $entry.Key
-    $dst = Join-Path $backup $entry.Key
-    New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
-    Copy-Item -LiteralPath $path -Destination $dst -Force
-  }
-  $files = @(
-    'src/pages/BillingPage.tsx',
-    'src/lib/poBilling.ts',
-    'scripts/verify-po-billing-final.mjs',
-    'supabase/manual/BILLING_RESET_PREVIEW_READ_ONLY.sql',
-    'supabase/manual/ARCHIVE_AND_CLEAR_OLD_BILLING.sql',
-    'supabase/manual/BACKFILL_FINAL_STAGE_RECONCILIATION_READ_ONLY.sql',
-    'BILLING_FINAL_README.md',
-    'CHANGES.md',
-    'QA_CHECKLIST.md'
-  )
-  foreach ($item in $files) {
-    $source = Join-Path $PatchRoot $item
-    if (!(Test-Path -LiteralPath $source)) { throw "Patch file missing: $item" }
-    $target = Join-Path $ProjectRoot $item
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
-    Copy-Item -LiteralPath $source -Destination $target -Force
-  }
-  Write-Host "Patch applied to main. Backup: $backup"
-  Write-Host 'No SQL was executed. Run tests before committing.'
-} finally { Pop-Location }
+foreach($file in $paths) {
+  $source=Join-Path $PatchRoot $file
+  if (!(Test-Path $source)) { throw "Patch missing file: $file" }
+  $destination=Join-Path $ProjectRoot $file
+  New-Item -ItemType Directory -Force -Path (Split-Path $destination -Parent) | Out-Null
+  Copy-Item -LiteralPath $source -Destination $destination -Force
+}
+Write-Host "Billing-only patch applied; backup: $backup" -ForegroundColor Green
+Write-Host 'Next: run regression tests, typecheck and build. Apply the RPC SQL separately after staging QA.'

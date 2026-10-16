@@ -1,21 +1,20 @@
-# Billing QA — manual acceptance checklist
+# Staging QA — Billing
 
-- [ ] Owner/admin opens Billing; all 3 Work Order types appear with correct client/name/number.
-- [ ] Supply Only: production_done shops NOT ready; dispatched shops eligible, produced units and per-sqft proportions correct.
-- [ ] Survey + Installation: installation_review NOT eligible; installed shops and quantities available.
-- [ ] Direct Installation: installed final shops available; approved-only records NOT billable.
-- [ ] Legacy backfill with installed item status and approved measurement produces an explainable billable quantity.
-- [ ] Backfilled PO-linked work with missing shop purchase_order_id is discovered only for correct client/PO.
-- [ ] Missing measurements, PO line rate, ambiguous invoice allocations produce visible errors (not zero success).
-- [ ] PO has more than 1,000 linked work items/shops; no silent truncation.
-- [ ] Billing summary groups PO line items, NOT customer-facing shop names.
-- [ ] Previously billed work is deducted and cannot be double-invoiced.
-- [ ] GST type, GSTIN, HSN, taxable amount, invoice sequence, dates and payment terms verified.
-- [ ] Save uses only selected eligible completed work, rechecks fresh rates & amounts, and never changes shop operational status.
-- [ ] Old invoice preview performed with actual organization UUID; separate backup verified.
-- [ ] Manual archive/clear SQL tested on staging and counts reconciled; existing POs/shops/evidence unchanged.
-- [ ] PDF invoice accurately matches grouped totals and linked quantity/area.
-- [ ] Build, lint, typecheck pass on current main; browser/mobile tests pass.
-- [ ] Realtime refresh and direct URL role/RLS checks pass.
-
-NOT VERIFIED in this environment: live Supabase SQL execution, full Vite build, concurrent server posting and real invoice PDF review.
+- [ ] `main` has expected Billing source SHA before ZIP applied (script stops on mismatch)
+- [ ] `npm run typecheck`, `npm run lint --if-present`, `npm run build` pass locally
+- [ ] Owner/admin can create one invoice for completed PO scope, correct PO rate & GST
+- [ ] Supply Only dispatched, Survey+Install installed, Direct Install installed and final backfill recognized
+- [ ] Incomplete/awaiting-review shops excluded; unknown measurements flagged
+- [ ] Prior invoiced units subtracted; billed scope not silently counted twice
+- [ ] Large list pagination, search, Client/PO, Payment, Period, Sort and clear filters work
+- [ ] Desktop/tablet/mobile actions and More menu do not clip
+- [ ] Non-owner roles cannot invoke invoice deletion RPC even if URL/code manipulated
+- [ ] Unpaid invoice requires exact typed number; single RPC archives header, lines and audit
+- [ ] Paid, partial, overdue invoices blocked server-side
+- [ ] No invoice removed if permissions, confirmation, or RPC fail
+- [ ] SQL audit archive accessible only to privileged database administrators
+- [ ] External backup succeeds and restore verified on isolated staging database
+- [ ] Old invoices preview count/amount match before organization-scoped archive/clear
+- [ ] Only chosen organization invoice rows removed; unaffected agency invoices intact
+- [ ] Work Orders, shops, area, evidence, breadcrumb, Reports, field assignments unchanged
+- [ ] Existing invoice PDF, invoice edit, payment update, new invoice posting behave as before

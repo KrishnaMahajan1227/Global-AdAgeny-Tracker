@@ -1,14 +1,16 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { fetchAllPages } from '@/lib/paginatedQuery';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { Card, StatusBadge, EmptyState, PageHeader, Modal, Input, Select, Textarea, ConfirmDialog, FilterButton, FilterDrawer, FilterSection, Combobox } from '@/components/ui';
+import { Card, StatusBadge, EmptyState, PageHeader, Modal, Input, Select, Textarea, ConfirmDialog, Combobox } from '@/components/ui';
 import { logAudit } from '@/lib/helpers';
 import { generateInvoicePDF } from '@/lib/reports';
 import { computeUtilization, formatRupees, UtilizationStage, defaultUtilizationStage } from '@/lib/poUtilization';
-import { Plus, FileText, Download, Trash2, ChevronRight, ShoppingCart, AlertTriangle, Pencil, Info } from 'lucide-react';
+import { Plus, FileText, Download, Trash2, ChevronRight, ShoppingCart, AlertTriangle, Pencil, Info, Search } from 'lucide-react';
 import type { Organization, Client, Invoice, InvoiceItem, PurchaseOrder, POLineItemUtilization, Project } from '@/lib/types';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
+import { buildPendingAllocations, consolidateInvoiceLines, type BilledRow, type CompletedWorkRow, type RateRow } from '@/lib/poBilling';
 
 // Every line item bills by EITHER quantity OR area, never both blindly
 // multiplied together — 'basis' says which one the rate actually applies
@@ -17,16 +19,24 @@ import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/ind
 // 'sqft'/'piece'/'lot' for exactly this reason. Defaults to 'quantity' for
 // a blank manual row; auto-switches to 'area' the moment a PO line item
 // with uom='sqft' is picked, or the user explicitly picks Area.
-const emptyItem = { description: '', quantity: '1', area: '', rate: '', amount: '0', po_line_item_id: '', hsn_code: '', basis: 'quantity' as 'quantity' | 'area', notes: '' };
+const emptyItem = { description: '', quantity: '1', area: '', rate: '', amount: '0', po_line_item_id: '', hsn_code: '', basis: 'quantity' as 'quantity' | 'area', notes: '', shop_id: '', work_item_id: '' };
+
+function localDateISO() {
+  const now = new Date();
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+}
 
 const emptyForm = {
-  client_id: '', project_id: '', purchase_order_id: '', invoice_date: new Date().toISOString().split('T')[0],
+  client_id: '', project_id: '', purchase_order_id: '', invoice_date: localDateISO(),
   due_date: '', gst_rate: '18', gst_type: 'intra' as 'intra' | 'inter', notes: '', terms: '',
   bill_to_name: '', bill_to_address: '', bill_to_city: '', bill_to_state: '', bill_to_gst: '',
   items: [emptyItem],
 };
 
 const GST_RATE_PRESETS = ['0', '5', '12', '18', '28'];
+const EMPTY_SHOPS: any[] = [];
+const EMPTY_BILLED_WORK: BilledRow[] = [];
+const EMPTY_COMPLETED_WORK: CompletedWorkRow[] = [];
 
 /** Round to 2 decimals, avoiding classic floating-point drift (e.g. 0.1 + 0.2). */
 function round2(n: number) {
@@ -43,7 +53,8 @@ function billableUnits(item: { quantity: string; area: string; basis: 'quantity'
     const area = parseFloat(item.area);
     return area > 0 ? area : 0;
   }
-  return parseFloat(item.quantity) || 1;
+  const qty = parseFloat(item.quantity);
+  return Number.isFinite(qty) && qty > 0 ? qty : 0;
 }
 
 /** When re-opening a saved invoice for editing, work out which basis it was
@@ -68,11 +79,16 @@ export default function BillingPage() {
   const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null);
   const [viewInvoice, setViewInvoice] = useState<any | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
+  const [confirmPost, setConfirmPost] = useState(false);
   const [search, setSearch] = useState('');
   const [clientFilterList, setClientFilterList] = useState('');
   const [statusFilterList, setStatusFilterList] = useState('');
+  const [poFilterList, setPoFilterList] = useState('');
+  const [dateFilterList, setDateFilterList] = useState('all');
+  const [selectedShopIds, setSelectedShopIds] = useState<string[]>([]);
+  const [initializedPO, setInitializedPO] = useState('');
+  const [shopSearch, setShopSearch] = useState('');
   const [listSortBy, setListSortBy] = useState('date_desc');
-  const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
   const [form, setForm] = useState({ ...emptyForm, items: [{ ...emptyItem }] });
 
   const { data: org } = useQuery({
@@ -86,10 +102,8 @@ export default function BillingPage() {
 
   const { data: clients } = useQuery({
     queryKey: ['clients', orgId],
-    queryFn: async () => {
-      const { data } = await supabase.from('clients').select('*').eq('organization_id', orgId).eq('is_active', true).order('name');
-      return data as Client[];
-    },
+    queryFn: async () => fetchAllPages<Client>((a,b) => supabase.from('clients')
+      .select('*').eq('organization_id', orgId).order('name').range(a,b)),
     enabled: !!orgId,
   });
 
@@ -108,14 +122,15 @@ export default function BillingPage() {
   });
   const projectsForClient = (allProjects || []).filter((p) => !form.client_id || p.client_id === form.client_id);
 
-  const { data: invoices } = useQuery({
+  const { data: invoices, isLoading: invoicesLoading, error: invoicesError } = useQuery({
     queryKey: ['invoices', orgId],
     queryFn: async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('invoices')
         .select('*, clients(name, address, city, state, gst_number), purchase_orders(po_number, name, payment_terms), invoice_items(*)')
         .eq('organization_id', orgId)
         .order('created_at', { ascending: false });
+      if (error) throw error;
       return data;
     },
     enabled: !!orgId,
@@ -126,18 +141,14 @@ export default function BillingPage() {
   // so line items can be picked from the PO's budget and the remaining
   // balance is visible before the invoice is created.
   const { data: purchaseOrders } = useQuery({
-    queryKey: ['purchase-orders-for-billing', orgId, form.client_id],
-    queryFn: async () => {
-      let q = supabase.from('purchase_orders').select('*').eq('organization_id', orgId).eq('status', 'active');
-      if (form.client_id) q = q.eq('client_id', form.client_id);
-      const { data, error } = await q.order('po_date', { ascending: false });
-      if (error) throw error;
-      return data as PurchaseOrder[];
-    },
-    enabled: !!orgId && !!form.client_id,
+    queryKey: ['purchase-orders-for-billing', orgId],
+    queryFn: async () => fetchAllPages<PurchaseOrder>((a,b) => supabase.from('purchase_orders')
+      .select('*, clients(name)').eq('organization_id', orgId).neq('status','cancelled')
+      .order('po_date', { ascending: false }).range(a,b)),
+    enabled: !!orgId,
   });
 
-  const { data: poUtilization } = useQuery({
+  const { data: poUtilization, isLoading: poRatesLoading, error: poRatesError } = useQuery({
     queryKey: ['po-utilization-for-billing', orgId, form.purchase_order_id],
     queryFn: async () => {
       const { data, error } = await supabase.from('v_po_line_item_utilization').select('*').eq('purchase_order_id', form.purchase_order_id);
@@ -149,14 +160,93 @@ export default function BillingPage() {
 
   const selectedPO = (purchaseOrders || []).find((po) => po.id === form.purchase_order_id) || null;
   const poStage: UtilizationStage = defaultUtilizationStage(selectedPO?.fulfillment_type);
+  const { data: completionShopsData, isLoading: completionShopsLoading, error: completionShopsError } = useQuery({
+    queryKey: ['billing-completed-shops', orgId, form.purchase_order_id],
+    queryFn: async () => fetchAllPages<any>((a,b) => supabase.from('shops')
+      .select('id,name,status,client_id,purchase_order_id')
+      .eq('organization_id', orgId!).eq('purchase_order_id', form.purchase_order_id)
+      .in('status', ['installed', 'dispatched', 'billed']).order('id').range(a,b)),
+    enabled: !!orgId && !!form.purchase_order_id && !editingInvoiceId,
+  });
+  const completionShops = completionShopsData ?? EMPTY_SHOPS;
+  // The shop is an eligibility filter, not a billing unit. Every completed
+  // work-item is reconciled against its own historical invoice quantities.
+  const { data: billedWorkData, isLoading: billedWorkLoading, error: billedWorkError } = useQuery({
+    queryKey: ['billing-work-item-history', orgId, form.purchase_order_id],
+    queryFn: async () => fetchAllPages<BilledRow>((a,b) => supabase.from('invoice_items')
+      .select('work_item_id,shop_id,po_line_item_id,quantity,area,rate,amount,invoices!inner(purchase_order_id)')
+      .eq('organization_id', orgId!).eq('invoices.purchase_order_id', form.purchase_order_id)
+      .order('id').range(a,b)),
+    enabled: !!orgId && !!form.purchase_order_id && !editingInvoiceId,
+  });
+  const billedWork = billedWorkData ?? EMPTY_BILLED_WORK;
+  const { data: completedWorkItemsData, isLoading: completedItemsLoading, error: completedItemsError } = useQuery({
+    queryKey: ['billing-completed-work-items', orgId, form.purchase_order_id],
+    queryFn: async () => {
+      const ids = completionShops.map((shop: any) => shop.id);
+      const rows: CompletedWorkRow[] = [];
+      for (let start = 0; start < ids.length; start += 100) {
+        rows.push(...await fetchAllPages<CompletedWorkRow>((a,b) => supabase.from('work_items')
+          .select('id,shop_id,work_type_name,po_line_item_id,installed_area,approved_area,approved_quantity,installed_quantity,produced_quantity,excluded_from_calculations')
+          .eq('organization_id', orgId!).in('shop_id', ids.slice(start, start + 100))
+          .order('id').range(a,b)));
+      }
+      return rows;
+    },
+    enabled: !!orgId && !!form.purchase_order_id && completionShops.length > 0 && !editingInvoiceId,
+  });
+  const completedWorkItems = completedWorkItemsData ?? EMPTY_COMPLETED_WORK;
+  const canSelectShops = !completionShopsLoading && !completedItemsLoading && !billedWorkLoading && !poRatesLoading
+    && !completionShopsError && !completedItemsError && !billedWorkError && !poRatesError;
+  const calculatedBatch = useMemo(() => buildPendingAllocations(
+    completedWorkItems, (poUtilization || []) as RateRow[], billedWork,
+    selectedShopIds, selectedPO?.fulfillment_type,
+  ), [completedWorkItems, poUtilization, billedWork, selectedShopIds, selectedPO?.fulfillment_type]);
+  const eligibleShopIds = useMemo(() => new Set(buildPendingAllocations(
+    completedWorkItems, (poUtilization || []) as RateRow[], billedWork,
+    completionShops.map((shop: any) => shop.id), selectedPO?.fulfillment_type,
+  ).allocations.map((row) => row.shopId)), [completedWorkItems, poUtilization, billedWork, completionShops, selectedPO?.fulfillment_type]);
+  const eligibleShops = completionShops.filter((shop: any) => eligibleShopIds.has(shop.id));
+  const filteredEligibleShops = eligibleShops.filter((shop: any) => shop.name.toLowerCase().includes(shopSearch.trim().toLowerCase()));
+
+  // First PO load selects its currently unbilled completed scope automatically.
+  // Subsequent manual checkbox changes stay respected; no repeated auto-select.
+  useEffect(() => {
+    if (editingInvoiceId || !modalOpen || !selectedPO || !canSelectShops || !poUtilization) return;
+    if (initializedPO !== selectedPO.id) {
+      setSelectedShopIds(Array.from(eligibleShopIds));
+      setInitializedPO(selectedPO.id);
+    }
+  }, [editingInvoiceId, modalOpen, selectedPO, canSelectShops, poUtilization, initializedPO, eligibleShopIds]);
+
+  // Auto-fill actual completed-and-unbilled PO work. Invoice data remains
+  // item-linked in the database; only its *presentation* groups by PO line.
+  useEffect(() => {
+    if (editingInvoiceId || !modalOpen || !selectedPO || !canSelectShops || initializedPO !== selectedPO.id) return;
+    const rows = calculatedBatch.allocations.map((allocation) => ({
+      ...emptyItem,
+      description: allocation.description,
+      shop_id: allocation.shopId,
+      work_item_id: allocation.workItemId,
+      po_line_item_id: allocation.poLineId,
+      basis: allocation.basis,
+      quantity: allocation.basis === 'area' ? String(allocation.displayQuantity) : String(allocation.pending),
+      area: allocation.basis === 'area' ? String(allocation.pending) : '',
+      rate: String(allocation.rate),
+      hsn_code: allocation.hsn,
+      amount: String(allocation.amount),
+    }));
+    setForm((old) => ({ ...old, items: rows }));
+  }, [modalOpen, editingInvoiceId, selectedPO, canSelectShops, initializedPO, calculatedBatch]);
   const isEditing = !!editingInvoiceId;
   const editingSourceInvoice = (invoices || []).find((i: any) => i.id === editingInvoiceId) || null;
+  const editHasShopLinks = !!editingSourceInvoice?.invoice_items?.some((item: any) => !!item.shop_id);
 
   function buildInvoiceItems() {
     return form.items
       .filter((item) => item.description.trim() !== '' || (parseFloat(item.rate) || 0) > 0)
       .map((item) => {
-        const quantity = parseFloat(item.quantity) || 1;
+        const quantity = parseFloat(item.quantity) || 0;
         const rate = parseFloat(item.rate) || 0;
         const units = billableUnits(item);
         return {
@@ -166,6 +256,8 @@ export default function BillingPage() {
           rate,
           amount: round2(units * rate),
           po_line_item_id: item.po_line_item_id || null,
+          shop_id: item.shop_id || null,
+          work_item_id: item.work_item_id || null,
           hsn_code: item.hsn_code || null,
           notes: item.notes || null,
         };
@@ -208,6 +300,41 @@ export default function BillingPage() {
     mutationFn: async () => {
       const items = buildInvoiceItems();
       if (items.length === 0) throw new Error('Add at least one line item with a description and rate.');
+      if (!Number.isFinite(Number(form.gst_rate)) || Number(form.gst_rate) < 0 || Number(form.gst_rate) > 100) throw new Error('Verify the GST rate.');
+      if (Number(form.gst_rate) > 0 && (!org?.gst_number || !form.bill_to_name || !form.bill_to_state)) throw new Error('Taxable invoices require the agency GSTIN and client billing name/state.');
+      if (!orgId || !form.client_id || !form.purchase_order_id || !selectedPO) throw new Error('Select a client and Work Order before creating an invoice.');
+      if (!canSelectShops) throw new Error('Completed-shop records are still loading or failed to load. Retry before billing.');
+      if (!selectedShopIds.length) throw new Error('No completed and unbilled work is selected for this Work Order.');
+      if (calculatedBatch.issues.length) throw new Error(calculatedBatch.issues.join(' '));
+      if (selectedShopIds.some(id => !eligibleShops.some((shop:any) => shop.id === id))) throw new Error('Some selected work is no longer billable. Refresh the Work Order.');
+      if (items.some(item => !item.shop_id || !selectedShopIds.includes(item.shop_id))) throw new Error('Every invoice line must belong to a selected completed shop.');
+      if (selectedShopIds.some(id => !items.some(item => item.shop_id === id))) throw new Error('Selected scope has no remaining billable work.');
+      if (items.some(item => !(item.amount > 0) || !item.description.trim() || !item.po_line_item_id || !item.work_item_id)) throw new Error('A completed Work Order line has an invalid rate, amount or work-item link.');
+      if (items.length !== calculatedBatch.allocations.length || items.some(item => !calculatedBatch.allocations.some(a => a.workItemId === item.work_item_id && a.poLineId === item.po_line_item_id && Math.abs(a.amount - item.amount) < 0.01))) throw new Error('Billable scope changed. Refresh the preview.');
+      // Recheck under the authenticated user's organization before writing.
+      const { data: latestShops, error: verifyShopsError } = await supabase.from('shops').select('id,status,purchase_order_id,client_id')
+        .eq('organization_id', orgId).in('id', selectedShopIds);
+      if (verifyShopsError) throw verifyShopsError;
+      if ((latestShops || []).length !== selectedShopIds.length || (latestShops || []).some(shop =>
+        shop.client_id !== form.client_id || shop.purchase_order_id !== form.purchase_order_id || !['installed','dispatched','billed'].includes(shop.status))) {
+        throw new Error('Shop completion changed while preparing the invoice. Refresh the list. No invoice was created.');
+      }
+      // Revalidate completed quantity and prior invoice lines just before writing.
+      const freshBilled = await fetchAllPages<BilledRow>((a,b) => supabase.from('invoice_items')
+        .select('work_item_id,shop_id,po_line_item_id,quantity,area,rate,amount,invoices!inner(purchase_order_id)')
+        .eq('organization_id', orgId).eq('invoices.purchase_order_id', form.purchase_order_id)
+        .order('id').range(a,b));
+      const freshWork: CompletedWorkRow[] = [];
+      for (let start = 0; start < selectedShopIds.length; start += 100) {
+        freshWork.push(...await fetchAllPages<CompletedWorkRow>((a,b) => supabase.from('work_items')
+          .select('id,shop_id,work_type_name,po_line_item_id,installed_area,approved_area,approved_quantity,installed_quantity,produced_quantity,excluded_from_calculations')
+          .eq('organization_id', orgId).in('shop_id', selectedShopIds.slice(start, start + 100))
+          .order('id').range(a,b)));
+      }
+      const latestBatch = buildPendingAllocations(freshWork, (poUtilization || []) as RateRow[], freshBilled, selectedShopIds, selectedPO.fulfillment_type);
+      if (latestBatch.issues.length || latestBatch.allocations.length !== items.length || items.some(item => !latestBatch.allocations.some(a => a.workItemId === item.work_item_id && Math.abs(a.amount - item.amount) < 0.01))) {
+        throw new Error('Completed or invoiced Work Order quantities changed. Refresh before billing; no invoice was created.');
+      }
       const { subtotal, taxRate, taxAmount, total, cgstRate, cgstAmount, sgstRate, sgstAmount, igstRate, igstAmount } = computeTotals(items);
 
       const invNumber = `INV-${Date.now().toString().slice(-6)}`;
@@ -242,34 +369,42 @@ export default function BillingPage() {
 
       if (error) throw error;
 
-      for (const item of items) {
-        const { error: itemError } = await supabase.from('invoice_items').insert({
-          organization_id: orgId,
-          invoice_id: inv.id,
-          description: item.description,
-          quantity: item.quantity,
-          area: item.area,
-          rate: item.rate,
-          amount: item.amount,
-          po_line_item_id: item.po_line_item_id,
-          hsn_code: item.hsn_code,
-          notes: item.notes,
-        });
-        if (itemError) throw itemError;
+      // Insert all invoice lines with their original shop and work-item links.
+      // Roll back only this newly-created invoice if the line insert fails.
+      const { error: itemError } = await supabase.from('invoice_items').insert(items.map(item => ({
+        organization_id: orgId,
+        invoice_id: inv.id,
+        description: item.description,
+        quantity: item.quantity,
+        area: item.area,
+        rate: item.rate,
+        amount: item.amount,
+        po_line_item_id: item.po_line_item_id,
+        shop_id: item.shop_id,
+        work_item_id: item.work_item_id,
+        hsn_code: item.hsn_code,
+        notes: item.notes,
+      })));
+      if (itemError) {
+        await supabase.from('invoices').delete().eq('id', inv.id).eq('organization_id', orgId);
+        throw itemError;
       }
-
-      // Update shop statuses to billed — installed (survey_install flow) or
-      // dispatched (Supply Only flow, Phase 5) are both billing-eligible.
-      await supabase.from('shops').update({ status: 'billed' }).eq('client_id', form.client_id).in('status', ['installed', 'dispatched']);
+      // Do not change a shop's operational stage to "billed". Installation
+      // and dispatch status remain authoritative; invoice_items track billing.
+      // Historical shop statuses are left untouched.
 
       await logAudit('invoices', inv.id, 'insert', null, null, null, `Created invoice ${invNumber} for ${total}`);
       return inv;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['invoices', orgId] });
+      setConfirmPost(false);
       queryClient.invalidateQueries({ queryKey: ['po-utilization-for-billing', orgId, form.purchase_order_id] });
       queryClient.invalidateQueries({ queryKey: ['po-utilization', orgId] });
       setModalOpen(false);
+      setSelectedShopIds([]);
+      queryClient.invalidateQueries({ queryKey: ['billing-completed-shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['billing-work-item-history', orgId] });
     },
   });
 
@@ -326,6 +461,8 @@ export default function BillingPage() {
           rate: item.rate,
           amount: item.amount,
           po_line_item_id: item.po_line_item_id,
+          shop_id: item.shop_id,
+          work_item_id: item.work_item_id,
           hsn_code: item.hsn_code,
           notes: item.notes,
         });
@@ -369,7 +506,7 @@ export default function BillingPage() {
 
   async function downloadInvoice(inv: any) {
     const client = (clients || []).find((c) => c.id === inv.client_id);
-    await generateInvoicePDF(inv, inv.invoice_items || [], client || null, org);
+    await generateInvoicePDF(inv, consolidateInvoiceLines(inv.invoice_items || []) as InvoiceItem[], client || null, org);
   }
 
   function addItem() {
@@ -402,6 +539,9 @@ export default function BillingPage() {
   // owner afterwards, since it's saved onto the invoice itself, not read
   // live from `clients` at PDF time.
   function selectClient(clientId: string) {
+    if (editHasShopLinks) return; // Preserve original posted PO/shop associations on edits.
+    setSelectedShopIds([]);
+    setShopSearch('');
     const client = (clients || []).find((c) => c.id === clientId);
     setForm({
       ...form,
@@ -421,14 +561,27 @@ export default function BillingPage() {
   // onto the invoice — so an invoice raised against a PO starts in
   // agreement with that PO's own paperwork instead of blank defaults.
   function selectPO(poId: string) {
+    if (editHasShopLinks) return;
+    setSelectedShopIds([]);
+    setInitializedPO('');
+    setShopSearch('');
     const po = (purchaseOrders || []).find((p) => p.id === poId);
-    setForm({
-      ...form,
+    const client = (clients || []).find((c) => c.id === po?.client_id);
+    setForm(prev => ({
+      ...prev,
       purchase_order_id: poId,
-      project_id: po?.project_id || form.project_id,
-      gst_rate: po?.gst_percentage != null ? String(po.gst_percentage) : form.gst_rate,
-      terms: po?.payment_terms ? po.payment_terms : form.terms,
-    });
+      client_id: po?.client_id || '',
+      items: [],
+      project_id: po?.project_id || '',
+      gst_rate: po?.gst_percentage != null ? String(po.gst_percentage) : prev.gst_rate,
+      gst_type: prev.gst_type, // Verify place of supply; organization state is not in the current schema.
+      terms: po?.payment_terms || prev.terms,
+      bill_to_name: client?.name || '',
+      bill_to_address: client?.address || '',
+      bill_to_city: client?.city || '',
+      bill_to_state: client?.state || '',
+      bill_to_gst: client?.gst_number || '',
+    }));
   }
 
   // Picking a PO line item autofills description + rate + HSN code from
@@ -464,8 +617,12 @@ export default function BillingPage() {
   }
 
   function openCreateModal() {
+    setConfirmPost(false);
+    setSelectedShopIds([]);
+    setInitializedPO('');
+    setShopSearch('');
     setEditingInvoiceId(null);
-    setForm({ ...emptyForm, items: [{ ...emptyItem }] });
+    setForm({ ...emptyForm, invoice_date: localDateISO(), items: [{ ...emptyItem }] });
     setModalOpen(true);
   }
 
@@ -475,7 +632,7 @@ export default function BillingPage() {
       client_id: inv.client_id || '',
       project_id: inv.project_id || '',
       purchase_order_id: inv.purchase_order_id || '',
-      invoice_date: inv.invoice_date ? inv.invoice_date.split('T')[0] : new Date().toISOString().split('T')[0],
+      invoice_date: inv.invoice_date ? inv.invoice_date.split('T')[0] : localDateISO(),
       due_date: inv.due_date ? inv.due_date.split('T')[0] : '',
       // Reconstruct GST type + combined rate from whichever breakdown the
       // invoice actually has. Invoices from before this split existed
@@ -503,6 +660,8 @@ export default function BillingPage() {
             rate: String(it.rate ?? 0),
             amount: String(it.amount ?? 0),
             po_line_item_id: it.po_line_item_id || '',
+            shop_id: it.shop_id || '',
+            work_item_id: it.work_item_id || '',
             hsn_code: it.hsn_code || '',
             basis: inferBasis(it),
             notes: it.notes || '',
@@ -514,6 +673,7 @@ export default function BillingPage() {
   }
 
   const previewItems = buildInvoiceItems();
+  const groupedInvoiceItems = consolidateInvoiceLines(previewItems);
   const gstSplit = computeTotals(previewItems);
   const { subtotal, total } = gstSplit;
   const isSaving = createInvoiceMutation.isPending || updateInvoiceMutation.isPending;
@@ -526,7 +686,18 @@ export default function BillingPage() {
       if (!matches) return false;
     }
     if (clientFilterList && inv.client_id !== clientFilterList) return false;
+    if (poFilterList && inv.purchase_order_id !== poFilterList) return false;
     if (statusFilterList && inv.payment_status !== statusFilterList) return false;
+    if (dateFilterList !== 'all') {
+      const today = new Date();
+      const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      if (dateFilterList === 'week') start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+      else if (dateFilterList === 'month') start.setDate(1);
+      else if (dateFilterList === 'last30') start.setDate(start.getDate() - 29);
+      // Compare invoice date at local noon; parsing YYYY-MM-DD as UTC would
+      // incorrectly exclude today's invoices in positive timezones.
+      if (new Date(`${inv.invoice_date}T12:00:00`).getTime() < start.getTime()) return false;
+    }
     return true;
   });
 
@@ -545,7 +716,6 @@ export default function BillingPage() {
         return new Date(b.invoice_date).getTime() - new Date(a.invoice_date).getTime();
     }
   });
-  const listActiveFilterCount = [clientFilterList, statusFilterList].filter(Boolean).length;
   const LIST_SORT_OPTIONS = [
     { value: 'date_desc', label: 'Invoice Date (Newest first)' },
     { value: 'date_asc', label: 'Invoice Date (Oldest first)' },
@@ -560,56 +730,52 @@ export default function BillingPage() {
         title="Billing & Invoices"
         subtitle="Create and manage invoices"
         action={
-          <button onClick={openCreateModal} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium text-sm transition">
+          <button onClick={openCreateModal} className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg font-medium text-xs transition">
             <Plus className="w-4 h-4" /> Create Invoice
           </button>
         }
       />
 
-      <div className="flex flex-wrap items-center gap-2 mb-5">
-        <div className="relative flex-1 min-w-[220px]">
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search invoice no., client, or PO..."
-            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
-          />
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-[minmax(230px,2fr)_1fr_1fr_1fr] items-end gap-2 mb-4">
+        <label className="text-xs font-medium text-slate-600">Search invoices
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Invoice, client, Work Order…" className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white" />
+        </label>
+        <label className="text-xs font-medium text-slate-600">Client
+          <select value={clientFilterList} onChange={e=>{setClientFilterList(e.target.value);setPoFilterList('');}} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+            <option value="">All clients</option>
+            {(clients || []).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-medium text-slate-600">Work Order
+          <select value={poFilterList} onChange={e=>setPoFilterList(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+            <option value="">All work orders</option>
+            {Array.from(new Map((invoices || []).filter((inv:any)=>inv.purchase_order_id && (!clientFilterList || inv.client_id===clientFilterList)).map((inv:any)=>[inv.purchase_order_id,inv.purchase_orders?.name || inv.purchase_orders?.po_number || 'Work Order'])).entries())
+              .map(([id,name])=><option key={id} value={id}>{name}</option>)}
+          </select>
+        </label>
+        <label className="text-xs font-medium text-slate-600">Payment
+          <select value={statusFilterList} onChange={e=>setStatusFilterList(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white">
+            <option value="">All statuses</option><option value="unpaid">Unpaid</option><option value="partial">Partial</option><option value="paid">Paid</option><option value="overdue">Overdue</option>
+          </select>
+        </label>
+      </div>
+      <div className="mb-3 flex flex-wrap justify-between items-center gap-2 text-xs text-slate-500">
+        <span>{sortedInvoiceList.length} invoice{sortedInvoiceList.length===1?'':'s'} · Work Order based billing</span>
+        <div className="flex flex-wrap items-center gap-2">
+          <select aria-label="Invoice date range" value={dateFilterList} onChange={e=>setDateFilterList(e.target.value)} className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs">
+            <option value="all">All dates</option><option value="week">This week</option><option value="month">This month</option><option value="last30">Last 30 days</option>
+          </select>
+          <select aria-label="Sort invoices" value={listSortBy} onChange={e=>setListSortBy(e.target.value)} className="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-xs">
+            {LIST_SORT_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
         </div>
-        <select value={listSortBy} onChange={(e) => setListSortBy(e.target.value)} className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-          {LIST_SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>Sort: {o.label}</option>)}
-        </select>
-        <FilterButton activeCount={listActiveFilterCount} onClick={() => setFilterDrawerOpen(true)} />
-        {(search || listActiveFilterCount > 0) && <span className="text-xs text-slate-400">{filteredInvoiceList.length} of {(invoices || []).length} shown</span>}
       </div>
 
-      <FilterDrawer
-        open={filterDrawerOpen}
-        onClose={() => setFilterDrawerOpen(false)}
-        onClear={() => { setClientFilterList(''); setStatusFilterList(''); }}
-        activeCount={listActiveFilterCount}
-        resultCount={filteredInvoiceList.length}
-        resultLabel="invoices"
-      >
-        <FilterSection label="Client">
-          <select value={clientFilterList} onChange={(e) => setClientFilterList(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Clients</option>
-            {(clients || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </FilterSection>
-        <FilterSection label="Payment Status">
-          <select value={statusFilterList} onChange={(e) => setStatusFilterList(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Statuses</option>
-            <option value="unpaid">Unpaid</option>
-            <option value="partial">Partial</option>
-            <option value="paid">Paid</option>
-            <option value="overdue">Overdue</option>
-          </select>
-        </FilterSection>
-      </FilterDrawer>
-
-      <div className="space-y-3">
+      {invoicesLoading && <p role="status" className="py-8 text-center text-sm text-slate-500">Loading invoices…</p>}
+      {invoicesError && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Could not load invoices. Check your connection and retry.</p>}
+      <div className="space-y-2">
         {sortedInvoiceList.map((inv: any) => (
-          <Card key={inv.id} className="p-4">
+          <Card key={inv.id} className="p-3">
             <div className="flex items-start justify-between mb-3">
               <div>
                 <p className="font-semibold text-slate-900">{inv.invoice_number}</p>
@@ -622,7 +788,7 @@ export default function BillingPage() {
                 )}
               </div>
               <div className="text-right">
-                <p className="text-lg font-bold text-slate-900">Rs {inv.total.toLocaleString('en-IN')}</p>
+                <p className="text-base font-semibold text-slate-900">Rs {inv.total.toLocaleString('en-IN')}</p>
                 <StatusBadge status={inv.payment_status} />
               </div>
             </div>
@@ -646,13 +812,13 @@ export default function BillingPage() {
               <button onClick={() => downloadInvoice(inv)} className="flex items-center gap-1 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg text-sm font-medium">
                 <Download className="w-4 h-4" /> PDF
               </button>
-              <button onClick={() => setDeleteTarget(inv)} className="flex items-center gap-1 text-red-600 hover:bg-red-50 px-3 py-1.5 rounded-lg text-sm font-medium">
-                <Trash2 className="w-4 h-4" />
-              </button>
+              {inv.payment_status !== 'paid' && <button title="Delete invoice (confirm required)" aria-label={`Delete invoice ${inv.invoice_number}`} onClick={() => setDeleteTarget(inv)} className="flex items-center gap-1 text-red-600 hover:bg-red-50 px-2 py-1.5 rounded-lg text-xs font-medium">
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>}
             </div>
           </Card>
         ))}
-        {(!invoices || invoices.length === 0) && (
+        {!invoicesLoading && !invoicesError && (!invoices || invoices.length === 0) && (
           <Card><EmptyState icon={<FileText className="w-12 h-12" />} title="No invoices yet" subtitle="Create your first invoice" /></Card>
         )}
       </div>
@@ -667,27 +833,67 @@ export default function BillingPage() {
             </div>
           )}
 
-          <Select label="Client" value={form.client_id} onChange={selectClient} options={(clients || []).map((c) => ({ value: c.id, label: c.name }))} required />
-
-          {projectsForClient.length > 0 && (
-            <Select
-              label="Project (optional)"
-              value={form.project_id}
-              onChange={(v) => setForm({ ...form, project_id: v })}
-              options={projectsForClient.map((p) => ({ value: p.id, label: p.name }))}
-            />
+          {!isEditing ? (
+            <div className="space-y-3">
+              <label className="block text-xs font-medium text-slate-600">Work Order
+                <select value={form.purchase_order_id} onChange={(event) => selectPO(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-blue-500">
+                  <option value="">Choose Work Order…</option>
+                  {(purchaseOrders || []).map((po) => (
+                    <option key={po.id} value={po.id}>
+                      {po.name || po.po_number} ({po.po_number}) · {(clients || []).find(c => c.id === po.client_id)?.name || 'Client'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selectedPO && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">{form.bill_to_name || 'Client'}</p>
+                      <p className="text-xs text-slate-500">Work Order {selectedPO.po_number} · Completed work eligible for billing</p>
+                    </div>
+                    <span className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200">{selectedShopIds.length} completed shops in scope</span>
+                  </div>
+                  {!canSelectShops && <p role="status" className="mt-2 text-xs text-amber-700">{completionShopsError || completedItemsError || billedWorkError || poRatesError ? 'Could not fetch completed work or PO rates. Recheck the connection before billing.' : 'Loading completion and billing history…'}</p>}
+                  {!!calculatedBatch.issues.length && <div role="alert" className="mt-2 text-xs text-red-700 space-y-1">{calculatedBatch.issues.map((issue) => <p key={issue}>{issue}</p>)}</div>}
+                  <details className="mt-2 rounded-lg border border-slate-200 bg-white" >
+                    <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-slate-600">Adjust completed shop scope (internal selection only)</summary>
+                    <div className="p-3 border-t border-slate-100">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="relative min-w-0 flex-1">
+                          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
+                          <input aria-label="Search eligible completed shops" value={shopSearch} onChange={e=>setShopSearch(e.target.value)} placeholder="Search eligible shops…" className="w-full pl-8 pr-3 py-2 text-xs rounded-lg border border-slate-300" />
+                        </div>
+                        <button type="button" disabled={!canSelectShops} onClick={()=>setSelectedShopIds(prev=>filteredEligibleShops.every((shop:any)=>prev.includes(shop.id))
+                          ? prev.filter(id=>!filteredEligibleShops.some((shop:any)=>shop.id===id))
+                          : [...new Set([...prev, ...filteredEligibleShops.map((shop:any)=>shop.id)])])}
+                          className="shrink-0 text-xs font-medium text-blue-700 hover:underline disabled:opacity-50">Select / clear</button>
+                      </div>
+                      <div className="max-h-44 overflow-y-auto divide-y divide-slate-100">
+                        {filteredEligibleShops.map((shop: any) => <label key={shop.id} className="flex items-center gap-2 py-1.5 text-xs text-slate-700 cursor-pointer">
+                          <input type="checkbox" disabled={!canSelectShops} checked={selectedShopIds.includes(shop.id)} onChange={e=>setSelectedShopIds(prev=>e.target.checked ? [...prev,shop.id] : prev.filter(id=>id!==shop.id))} className="h-4 w-4 accent-blue-600" />
+                          <span className="min-w-0 flex-1 truncate">{shop.name}</span>
+                        </label>)}
+                        {canSelectShops && !filteredEligibleShops.length && <p className="text-xs text-slate-500 py-2">No completed unbilled work matches.</p>}
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              )}
+            </div>
+          ) : editHasShopLinks ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              <p className="text-xs text-slate-500">Client / Work Order — existing invoice</p>
+              <p>{(clients || []).find(c=>c.id===form.client_id)?.name || 'Client'} · {editingSourceInvoice?.purchase_orders?.name || editingSourceInvoice?.purchase_orders?.po_number || 'Work Order'}</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <Select label="Client" value={form.client_id} onChange={selectClient} options={(clients || []).map(c => ({ value: c.id, label: c.name }))} required />
+              <Select label="Work Order" value={form.purchase_order_id} onChange={selectPO} options={(purchaseOrders || []).filter(po=>!form.client_id || po.client_id===form.client_id).map(po=>({value:po.id,label:po.name ? `${po.name} (${po.po_number})` : po.po_number}))} />
+              {projectsForClient.length > 0 && <Select label="Project (optional)" value={form.project_id} onChange={v=>setForm({...form,project_id:v})} options={projectsForClient.map(p=>({value:p.id,label:p.name}))} />}
+            </div>
           )}
-
-          <Select
-            label="Purchase Order (optional)"
-            value={form.purchase_order_id}
-            onChange={selectPO}
-            options={(purchaseOrders || []).map((po) => ({ value: po.id, label: po.name ? `${po.name} (${po.po_number})` : po.po_number }))}
-          />
-          {form.client_id && (purchaseOrders || []).length === 0 && (
-            <p className="text-xs text-slate-400 -mt-2">No active POs for this client — invoice can still be created without one.</p>
-          )}
-
           {selectedPO?.gst_percentage != null && parseFloat(form.gst_rate) !== selectedPO.gst_percentage && (
             <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
               <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -695,24 +901,6 @@ export default function BillingPage() {
                 {selectedPO.name ? `${selectedPO.name} (${selectedPO.po_number})` : `PO ${selectedPO.po_number}`} says <strong>{selectedPO.gst_percentage}% GST</strong>, this invoice is charging{' '}
                 <strong>{form.gst_rate || 0}%</strong>. Double-check before sending — this is just a flag, not a block.
               </span>
-            </div>
-          )}
-
-          {selectedPO && (
-            <div className="border border-slate-200 rounded-lg p-3 bg-slate-50 space-y-2">
-              <p className="text-xs font-medium text-slate-600 flex items-center gap-1"><ShoppingCart className="w-3.5 h-3.5" /> PO line items — pick one per invoice item below to track balance</p>
-              {(poUtilization || []).map((row) => {
-                const fig = computeUtilization(row, poStage);
-                return (
-                  <div key={row.po_line_item_id} className="flex items-center justify-between text-xs gap-2">
-                    <span className="text-slate-700 truncate">{row.description}{row.hsn_code ? ` (HSN ${row.hsn_code})` : ''}</span>
-                    <span className={`font-medium whitespace-nowrap ${fig.remainingBalance != null && fig.remainingBalance < 0 ? 'text-red-600' : 'text-slate-600'}`}>
-                      Balance: {formatRupees(fig.remainingBalance)}
-                    </span>
-                  </div>
-                );
-              })}
-              {(poUtilization || []).length === 0 && <p className="text-xs text-slate-400">This PO has no line items yet.</p>}
             </div>
           )}
 
@@ -759,7 +947,7 @@ export default function BillingPage() {
                   onChange={(e) => e.target.value !== 'custom' && setForm({ ...form, gst_rate: e.target.value })}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition text-slate-900 bg-white"
                 >
-                  {GST_RATE_PRESETS.map((r) => <option key={r} value={r}>{r}%{r === '18' ? ' (standard)' : ''}</option>)}
+                  {GST_RATE_PRESETS.map((r) => <option key={r} value={r}>{r}%</option>)}
                   <option value="custom">Custom...</option>
                 </select>
               </div>
@@ -777,6 +965,46 @@ export default function BillingPage() {
             </div>
           </div>
 
+          {!isEditing ? (
+            <section aria-label="Work Order invoice line items" className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+              <div className="flex flex-wrap justify-between gap-2 px-3 py-2.5 border-b border-slate-200 bg-slate-50">
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">Completed Work Order billing</p>
+                  <p className="text-xs text-slate-500">Actual work completed, less quantities already invoiced. Grouped by PO line item.</p>
+                </div>
+                <span className="text-xs text-slate-500">{groupedInvoiceItems.length} line{groupedInvoiceItems.length===1?'':'s'}</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[920px] text-xs">
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr><th className="text-left px-3 py-2 font-medium">PO work item</th><th className="text-right px-3 py-2 font-medium">PO scope</th><th className="text-right px-3 py-2 font-medium">Completed</th><th className="text-right px-3 py-2 font-medium">Billed before</th><th className="text-right px-3 py-2 font-medium">This invoice</th><th className="text-right px-3 py-2 font-medium">Rate</th><th className="text-right px-3 py-2 font-medium">Amount</th></tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {groupedInvoiceItems.map((item, index) => {
+                      const poRow = (poUtilization || []).find(row => row.po_line_item_id === item.po_line_item_id);
+                      const isArea = poRow?.uom === 'sqft';
+                      const suffix = isArea ? ' sq.ft' : ` ${poRow?.uom || 'qty'}`;
+                      const planned = poRow ? (isArea ? poRow.budgeted_area : poRow.budgeted_qty) : null;
+                      const completed = poRow ? computeUtilization(poRow, poStage).actualPrimary : 0;
+                      const billed = billedWork.filter(row => row.po_line_item_id === item.po_line_item_id).reduce((sum,row) => sum + Number((isArea ? row.area : row.quantity) || 0),0);
+                      const currentUnits = isArea ? Number(item.area || 0) : Number(item.quantity || 0);
+                      return <tr key={`${item.po_line_item_id}-${index}`}>
+                        <td className="px-3 py-2.5 font-medium text-slate-800">{item.description}<span className="block font-normal text-[11px] text-slate-500">{item.hsn_code ? `HSN/SAC ${item.hsn_code}` : 'HSN/SAC not set on PO'}</span></td>
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap">{planned == null ? '—' : Number(planned).toLocaleString('en-IN') + suffix}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap">{Number(completed).toLocaleString('en-IN') + suffix}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap">{Number(billed).toLocaleString('en-IN') + suffix}</td>
+                        <td className="px-3 py-2.5 text-right font-medium text-blue-700 tabular-nums whitespace-nowrap">{currentUnits.toLocaleString('en-IN') + suffix}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap">₹{Number(item.rate).toLocaleString('en-IN')}</td>
+                        <td className="px-3 py-2.5 text-right font-semibold tabular-nums whitespace-nowrap">₹{Number(item.amount).toLocaleString('en-IN')}</td>
+                      </tr>;
+                    })}
+                    {!groupedInvoiceItems.length && <tr><td colSpan={7} className="px-3 py-5 text-center text-slate-500">Choose a Work Order with completed, unbilled work.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+              {selectedPO && calculatedBatch.allocations.length > 0 && <p className="border-t border-slate-100 px-3 py-2 text-[11px] text-slate-500">{calculatedBatch.allocations.length} completed work records linked internally; shop names are not included in the client invoice.</p>}
+            </section>
+          ) : (
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-sm font-medium text-slate-700">Line Items</label>
@@ -799,7 +1027,7 @@ export default function BillingPage() {
                   form.items.filter((_, i) => i !== idx).map((it) => it.po_line_item_id).filter(Boolean)
                 );
                 const availableLineItems = (poUtilization || []).filter(
-                  (row) => row.po_line_item_id === item.po_line_item_id || !pickedElsewhere.has(row.po_line_item_id)
+                  (row) => row.po_line_item_id === item.po_line_item_id || !!item.shop_id || !pickedElsewhere.has(row.po_line_item_id)
                 );
                 return (
                   <div key={idx} className="border border-slate-100 rounded-lg p-2">
@@ -820,6 +1048,7 @@ export default function BillingPage() {
                         Qty/Area auto-filled with actual completed work ({fig.actualPrimary.toLocaleString('en-IN')} {linkedRow.uom === 'sqft' ? 'sq ft' : linkedRow.uom} {poStage}) — edit if you're billing only part of it.
                       </p>
                     )}
+                    {item.shop_id && <p className="mb-1 text-[11px] font-medium text-blue-700">Linked shop: {completionShops.find((sh:any)=>sh.id===item.shop_id)?.name || 'Recorded shop'}</p>}
                     <div className="mb-2">
                       <input placeholder="Description" value={item.description} onChange={(e) => updateItem(idx, 'description', e.target.value)} className="w-full px-2 py-1.5 border border-slate-300 rounded text-sm" />
                     </div>
@@ -888,6 +1117,8 @@ export default function BillingPage() {
             </div>
           </div>
 
+          )}
+
           <div className="bg-slate-50 rounded-lg p-4 space-y-1 text-sm">
             <div className="flex justify-between"><span className="text-slate-600">Subtotal:</span><span className="font-medium">Rs {subtotal.toLocaleString('en-IN')}</span></div>
             {form.gst_type === 'intra' ? (
@@ -905,11 +1136,11 @@ export default function BillingPage() {
           <Textarea label="Notes" value={form.notes} onChange={(v) => setForm({ ...form, notes: v })} rows={2} />
 
           <button
-            onClick={() => (isEditing ? updateInvoiceMutation.mutate() : createInvoiceMutation.mutate())}
-            disabled={isSaving || !form.client_id}
+            onClick={() => (isEditing ? updateInvoiceMutation.mutate() : setConfirmPost(true))}
+            disabled={isSaving || !form.client_id || (!isEditing && (!selectedPO || !canSelectShops || !selectedShopIds.length || calculatedBatch.issues.length>0 || !form.items.some(item=>!!item.work_item_id)))}
             className="w-full bg-blue-600 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
           >
-            {isSaving ? 'Saving...' : isEditing ? 'Save Changes' : 'Create Invoice'}
+            {isSaving ? 'Saving...' : isEditing ? 'Save Changes' : 'Create Work Order Invoice'}
           </button>
           {saveError && <p className="text-sm text-red-600">{saveError.message}</p>}
         </div>
@@ -945,7 +1176,7 @@ export default function BillingPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {viewInvoice?.invoice_items?.map((item: InvoiceItem) => (
+              {consolidateInvoiceLines((viewInvoice?.invoice_items || []) as InvoiceItem[]).map((item: InvoiceItem) => (
                 <tr key={item.id}>
                   <td className="px-3 py-2 text-slate-900">
                     {item.description}
@@ -996,6 +1227,17 @@ export default function BillingPage() {
         </div>
       </Modal>
 
+      <ConfirmDialog
+        open={confirmPost}
+        onClose={() => { if (!createInvoiceMutation.isPending) setConfirmPost(false); }}
+        title="Confirm Work Order invoice"
+        message={`Issue one invoice for ${selectedPO?.name || selectedPO?.po_number || 'this Work Order'}: ${groupedInvoiceItems.length} PO line items, ${selectedShopIds.length} completed shops included internally. Subtotal ₹${subtotal.toLocaleString('en-IN')}, ${form.gst_type === 'intra' ? 'CGST + SGST' : 'IGST'} ₹${gstSplit.taxAmount.toLocaleString('en-IN')}, total ₹${total.toLocaleString('en-IN')}. Verify GST rate and place of supply before confirming.`}
+        confirmLabel="Issue invoice"
+        loading={createInvoiceMutation.isPending}
+        manualClose
+        error={createInvoiceMutation.error?.message || null}
+        onConfirm={() => createInvoiceMutation.mutate()}
+      />
       <ConfirmDialog
         open={!!deleteTarget}
         onClose={() => setDeleteTarget(null)}

@@ -1,12 +1,38 @@
-# QA / Release Checklist
+# AdRoute — PO Billing Staging QA
 
-1. Owner/admin: `/purchase-orders` shows type filter in main toolbar (All Work Types, Survey + Install, Supply Only, Direct Installation) and no Supply Orders sidebar link.
-2. Filter Supply Only: only orders with `fulfillment_type='supply_only'` remain; refresh and browser Back preserve correct URL and selection; combined status/client filters work.
-3. Desktop: order row opens original detail drawer. Supply Only row also offers direct `Manage Supply`; neither action bubbles incorrectly. Mobile: tap row for detail, or separate Manage Supply shortcut.
-4. Supply workflow: Entries & Design and Dispatch tabs operate on selected Work Order. Back returns to selected Work Order. Existing create/edit/dispatch data and permissions stay intact.
-5. Old `/supply-orders` URL redirects to Work Orders Supply workflow, not a blank or 404 page. Protected route rejects unauthorized users.
-6. Owner/admin delete: not visibly primary; click More actions, then Delete, then existing confirmation. Cancel confirmation retains the Work Order, linked shops, invoices and photos.
-7. Test account role, financial access, mobile/tablet breakpoint, keyboard focus and missing/empty Shop/PO data.
-8. Verify `npm run typecheck`, `npm run lint`, `npm run build`; then review Work Order edit/delete and Supply flows on a staging Supabase database before deploying.
+## Validation before main push
 
-_Source TSX syntax parsing passed. Full build/typecheck and live Supabase/browser tests were not run successfully in this environment because installed type dependencies are incomplete._
+- [ ] `git branch --show-current` = main, clean baseline before applying
+- [ ] `node scripts/verify-po-billing.mjs` passes all 17 arithmetic checks
+- [ ] `npm run typecheck`, `npm run lint`, `npm run build` all pass
+- [ ] No console errors in Billing or Work Orders
+
+## PO-first invoice UI
+
+- [ ] Select a Work Order directly (client auto-populates), with no required second Client click
+- [ ] Completed and unbilled shops auto-include; expand scope for a subset
+- [ ] One displayed invoice row per PO item (not one invoice per shop)
+- [ ] PO line shows planned, completed, previously invoiced, current invoice and rate
+- [ ] Printed PDF and View Invoice group by PO line; no new invoice description includes shop names
+- [ ] Every stored invoice_items row retains shop_id, work_item_id and po_line_item_id links
+- [ ] Existing invoice PDF, payment status and historical data stay unchanged
+
+## Data and security
+
+- [ ] Survey + Installation uses installed area/qty; not approved quantities
+- [ ] Supply Only uses produced quantities; sqft uses approved area ratio when needed
+- [ ] Non-completed shops never included
+- [ ] Previously billed item quantity deducted; repeat does not bill it again
+- [ ] Invoice-linked legacy items with no work_item_id block re-billing pending reconciliation
+- [ ] Owner/Admin creation works; field/client roles cannot create or query restricted money data
+- [ ] Verify GSTIN, HSN/SAC, intra/inter state GST, PO terms and tax invoice numbering
+- [ ] Verify actual invoice number is unique/serial and issued PDF is compliant
+- [ ] Marking invoice paid no longer offers client-side Delete action
+- [ ] No shop is moved into `billed` status by invoice creation
+- [ ] Test two concurrent invoice posts to the same PO and network failure / resume: current frontend precheck is not a transaction; **do not release for concurrent posting without server-side atomic enforcement**
+
+## Historical billing cleanup
+
+- [ ] Back up invoice and invoice_item tables with external immutable records
+- [ ] Review `BILLING_RECORDS_AUDIT.sql` counts, paid statuses, linked items and invoice numbers
+- [ ] Accountant confirms statutory retention and test-vs-issued status; no historical deletion is included or automatic

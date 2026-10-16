@@ -141,16 +141,19 @@ export async function resolveZoneIds(
   zoneNames: (string | null | undefined)[]
 ): Promise<Map<string, string>> {
   const distinctNames = Array.from(
-    new Set(zoneNames.map((z) => (z || '').trim()).filter((z) => z !== ''))
+    new Map(zoneNames.map((z) => (z || '').trim()).filter(Boolean).map((z) => [z.toLowerCase(), z])).values()
   );
   const result = new Map<string, string>();
-  if (distinctNames.length === 0) return result;
+  if (distinctNames.length === 0) return result; // Missing Zone remains NULL (No Zone), not a made-up zone.
 
-  const { data: existingZones, error: selectError } = await supabase
-    .from('zones')
-    .select('id, name, project_id')
-    .eq('organization_id', organizationId);
-  if (selectError) throw selectError;
+  const existingZones: { id: string; name: string; project_id: string | null }[] = [];
+  for (let from = 0; ; from += 500) {
+    const { data, error } = await supabase.from('zones').select('id,name,project_id')
+      .eq('organization_id', organizationId).order('id').range(from, from + 499);
+    if (error) throw error;
+    existingZones.push(...(data || []));
+    if (!data || data.length < 500) break;
+  }
 
   const existingByKey = new Map<string, string>();
   for (const z of existingZones || []) {

@@ -1,17 +1,29 @@
-# Breadcrumb restoration — targeted hotfix
+# AdRoute — Reports & Consolidated Billing (main branch)
 
-**Only functional change:** restore the last-three-visited-pages breadcrumbs to the agency top header, immediately left of Notification Bell.
+## Source files changed
 
-Affected source: `src/components/AdminLayout.tsx` only.
+- `src/lib/reportPortfolio.ts` — A4 **portrait** evidence PDFs with original photographs fitted into wide, borderless slots; linked dimensions below each photo; non-linked work items shown once; PPT image borders removed; Excel marked previews + clickable full-resolution source photo links.
+- `src/pages/ReportsPage.tsx` — Main Client, Work Order, Zone and Date filters visible in a compact row; removed duplicate filter controls from advanced drawer. Existing export formats and legacy generators untouched.
+- `src/pages/BillingPage.tsx` — One manual consolidated invoice for **selected completed shops belonging to one Work Order**. Uses pre-existing `invoice_items.shop_id/work_item_id`, automatically drafts individual shop work items and PO rates, checks for previously billed shops, and updates only selected shop statuses. Removes unsafe client-wide `billed` update. Adds Client/Work Order/Payment/Date filters, safer edit scope, and smaller create/list controls.
+- `scripts/verify-report-billing.mjs` — parser and regression checks.
 
-The patch adds React Router `Link`, `useEffect`, `ChevronRight`, recent navigation state and storage handling, and the header `<nav>` region. It does **not** modify sidebar items, Work Orders, Supply Only logic, create/edit/delete, routes, roles, or database.
+## Files NOT changed
 
-## Application
+`src/components/AdminLayout.tsx`, `src/App.tsx`, sidebar, breadcrumbs, Survey Review, Installer/Surveyor, Shop CRUD, invoice PDF generator, financial RLS and all existing Supabase tables/migrations.
 
-Run `APPLY_ONLY_BREADCRUMBS.ps1` from an extracted ZIP folder (in PowerShell). It calls an idempotent, anchor-checked edit script to preserve any unrelated changes to your existing source file. Backups go into `.git/adroute-patch-backups` and won't be accidentally committed. Alternatively `src/components/AdminLayout.tsx` is included as a ready file **only when your local version exactly matches the immediately preceding Work Orders ZIP**; prefer the installer.
+## Dependencies and database
 
-## Validation
+No new dependency and **no SQL migration**. Uses existing `jspdf`, `exceljs`, `pptxgenjs` and existing `invoice_items.shop_id`/`work_item_id` fields.
 
-The hotfix script and TypeScript/TSX syntax have been checked on the immediately preceding Work Orders ZIP. Full project build and live browser verification require local project dependencies and were not performed here.
+## Important constraints
 
-Manual check: visit Work Orders → Survey Review → Clients; confirm three clickable breadcrumb labels next to the Notification Bell. On refresh, current tab's history should remain for the session. Verify Supply Orders is still absent from sidebar and the Work Orders filter remains unchanged.
+- The Billing screen now requires selecting a Work Order and a subset of **installed/dispatched** shops when creating a new invoice. Existing invoices retain their historical structure, edit, payment status and PDF download.
+- Amounts are a **draft** based on current physical work and mapped PO line-item rates; owner must verify rates, quantities and GST. No auto-billing in the background.
+- The new invoice and invoice lines are written through the existing Supabase API. They are **not wrapped in a single server-side transaction**: if a later status update fails, the UI explicitly displays the invoice number for manual reconciliation. Do not click Create again.
+- Existing historical invoices that were created before shop-level linking cannot be automatically matched to individual shops. Historic `billed` statuses are not modified or inferred.
+- Image hyperlinks in Excel point to the source image, which may require authentication; the **marked composition is embedded** in the workbook.
+- A report with only one photo necessarily has one image on its page; two-photo pages are used when space and evidence allow. Long linked descriptions flow onto subsequent portrait pages, never intentionally clipped.
+
+## Source compatibility
+
+Apply to existing clean `main` with the previous **Reports Image Quality** patch installed. The installer checks all source hashes and refuses to overwrite an unrecognized file. Review `QA_CHECKLIST.md` before production deployment.

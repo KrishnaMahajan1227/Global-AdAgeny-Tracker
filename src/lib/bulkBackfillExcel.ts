@@ -28,7 +28,7 @@ import { SHOP_STATUSES, STATUS_LABELS } from './types';
 
 export const BULK_BACKFILL_HEADERS = [
   'New Shop?', 'Shop ID', 'Shop Name', 'Phone', 'Work Order', 'Client',
-  'City', 'District', 'State', 'Address', 'Owner Name', 'Current Status',
+  'City', 'District', 'State', 'Address', 'Owner Name', 'Zone', 'Current Status',
   'Stage', 'Work Type', 'Material', 'Width', 'Height', 'Unit', 'Qty',
   'Surveyor', 'Designer', 'Production Person', 'Installer', 'Note',
 ] as const;
@@ -138,6 +138,7 @@ export async function downloadBulkBackfillTemplate(opts: BulkBackfillTemplateOpt
   wsInstructions.addRow([]);
   bold('Designer only needed if Stage includes Design. Production Person / Installer only needed if Stage includes Production.');
   wsInstructions.addRow([]);
+  plain('Zone may be left blank (shown as No Zone). Additional Excel headers are retained under Shop Additional Details.');
   plain('Save the file and upload it back from the same screen.');
 
   // Hidden reference sheet the dropdowns pull their options from — kept
@@ -173,13 +174,13 @@ export async function downloadBulkBackfillTemplate(opts: BulkBackfillTemplateOpt
 
   const emptyItemCols = ['', '', '', '', '', 'ft', '', '', '', '', '', ''];
   for (const shop of shops) {
-    const row = wsData.addRow(['No', shop.id, shop.name, shop.phone || '', '', '', shop.city || '', '', '', '', '', '', ...emptyItemCols]);
+    const row = wsData.addRow(['No', shop.id, shop.name, shop.phone || '', '', '', shop.city || '', '', '', '', '', '', '', ...emptyItemCols]);
     row.fill = EXISTING_FILL as ExcelJS.Fill;
     row.getCell(3).note = `Abhi ka status: ${STATUS_LABELS[shop.status] || shop.status}`;
   }
   const newRowsStart = shops.length + 2;
   for (let i = 0; i < 30; i++) {
-    const row = wsData.addRow(['Yes', '', '', '', '', '', '', '', '', '', '', '', ...emptyItemCols]);
+    const row = wsData.addRow(['Yes', '', '', '', '', '', '', '', '', '', '', '', '', ...emptyItemCols]);
     row.fill = NEW_FILL as ExcelJS.Fill;
   }
   const lastRow = newRowsStart + 30 - 1;
@@ -245,6 +246,8 @@ export interface BulkBackfillParsedShop {
   state: string;
   address: string;
   ownerName: string;
+  zoneName: string;
+  extraDetails: Record<string, string>;
   stage: BackfillStage | null;
   stageRaw: string;
   /** Optional final shop status chosen from the Current Status dropdown (a real shop status code). */
@@ -259,7 +262,7 @@ export interface BulkBackfillParsedShop {
  *  parse-level error only when the sheet/headers themselves are wrong;
  *  per-row problems (bad stage, no items, missing client) surface later
  *  per-shop instead of blocking the whole file. */
-export function parseBulkBackfillWorkbook(wb: XLSX.WorkBook): { shops: BulkBackfillParsedShop[] } | { error: string } {
+export function parseBulkBackfillWorkbook(wb: XLSX.WorkBook): { shops: BulkBackfillParsedShop[]; extraHeaders: string[] } | { error: string } {
   const sheet = wb.Sheets['Backfill Data'] || wb.Sheets[wb.SheetNames[wb.SheetNames.length - 1]];
   if (!sheet) return { error: 'Could not find a "Backfill Data" sheet in this file.' };
   const aoa = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1 });
@@ -271,7 +274,7 @@ export function parseBulkBackfillWorkbook(wb: XLSX.WorkBook): { shops: BulkBackf
     newShop: colIndex('New Shop?'), shopId: colIndex('Shop ID'), shopName: colIndex('Shop Name'), phone: colIndex('Phone'),
     workOrder: colIndex('Work Order'), client: colIndex('Client'),
     city: colIndex('City'), district: colIndex('District'), state: colIndex('State'), address: colIndex('Address'),
-    ownerName: colIndex('Owner Name'), stage: colIndex('Stage'), currentStatus: colIndex('Current Status'),
+    ownerName: colIndex('Owner Name'), zone: colIndex('Zone'), stage: colIndex('Stage'), currentStatus: colIndex('Current Status'),
     workType: colIndex('Work Type'), material: colIndex('Material'), width: colIndex('Width'),
     height: colIndex('Height'), unit: colIndex('Unit'), heightUnit: colIndex('Height Unit'), qty: colIndex('Qty'),
     surveyor: colIndex('Surveyor'), designer: colIndex('Designer'), production: colIndex('Production Person'),
@@ -280,6 +283,11 @@ export function parseBulkBackfillWorkbook(wb: XLSX.WorkBook): { shops: BulkBackf
   if (idx.shopId === -1) return { error: 'Could not find a "Shop ID" column — please use the downloaded template and don\'t rename its columns.' };
   if (idx.shopName === -1) return { error: 'Could not find a "Shop Name" column — please use the downloaded template and don\'t rename its columns.' };
 
+  // Unrecognized Excel columns are not schema migrations. Keep their values in
+  // shops.extra_details (JSONB), under the exact uploaded header, and report
+  // them back to the importer. Existing templates remain compatible.
+  const standardHeaders = new Set([...BULK_BACKFILL_HEADERS, 'Height Unit'].map((h) => h.toLowerCase()));
+  const extraHeaders = headerRow.filter((h) => h && !standardHeaders.has(h.toLowerCase()));
   const cell = (row: unknown[], i: number) => (i === -1 || row[i] == null ? '' : String(row[i]).trim());
   const byKey = new Map<string, BulkBackfillParsedShop>();
   const UNIT_ALIASES: Record<string, string> = { ft: 'ft', feet: 'ft', foot: 'ft', "'": 'ft', in: 'in', inch: 'in', inches: 'in', '"': 'in', m: 'm', mtr: 'm', meter: 'm', meters: 'm', metre: 'm', metres: 'm', cm: 'cm', centimeter: 'cm', centimeters: 'cm', centimetre: 'cm', mm: 'mm', millimeter: 'mm' };
@@ -336,7 +344,7 @@ export function parseBulkBackfillWorkbook(wb: XLSX.WorkBook): { shops: BulkBackf
     if (!entry) {
       entry = {
         key, shopId, isNew: false, isNewAmbiguous: false, shopName, phone,
-        clientName: '', workOrderNumber: '', city: '', district: '', state: '', address: '', ownerName: '',
+        clientName: '', workOrderNumber: '', city: '', district: '', state: '', address: '', ownerName: '', zoneName: '', extraDetails: {},
         stage: null, stageRaw: '', currentStatus: null, currentStatusRaw: '',
         items: [], surveyor: '', designer: '', production: '', installer: '', note: '',
       };
@@ -347,6 +355,11 @@ export function parseBulkBackfillWorkbook(wb: XLSX.WorkBook): { shops: BulkBackf
     fill('clientName', cell(row, idx.client)); fill('workOrderNumber', cell(row, idx.workOrder)); fill('city', cell(row, idx.city));
     fill('district', cell(row, idx.district)); fill('state', cell(row, idx.state)); fill('address', cell(row, idx.address));
     fill('ownerName', cell(row, idx.ownerName)); fill('phone', phone);
+    if (!entry.zoneName) entry.zoneName = cell(row, idx.zone);
+    for (const header of extraHeaders) {
+      const value = cell(row, colIndex(header));
+      if (value && !entry.extraDetails[header]) entry.extraDetails[header] = value;
+    }
 
     const stageRaw = cell(row, idx.stage);
     if (stageRaw && !entry.stageRaw) { entry.stageRaw = stageRaw; entry.stage = STAGE_LOOKUP[stageRaw.toLowerCase()] || null; }
@@ -383,5 +396,5 @@ export function parseBulkBackfillWorkbook(wb: XLSX.WorkBook): { shops: BulkBackf
   }
 
   if (unitErrors.length) return { error: `Excel me ye sudhaarein:\n${unitErrors.slice(0, 8).join('\n')}${unitErrors.length > 8 ? `\n… aur ${unitErrors.length - 8} aur` : ''}` };
-  return { shops: Array.from(byKey.values()) };
+  return { shops: Array.from(byKey.values()), extraHeaders };
 }

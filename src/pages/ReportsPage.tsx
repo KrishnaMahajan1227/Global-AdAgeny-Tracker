@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
-import { Card, PageHeader, FilterButton, FilterDrawer, FilterSection } from '@/components/ui';
+import { Card, FilterButton, FilterDrawer, FilterSection } from '@/components/ui';
 import {
   generateSurveyReportPDF, generateInstallationReportPDF, generateInvoicePDF, generateInvoiceBundlePDF,
   generateFinalClientReportPDF, exportShopsToExcel, exportMultiSheetExcel, exportPOUtilizationToExcel,
@@ -13,9 +13,10 @@ import {
   SurveyReportEntry, InstallationReportEntry, FinalReportEntry, InvoiceReportEntry,
 } from '@/lib/reports';
 import { fetchVehicleLoadLog } from '@/lib/vehicleLoadLog';
+import { generatePortfolioReport } from '@/lib/reportPortfolio';
 import {
   FileText, FileSpreadsheet, Presentation, Download, FileBarChart, ShoppingCart, Truck,
-  Layers, CheckCircle2, AlertCircle, X, Loader2, Store, Search,
+  Layers, CheckCircle2, AlertCircle, X, Loader2, Store, Search, Images,
 } from 'lucide-react';
 import type { Organization, Client, POLineItemUtilization, DesignVersion, DesignVersionItem } from '@/lib/types';
 
@@ -93,9 +94,6 @@ const colorMap: Record<string, string> = {
   teal: 'bg-teal-50 text-teal-600', amber: 'bg-amber-50 text-amber-600',
   indigo: 'bg-indigo-50 text-indigo-600', fuchsia: 'bg-fuchsia-50 text-fuchsia-600',
 };
-const extBadge: Record<string, string> = {
-  PDF: 'bg-red-50 text-red-600', PPTX: 'bg-orange-50 text-orange-600', XLSX: 'bg-green-50 text-green-600',
-};
 
 export default function ReportsPage() {
   const { profile } = useAuth();
@@ -104,9 +102,15 @@ export default function ReportsPage() {
   const [selectedClient, setSelectedClient] = useState('');
   const [selectedCampaign, setSelectedCampaign] = useState('');
   const [selectedPO, setSelectedPO] = useState('');
+  const [zoneFilter, setZoneFilter] = useState('');
+  const [shopStatus, setShopStatus] = useState('');
+  const [period, setPeriod] = useState<'all' | 'today' | 'week' | 'month' | 'last30' | 'custom'>('all');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
   const [selectedShopIds, setSelectedShopIds] = useState<Set<string>>(new Set());
   const [shopSearch, setShopSearch] = useState('');
   const [downloadMode, setDownloadMode] = useState<'combined' | 'separate'>('combined');
+  const [reportSearch, setReportSearch] = useState('');
   const [filterOpen, setFilterOpen] = useState(false);
   const [generating, setGenerating] = useState<string | null>(null);
   const [genProgress, setGenProgress] = useState<{ done: number; total: number } | null>(null);
@@ -149,16 +153,23 @@ export default function ReportsPage() {
   const { data: purchaseOrders } = useQuery({
     queryKey: ['purchase-orders-reports', orgId],
     queryFn: async () => {
-      const data = await fetchAllPages<any>((a, b) => supabase.from('purchase_orders').select('id, po_number, client_id, project_id').eq('organization_id', orgId!).order('id').range(a, b));
-      return data as { id: string; po_number: string; client_id: string; project_id: string | null }[];
+      const data = await fetchAllPages<any>((a, b) => supabase.from('purchase_orders').select('id, po_number, name, client_id, project_id').eq('organization_id', orgId!).order('id').range(a, b));
+      return data as { id: string; po_number: string; name: string | null; client_id: string; project_id: string | null }[];
     },
+    enabled: !!orgId,
+  });
+
+  const { data: zones } = useQuery({
+    queryKey: ['report-zones', orgId],
+    queryFn: async () => fetchAllPages<{ id: string; name: string }>((a,b) =>
+      supabase.from('zones').select('id,name').eq('organization_id',orgId!).order('id').range(a,b)),
     enabled: !!orgId,
   });
 
   const { data: shops } = useQuery({
     queryKey: ['shops-reports', orgId, selectedClient, selectedCampaign, selectedPO],
     queryFn: async () => {
-      let q = supabase.from('shops').select('*, clients(name), projects(name), zones(name)').eq('organization_id', orgId);
+      let q = supabase.from('shops').select('*, clients(name), projects(name), zones(name), purchase_orders(name,po_number)').eq('organization_id', orgId);
       if (selectedClient) q = q.eq('client_id', selectedClient);
       if (selectedCampaign) q = q.eq('project_id', selectedCampaign);
       if (selectedPO) q = q.eq('purchase_order_id', selectedPO);
@@ -167,7 +178,7 @@ export default function ReportsPage() {
     enabled: !!orgId,
   });
 
-  const { data: workItems } = useQuery({
+  const { data: workItems, isError: workItemsError } = useQuery({
     queryKey: ['work-items-reports', orgId],
     queryFn: async () => {
       const data = await fetchAllPages<any>((a, b) => supabase.from('work_items').select('*').eq('organization_id', orgId!).order('id').range(a, b));
@@ -186,7 +197,7 @@ export default function ReportsPage() {
     enabled: !!orgId,
   });
 
-  const { data: surveyPhotos } = useQuery({
+  const { data: surveyPhotos, isError: surveyPhotosError } = useQuery({
     queryKey: ['survey-photos-reports', orgId],
     queryFn: async () => {
       const data = await fetchAllPages<any>((a, b) => supabase.from('survey_photos').select('*').eq('organization_id', orgId!).order('id').range(a, b));
@@ -207,7 +218,7 @@ export default function ReportsPage() {
 
   // Marked board polygons — needed so exports can burn the marked area into
   // the exported image instead of just linking to a plain, unmarked photo.
-  const { data: boardMarkings } = useQuery({
+  const { data: boardMarkings, isError: boardMarkingsError } = useQuery({
     queryKey: ['board-markings-reports', orgId],
     queryFn: async () => {
       const data = await fetchAllPages<any>((a, b) => supabase.from('board_markings').select('*').eq('organization_id', orgId!).order('id').range(a, b));
@@ -216,7 +227,7 @@ export default function ReportsPage() {
     enabled: !!orgId,
   });
 
-  const { data: installations } = useQuery({
+  const { data: installations, isError: installationsError } = useQuery({
     queryKey: ['installations-reports', orgId],
     queryFn: async () => {
       // `installation_jobs` has two FKs into `profiles` — same ambiguous-embed issue as surveys.
@@ -236,7 +247,7 @@ export default function ReportsPage() {
 
   // Design versions + the join table linking each version to the boards it
   // covers — needed for the Design Approval report (survey photo vs. design).
-  const { data: designVersions } = useQuery({
+  const { data: designVersions, isError: designVersionsError } = useQuery({
     queryKey: ['design-versions-reports', orgId],
     queryFn: async () => {
       const data = await fetchAllPages<any>((a, b) => supabase.from('design_versions').select('*').eq('organization_id', orgId!).order('id').range(a, b));
@@ -245,7 +256,7 @@ export default function ReportsPage() {
     enabled: !!orgId,
   });
 
-  const { data: designVersionItems } = useQuery({
+  const { data: designVersionItems, isError: designVersionItemsError } = useQuery({
     queryKey: ['design-version-items-reports', orgId],
     queryFn: async () => {
       const data = await fetchAllPages<any>((a, b) => supabase.from('design_version_items').select('*').eq('organization_id', orgId!).order('id').range(a, b));
@@ -264,11 +275,40 @@ export default function ReportsPage() {
     enabled: !!orgId,
   });
 
+  const periodRange = useMemo(() => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (period === 'today') return { from: start, to: now };
+    if (period === 'week') { start.setDate(start.getDate() - ((start.getDay() + 6) % 7)); return { from: start, to: now }; }
+    if (period === 'month') { start.setDate(1); return { from: start, to: now }; }
+    if (period === 'last30') { start.setDate(start.getDate() - 29); return { from: start, to: now }; }
+    if (period === 'custom') return { from: dateFrom ? new Date(`${dateFrom}T00:00:00`) : null,
+      to: dateTo ? new Date(`${dateTo}T23:59:59`) : null };
+    return { from: null, to: null };
+  }, [period, dateFrom, dateTo]);
+
+  // Report period follows actual field activity, not just shop creation.
+  // An old shop surveyed this month should appear in this month's report.
+  const activityByShop = useMemo(() => {
+    const dates = new Map<string, number>();
+    for (const row of [...(surveys || []), ...(installations || [])]) {
+      const time = Date.parse(row.completed_at || row.submitted_at || row.created_at || '');
+      if (row.shop_id && Number.isFinite(time)) dates.set(row.shop_id, Math.max(dates.get(row.shop_id) || 0,time));
+    }
+    return dates;
+  }, [surveys, installations]);
+
   const scopedShops = useMemo(() => shops || [], [shops]);
-  const filteredShops = useMemo(
-    () => selectedShopIds.size > 0 ? scopedShops.filter((s: any) => selectedShopIds.has(s.id)) : scopedShops,
-    [scopedShops, selectedShopIds]
-  );
+  const filteredShops = useMemo(() => scopedShops.filter((s: any) => {
+    if (selectedShopIds.size && !selectedShopIds.has(s.id)) return false;
+    if (zoneFilter === '__NO_ZONE__' && s.zone_id) return false;
+    if (zoneFilter && zoneFilter !== '__NO_ZONE__' && s.zone_id !== zoneFilter) return false;
+    if (shopStatus && s.status !== shopStatus) return false;
+    const when = activityByShop.get(s.id) || Date.parse(s.updated_at || s.created_at || '');
+    if (periodRange.from && (!Number.isFinite(when) || when < periodRange.from.getTime())) return false;
+    if (periodRange.to && (!Number.isFinite(when) || when > periodRange.to.getTime())) return false;
+    return true;
+  }), [scopedShops, selectedShopIds, zoneFilter, shopStatus, periodRange, activityByShop]);
   const visibleShopOptions = useMemo(() => {
     const q = shopSearch.trim().toLowerCase();
     if (!q) return scopedShops;
@@ -316,10 +356,11 @@ export default function ReportsPage() {
     [poUtilizationRows, selectedCampaign, selectedPO]
   );
 
-  const activeFilterCount = [selectedClient, selectedCampaign, selectedPO].filter(Boolean).length + (selectedShopIds.size > 0 ? 1 : 0);
+  const activeFilterCount = [selectedClient, selectedCampaign, selectedPO, zoneFilter, shopStatus, period !== 'all' ? period : ''].filter(Boolean).length + (selectedShopIds.size > 0 ? 1 : 0);
 
   function clearFilters() {
     setSelectedClient(''); setSelectedCampaign(''); setSelectedPO(''); setSelectedShopIds(new Set()); setShopSearch('');
+    setZoneFilter(''); setShopStatus(''); setPeriod('all'); setDateFrom(''); setDateTo('');
   }
 
   // Every shop-touching Excel export reads from the same raw tables, so
@@ -342,9 +383,67 @@ export default function ReportsPage() {
     setNotice(null);
     try {
       const combined = downloadMode === 'combined';
+      if (period === 'custom' && dateFrom && dateTo && dateFrom > dateTo) {
+        throw new Error('The From date cannot be later than the To date.');
+      }
+      const hasShopFilters = !!(zoneFilter || shopStatus || selectedShopIds.size);
+      if (hasShopFilters && ['invoice-pdf','po-utilization'].includes(type)) {
+        throw new Error('Zone and shop filters apply to field reports only; clear them for billing and Work Order utilization.');
+      }
+
 
       if (PER_SHOP_REPORT_TYPES.has(type) && filteredShops.length === 0) {
         setNotice({ kind: 'error', message: 'Select at least one shop using the filters first.' });
+        return;
+      }
+
+      // Other-format actions share a scoped, evidence-aware export path.
+      if (type.startsWith('unified:')) {
+        const [,kind,format] = type.split(':');
+        if (!['PDF','PPTX','XLSX'].includes(format)) throw new Error('Unsupported export format.');
+        const isShopReport = !['invoice','po-utilization','vehicle-load-log'].includes(kind);
+        if (isShopReport && (workItemsError || surveyPhotosError || boardMarkingsError || installationsError || (['design-approval','final-report'].includes(kind) && (designVersionsError || designVersionItemsError)))) {
+          throw new Error('Some report evidence could not be fetched. Please retry after checking the connection and Storage permissions.');
+        }
+        if (isShopReport && (!workItems || !surveyPhotos || !boardMarkings || !installations)) {
+          throw new Error('Report evidence is still loading. Please retry after the data has finished loading.');
+        }
+        if (!isShopReport && kind !== 'vehicle-load-log' && (zoneFilter || shopStatus || selectedShopIds.size)) {
+          throw new Error('Zone, shop-status and shop selection apply to shop reports only. Clear these filters to export financial or vehicle reports.');
+        }
+        const dateWithin = (v: string | null | undefined) => {
+          if (!periodRange.from && !periodRange.to) return true;
+          const t=Date.parse(v || '');
+          return Number.isFinite(t) && (!periodRange.from || t >= periodRange.from.getTime()) && (!periodRange.to || t <= periodRange.to.getTime());
+        };
+        const selectedPOIds = new Set((purchaseOrders || []).filter(p =>
+          (!selectedClient || p.client_id === selectedClient) && (!selectedCampaign || p.project_id === selectedCampaign) && (!selectedPO || p.id === selectedPO)
+        ).map(p=>p.id));
+        const allowedShopIds = new Set(filteredShops.map((s:any)=>s.id));
+        const vehicleRows = kind === 'vehicle-load-log' && orgId ? (await fetchVehicleLoadLog(orgId, periodRange.from || undefined))
+          .filter(r=>allowedShopIds.has(r.shop_id) && dateWithin(r.loaded_at)) : [];
+        const n = await generatePortfolioReport({
+          shops: filteredShops,
+          workItems: (workItems || []).filter(w=>filteredShops.some(s=>s.id === w.shop_id)),
+          surveys: (surveys || []).filter(r=>filteredShops.some(s=>s.id === r.shop_id)),
+          surveyPhotos: (surveyPhotos || []).filter(r=>filteredShops.some(s=>s.id === r.shop_id)),
+          markings: (boardMarkings || []).filter(m=>(surveyPhotos || []).some(p=>p.id === m.survey_photo_id && filteredShops.some(s=>s.id===p.shop_id))),
+          surveyPhotoItems: (surveyPhotoItems || []).filter((link:any)=>(surveyPhotos || []).some(p=>p.id===link.survey_photo_id && filteredShops.some(s=>s.id===p.shop_id))),
+          installations: (installations || []).filter(r=>filteredShops.some(s=>s.id === r.shop_id)),
+          designVersions: designVersions || [],
+          designVersionItems: designVersionItems || [],
+          invoices: (invoices || []).filter(r=>(!selectedClient || r.client_id===selectedClient) && (!selectedPO || r.purchase_order_id===selectedPO) && dateWithin(r.invoice_date || r.created_at)),
+          utilization: (scopedPoUtilizationRows || []).filter(r=>selectedPOIds.has(r.purchase_order_id) && dateWithin(r.po_date)),
+          vehicleRows,
+        }, {
+          kind, format: format as 'PDF'|'PPTX'|'XLSX',
+          filePrefix: `${kind}-${period}`,
+          organization: org?.name || 'Agency',
+          period: period === 'all' ? 'All dates' : period === 'custom' ? `${dateFrom || 'Start'} to ${dateTo || 'End'}` : period,
+          combined,
+          onImageProgress: (done,total) => setGenProgress({done,total}),
+        });
+        setNotice({kind:'success',message:`${format} report ready · ${n} ${isShopReport ? 'shop(s)' : 'section(s)'}.`});
         return;
       }
 
@@ -393,6 +492,9 @@ export default function ReportsPage() {
           const entries: InvoiceReportEntry[] = [];
           for (const inv of (invoices || [])) {
             if (selectedClient && inv.client_id !== selectedClient) continue;
+            if (selectedPO && inv.purchase_order_id !== selectedPO) continue;
+            if (periodRange.from && Date.parse(inv.invoice_date || inv.created_at || '') < periodRange.from.getTime()) continue;
+            if (periodRange.to && Date.parse(inv.invoice_date || inv.created_at || '') > periodRange.to.getTime()) continue;
             const client = (clients || []).find((c) => c.id === inv.client_id);
             entries.push({ invoice: inv as any, items: inv.invoice_items || [], client: client || null });
           }
@@ -465,53 +567,61 @@ export default function ReportsPage() {
         }
 
         case 'excel':
-          exportShopsToExcel(filteredShops, workItems || [], bundleBaseName('shops-export', selectedClientLabel, filteredShops.length), excelPhotoSources());
+          if (combined) exportShopsToExcel(filteredShops, workItems || [], bundleBaseName('shops-export', selectedClientLabel, filteredShops.length), excelPhotoSources());
+          else filteredShops.forEach((shop:any) => exportShopsToExcel([shop], (workItems || []).filter(w=>w.shop_id===shop.id), bundleBaseName(`shop-${shop.name}`,selectedClientLabel,1),excelPhotoSources()));
           setNotice({ kind: 'success', message: `Excel ready — ${filteredShops.length} shop(s).` });
           break;
 
         case 'excel-multi':
-          exportMultiSheetExcel(filteredShops, workItems || [], 'multi-sheet-report', excelPhotoSources());
+          if(combined) exportMultiSheetExcel(filteredShops, workItems || [], 'multi-sheet-report', excelPhotoSources());
+          else filteredShops.forEach((shop:any) => exportMultiSheetExcel([shop], (workItems || []).filter(w=>w.shop_id===shop.id), `multi-sheet-${shop.name}`,excelPhotoSources()));
           setNotice({ kind: 'success', message: 'Multi-sheet Excel ready.' });
           break;
 
         case 'po-utilization':
           if (scopedPoUtilizationRows.length === 0) { setNotice({ kind: 'error', message: 'Is filter ke liye koi PO line items nahi mile.' }); break; }
-          exportPOUtilizationToExcel(scopedPoUtilizationRows as any[], bundleBaseName('po-utilization', selectedClientLabel, 0));
+          exportPOUtilizationToExcel(scopedPoUtilizationRows.filter(r => (!periodRange.from || Date.parse(r.po_date) >= periodRange.from.getTime()) && (!periodRange.to || Date.parse(r.po_date) <= periodRange.to.getTime())) as any[], bundleBaseName('po-utilization', selectedClientLabel, 0));
           setNotice({ kind: 'success', message: 'PO Utilization Excel ready.' });
           break;
 
         case 'vehicle-load-log': {
           if (!orgId) break;
-          const logRows = await fetchVehicleLoadLog(orgId);
+          const logRows = (await fetchVehicleLoadLog(orgId, periodRange.from || undefined)).filter(r => filteredShops.some(s => s.id === r.shop_id) && (!periodRange.to || Date.parse(r.loaded_at) <= periodRange.to.getTime()));
           if (logRows.length === 0) { setNotice({ kind: 'error', message: 'Abhi tak koi vehicle load record nahi hai.' }); break; }
           exportVehicleLoadLogToExcel(logRows, bundleBaseName('vehicle-load-log', selectedClientLabel, 0));
           setNotice({ kind: 'success', message: 'Vehicle Load Log Excel ready.' });
           break;
         }
 
-        case 'ppt-preapproval':
-          await generatePreApprovalPPT(
-            filteredShops.filter((s: any) => ['surveyed', 'approval_pending', 'approved'].includes(s.status)) as any,
-            (workItems || []).filter((w) => filteredShops.some((s: any) => s.id === w.shop_id)) as any,
-            (surveyPhotos || []).filter((p) => filteredShops.some((s: any) => s.id === p.shop_id)) as any,
-            org,
-            (boardMarkings || []) as any
-          );
-          setNotice({ kind: 'success', message: 'Pre-Approval Deck ready.' });
+        case 'ppt-preapproval': {
+          const batch = filteredShops.filter((s: any) => ['surveyed', 'approval_pending', 'approved'].includes(s.status));
+          const groups = combined ? [batch] : batch.map(shop=>[shop]);
+          for (const group of groups) {
+            const ids=new Set(group.map(s=>s.id));
+            await generatePreApprovalPPT(group as any,(workItems || []).filter(w=>ids.has(w.shop_id)) as any,
+              (surveyPhotos || []).filter(p=>ids.has(p.shop_id)) as any,org,(boardMarkings || []) as any,
+              bundleBaseName('preapproval', combined ? selectedClientLabel : group[0]?.name, group.length));
+          }
+          setNotice({ kind: 'success', message: `${groups.length} Pre-Approval deck(s) ready.` });
           break;
+        }
 
-        case 'ppt-final':
-          await generateFinalInstallationPPT(
-            filteredShops.filter((s: any) => s.status === 'installed') as any,
-            (workItems || []).filter((w) => filteredShops.some((s: any) => s.id === w.shop_id)) as any,
-            ((installations || []).flatMap((i) => i.installation_proofs || []) as any[]).filter((p) => filteredShops.some((s: any) => s.id === p.shop_id)),
-            org
-          );
-          setNotice({ kind: 'success', message: 'Final Installation Deck ready.' });
+        case 'ppt-final': {
+          const batch = filteredShops.filter((s: any) => s.status === 'installed');
+          const groups = combined ? [batch] : batch.map(shop=>[shop]);
+          for (const group of groups) {
+            const ids = new Set(group.map(s=>s.id));
+            await generateFinalInstallationPPT(group as any,
+              (workItems || []).filter(w=>ids.has(w.shop_id)) as any,
+              ((installations || []).flatMap(i=>i.installation_proofs || []) as any[]).filter(p=>ids.has(p.shop_id)),
+              org,bundleBaseName('final-installation',combined?selectedClientLabel:group[0]?.name,group.length));
+          }
+          setNotice({kind:'success',message:`${groups.length} Final Installation deck(s) ready.`});
           break;
+        }
       }
-    } catch {
-      setNotice({ kind: 'error', message: 'Report generation failed. Please try again.' });
+    } catch (error) {
+      setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'Report generation failed. Please retry.' });
     } finally {
       setGenerating(null);
       setGenProgress(null);
@@ -519,8 +629,8 @@ export default function ReportsPage() {
   }
 
   return (
-    <div className="max-w-[1200px] mx-auto">
-      <PageHeader title="Reports" subtitle="Generate PDF, Excel and PowerPoint reports for any client, campaign or PO" />
+    <div className="max-w-[1440px] mx-auto">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h1 className="text-base font-semibold text-slate-900">Reports</h1><span className="text-xs text-slate-500">Marked evidence, original measurements and professional exports</span></div>
 
       {notice && (
         <div className={`flex items-start gap-2.5 rounded-lg px-4 py-3 mb-5 text-sm ${notice.kind === 'error' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'}`}>
@@ -530,21 +640,54 @@ export default function ReportsPage() {
         </div>
       )}
 
-      {/* Scope bar */}
-      <Card className="p-4 mb-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+      {/* Fast, frequently used filters stay visible; secondary scope lives in Advanced. */}
+      <Card className="p-3 mb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 mb-2">
+          <label className="text-xs font-medium text-slate-600">Client
+            <select aria-label="Report client" value={selectedClient} onChange={e => setSelectedClient(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm">
+              <option value="">All clients</option>
+              {(clients || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </label>
+          <label className="text-xs font-medium text-slate-600">Work Order
+            <select aria-label="Report work order" value={selectedPO} onChange={e => setSelectedPO(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm">
+              <option value="">All work orders</option>
+              {poOptions.map(po => <option key={po.id} value={po.id}>{po.name ? `${po.name} (${po.po_number})` : po.po_number}</option>)}
+            </select>
+          </label>
+          <label className="text-xs font-medium text-slate-600">Zone
+            <select aria-label="Report zone" value={zoneFilter} onChange={e => setZoneFilter(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm">
+              <option value="">All zones</option>
+              <option value="__NO_ZONE__">No Zone</option>
+              {(zones || []).map(z => <option key={z.id} value={z.id}>{z.name}</option>)}
+            </select>
+          </label>
+          <label className="text-xs font-medium text-slate-600">Date range
+            <select aria-label="Report date range" value={period} onChange={e=>setPeriod(e.target.value as typeof period)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm">
+              <option value="all">All dates</option><option value="today">Today</option><option value="week">This week</option>
+              <option value="month">This month</option><option value="last30">Last 30 days</option><option value="custom">Custom dates</option>
+            </select>
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3 flex-wrap">
             <FilterButton activeCount={activeFilterCount} onClick={() => setFilterOpen(true)} />
             <div className="flex items-center gap-1.5 text-sm text-slate-600">
               <Store className="w-4 h-4 text-slate-400" />
               <span className="font-semibold text-slate-900">{filteredShops.length.toLocaleString('en-IN')}</span>
-              <span className="text-slate-500">shop{filteredShops.length === 1 ? '' : 's'} in scope</span>
+              <span className="text-slate-500">shop{filteredShops.length === 1 ? '' : 's'} selected by filters</span>
             </div>
             {activeFilterCount > 0 && (
               <button onClick={clearFilters} className="text-xs font-medium text-blue-600 hover:text-blue-700">Clear filters</button>
             )}
           </div>
 
+          <div className="flex flex-wrap items-center gap-2">
+            {period === 'custom' && <>
+              <label className="text-xs text-slate-600">From <input aria-label="From date" type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)} className="rounded border border-slate-300 p-1" /></label>
+              <label className="text-xs text-slate-600">To <input aria-label="To date" type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)} className="rounded border border-slate-300 p-1" /></label>
+            </>}
+          </div>
           <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-1">
             <button
               type="button"
@@ -568,6 +711,8 @@ export default function ReportsPage() {
             {selectedCampaign && <ScopeChip label={`Campaign: ${campaigns?.find((c) => c.id === selectedCampaign)?.name || '—'}`} onClear={() => setSelectedCampaign('')} />}
             {selectedPO && <ScopeChip label={`PO: ${purchaseOrders?.find((p) => p.id === selectedPO)?.po_number || '—'}`} onClear={() => setSelectedPO('')} />}
             {selectedShopIds.size > 0 && <ScopeChip label={`${selectedShopIds.size} shop(s) selected`} onClear={() => setSelectedShopIds(new Set())} />}
+            {zoneFilter && <ScopeChip label={`Zone: ${zoneFilter === '__NO_ZONE__' ? 'No Zone' : zones?.find(z=>z.id===zoneFilter)?.name || 'Zone'}`} onClear={()=>setZoneFilter('')} />}
+            {shopStatus && <ScopeChip label={`Status: ${shopStatus.replace(/_/g,' ')}`} onClear={()=>setShopStatus('')} />}
           </div>
         )}
       </Card>
@@ -580,22 +725,16 @@ export default function ReportsPage() {
         resultCount={filteredShops.length}
         resultLabel="shops"
       >
-        <FilterSection label="Client">
-          <select value={selectedClient} onChange={(e) => setSelectedClient(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All clients</option>
-            {(clients || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </FilterSection>
         <FilterSection label="Campaign">
           <select value={selectedCampaign} onChange={(e) => setSelectedCampaign(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">All campaigns</option>
             {campaignOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </FilterSection>
-        <FilterSection label="Purchase order">
-          <select value={selectedPO} onChange={(e) => setSelectedPO(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All purchase orders</option>
-            {poOptions.map((p) => <option key={p.id} value={p.id}>{p.po_number}</option>)}
+        <FilterSection label="Shop status">
+          <select value={shopStatus} onChange={e=>setShopStatus(e.target.value)} aria-label="Report shop status" className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white">
+            <option value="">All statuses</option>
+            {Array.from(new Set(scopedShops.map((s:any)=>s.status).filter(Boolean))).sort().map(st=><option key={st} value={st}>{st.replace(/_/g,' ')}</option>)}
           </select>
         </FilterSection>
         <FilterSection label="Shops (optional — leave empty for all matching shops)">
@@ -639,62 +778,63 @@ export default function ReportsPage() {
         </FilterSection>
       </FilterDrawer>
 
-      {/* Report groups */}
-      <div className="space-y-8">
-        {REPORT_GROUPS.map((group) => (
-          <div key={group.title}>
-            <div className="mb-3">
-              <h2 className="text-sm font-semibold text-slate-900">{group.title}</h2>
-              {group.subtitle && <p className="text-xs text-slate-500 mt-0.5">{group.subtitle}</p>}
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {group.cards.map((rc) => {
-                const Icon = rc.icon;
-                return (
-                  <Card key={rc.id} className="p-5 flex flex-col">
-                    <div className="flex items-start justify-between mb-3">
-                      <div className={`w-11 h-11 rounded-lg flex items-center justify-center ${colorMap[rc.color]}`}>
-                        <Icon className="w-5 h-5" />
-                      </div>
-                      <div className="flex gap-1">
-                        {rc.variants.map((v) => (
-                          <span key={v.ext} className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${extBadge[v.ext]}`}>{v.ext}</span>
-                        ))}
-                      </div>
+      {/* Compact canonical report catalog. One row = one report type, no repeated export cards. */}
+      <div className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <FileBarChart className="h-4 w-4 text-slate-500" />
+            <h2 className="text-sm font-semibold text-slate-900">Report library</h2>
+            <span className="text-xs text-slate-400">One report, three formats</span>
+          </div>
+          <div className="relative w-full sm:w-64">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <input aria-label="Find report" value={reportSearch} onChange={e=>setReportSearch(e.target.value)}
+              placeholder="Find report type" className="w-full rounded-lg border border-slate-200 py-1.5 pl-8 pr-3 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600" />
+          </div>
+        </div>
+        {REPORT_GROUPS.map((group) => {
+          const cards=group.cards.filter(c=>`${c.label} ${c.desc} ${group.title}`.toLowerCase().includes(reportSearch.trim().toLowerCase()));
+          if (!cards.length) return null;
+          return <section key={group.title} aria-label={group.title}>
+            <div className="border-b border-slate-100 bg-slate-50 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{group.title}</div>
+            <div className="divide-y divide-slate-100">
+              {cards.map(rc=>{
+                const Icon=rc.icon;
+                return <div key={rc.id} className="flex flex-col gap-2 px-4 py-3 transition-colors hover:bg-slate-50/60 lg:flex-row lg:items-center lg:gap-4">
+                  <div className="flex min-w-0 flex-1 items-start gap-3">
+                    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${colorMap[rc.color]}`}><Icon className="h-4 w-4" /></div>
+                    <div className="min-w-0">
+                      <h3 className="text-sm font-semibold text-slate-900">{rc.label}</h3>
+                      <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-slate-500">{rc.desc}</p>
                     </div>
-                    <h3 className="font-semibold text-slate-900 mb-1">{rc.label}</h3>
-                    <p className="text-sm text-slate-500 mb-4 flex-1">{rc.desc}</p>
-                    <div className="flex gap-2">
-                      {rc.variants.map((v) => {
-                        const isGenerating = generating === v.type;
-                        return (
-                          <button
-                            key={v.type}
-                            onClick={() => handleGenerate(v.type)}
-                            disabled={!!generating}
-                            className="flex-1 flex items-center justify-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white text-sm font-medium py-2.5 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {isGenerating ? (
-                              <>
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                {genProgress ? `${genProgress.done}/${genProgress.total}` : '...'}
-                              </>
-                            ) : (
-                              <>
-                                <Download className="w-3.5 h-3.5" />
-                                {rc.variants.length > 1 ? v.label : 'Generate'}
-                              </>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </Card>
-                );
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5 pl-12 lg:pl-0" aria-label={`Download ${rc.label}`}>
+                    {(['PDF','PPTX','XLSX'] as const).map(format=>{
+                      const type=`unified:${rc.id}:${format}`;
+                      const active=generating===type;
+                      return <button key={format} type="button" onClick={()=>void handleGenerate(type)} disabled={!!generating}
+                        aria-label={`Export ${rc.label} as ${format}`}
+                        className="inline-flex min-w-[76px] items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-wait disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+                        {active ? <Loader2 className="h-3.5 w-3.5 animate-spin"/> : <Download className="h-3.5 w-3.5" />}
+                        {format==='PPTX'?'PPT':format}
+                      </button>;
+                    })}
+                  </div>
+                </div>;
               })}
             </div>
-          </div>
-        ))}
+          </section>;
+        })}
+        {reportSearch && !REPORT_GROUPS.some(g=>g.cards.some(c=>`${c.label} ${c.desc} ${g.title}`.toLowerCase().includes(reportSearch.trim().toLowerCase()))) &&
+          <p className="px-4 py-8 text-center text-sm text-slate-500">No matching report type.</p>}
+      </div>
+      {generating && <div role="status" className="mt-3 flex items-center gap-2 text-xs text-slate-600">
+        <Loader2 className="h-4 w-4 animate-spin" /> Preparing report evidence
+        {genProgress && genProgress.total>0 ? ` · ${genProgress.done} of ${genProgress.total} images` : '…'}
+      </div>}
+      <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+        <Images className="h-3.5 w-3.5 shrink-0" />
+        Original photos and saved board polygons are combined before export. Each image is accompanied by its linked measurements; unreadable evidence stops the export with an error.
       </div>
     </div>
   );

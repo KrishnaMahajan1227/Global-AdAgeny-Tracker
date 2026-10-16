@@ -1,48 +1,37 @@
 param(
-  [string]$ProjectRoot = 'D:\DarshanAdField',
+  [Parameter(Mandatory=$true)][string]$ProjectRoot,
   [string]$PatchRoot = $PSScriptRoot
 )
 $ErrorActionPreference = 'Stop'
-$files = @(
- 'src/App.tsx',
- 'src/components/AdminLayout.tsx',
- 'src/pages/PurchaseOrdersPage.tsx',
- 'src/pages/SupplyOrdersPage.tsx'
-)
-$allowed = @{
- 'src/App.tsx' = @('994435cfad2b67b4e69691485195d40b87b0cd28','dae666206aeb8c9dce0497a3076e5dda6d158911')
- 'src/components/AdminLayout.tsx' = @('e52a7722978ca6186953d842611e3f49cc3fe672','8ef5ba124d9be1a1cbebdf28bbe93b613b352894')
- 'src/pages/PurchaseOrdersPage.tsx' = @('3431406ddd701959028c8ea5be8f24031dbf7c67','7c27e031f7cc0a023e7fd8568a48d0378cc25b81')
- 'src/pages/SupplyOrdersPage.tsx' = @('0a37687759c9d64460877425cabff1466bdccc15','9073ea2b0aed8fc1b04688a0dc034642273f690c')
-}
-if (!(Test-Path (Join-Path $ProjectRoot 'package.json'))) { throw 'Project root is incorrect.' }
+if (!(Test-Path (Join-Path $ProjectRoot 'package.json'))) { throw 'ProjectRoot must contain package.json.' }
+if (!(Test-Path (Join-Path $ProjectRoot '.git'))) { throw 'Expected existing Git project.' }
 Push-Location $ProjectRoot
 try {
   $branch = (git branch --show-current).Trim()
-  if ($LASTEXITCODE -ne 0 -or $branch -ne 'main') { throw "Run on existing main branch only (found: $branch)." }
-  $dirty = git status --porcelain
-  if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Working tree must be clean. Commit or safely back up edits first.' }
-  foreach ($file in $files) {
-    $source = Join-Path $PatchRoot ($file.Replace('/',[IO.Path]::DirectorySeparatorChar))
-    if (!(Test-Path $source)) { throw "Patch incomplete: $file" }
-    if (!(Test-Path $file)) { throw "Missing project source: $file" }
-    $sha = (git rev-parse "HEAD:$file").Trim()
-    if ($LASTEXITCODE -ne 0 -or $sha -notin $allowed[$file]) { throw "Different source version: $file ($sha). Refusing overwrite; merge into latest source." }
+  if ($branch -ne 'main') { throw "Expected main branch, found: $branch" }
+  if (git status --porcelain) { throw 'Working tree not clean; commit/save existing edits first.' }
+  $baseline = (git rev-parse 'HEAD:src/pages/BillingPage.tsx').Trim()
+  $allowed = @('26a7ae2404061dd8bba1b969371fde5ea9fd73a2','cb12cb7142ad4d3d08631390155c671f2d8deea9')
+  if ($allowed -notcontains $baseline) {
+    throw "Unexpected BillingPage version ($baseline). Stop; merge against latest main rather than overwriting."
   }
-  $backup = Join-Path (Join-Path $ProjectRoot '.git') ('adroute-workorders-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+  $files = @('src/pages/BillingPage.tsx','src/lib/poBilling.ts','scripts/verify-po-billing.mjs','BILLING_PO_UPDATE_README.md','BILLING_RECORDS_AUDIT.sql')
+  $backupRoot = Join-Path $ProjectRoot ('.git/adroute-billing-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+  New-Item -Force -ItemType Directory -Path $backupRoot | Out-Null
   foreach ($file in $files) {
-    $original = Join-Path $ProjectRoot ($file.Replace('/',[IO.Path]::DirectorySeparatorChar))
-    $b = Join-Path $backup ($file.Replace('/',[IO.Path]::DirectorySeparatorChar))
-    New-Item -ItemType Directory -Path (Split-Path $b -Parent) -Force | Out-Null
-    Copy-Item -LiteralPath $original -Destination $b -Force
+    $src = Join-Path $PatchRoot $file
+    $dst = Join-Path $ProjectRoot $file
+    if (!(Test-Path $src)) { throw "Missing patch source: $file" }
+    if (Test-Path $dst) {
+      $backup = Join-Path $backupRoot $file
+      New-Item -ItemType Directory -Path (Split-Path $backup -Parent) -Force | Out-Null
+      Copy-Item $dst $backup -Force
+    }
+    New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force | Out-Null
+    Copy-Item $src $dst -Force
   }
-  foreach ($file in $files) {
-    $source = Join-Path $PatchRoot ($file.Replace('/',[IO.Path]::DirectorySeparatorChar))
-    $destination = Join-Path $ProjectRoot ($file.Replace('/',[IO.Path]::DirectorySeparatorChar))
-    Copy-Item -LiteralPath $source -Destination $destination -Force
-  }
-  Write-Host "Applied 4 files to main. Backups: $backup"
-  git diff --check
-  if ($LASTEXITCODE -ne 0) { throw 'Git whitespace check failed: review diff before committing.' }
-  git diff --stat
-} finally { Pop-Location }
+  Write-Host 'Billing patch installed on main. Backup:' $backupRoot
+  Write-Host 'Run regression checks, typecheck, lint, build and staging invoice QA BEFORE pushing.'
+} finally {
+  Pop-Location
+}

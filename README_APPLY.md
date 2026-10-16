@@ -1,33 +1,32 @@
-# Apply AdRoute Supply Only in Work Orders — existing main branch
+# Install this patch on current `main`
 
-The ZIP contains a minimal-diff installer and the existing updated `SupplyOrdersPage.tsx` (not a full repository). Extract it to a temporary folder, NOT over the project root. Running the installer updates exactly 4 existing source files. It does not perform a Git push or a database operation.
-
-## PowerShell
+Use this **targeted patch**, not a 54MB source snapshot, to preserve all previous AdRoute functionality. The installer is version-guarded and creates backup copies. No database SQL is included.
 
 ```powershell
 $project = 'D:\DarshanAdField'
-$zip = "$env:USERPROFILE\Downloads\AdRoute_WorkOrders_SupplyOnly_Main_Update.zip"
-$temp = Join-Path $env:TEMP 'AdRoute_SupplyInsideWorkOrders'
+$zip = "$env:USERPROFILE\Downloads\AdRoute_Reports_Billing_Main_Refinement.zip"
+$temp = "$env:TEMP\AdRoute_Reports_Billing_Refinement"
 Expand-Archive -LiteralPath $zip -DestinationPath $temp -Force
-& "$temp\APPLY_MAIN.ps1" -ProjectRoot $project
+& "$temp\APPLY_MAIN.ps1" -ProjectRoot $project -PatchRoot $temp
 Set-Location $project
+node scripts/verify-report-billing.mjs
 npm run typecheck
-npm run lint
+npm run lint --if-present
 npm run build
 npm run dev
 ```
 
-The installer checks the Git branch is `main`, the working tree is clean, and the original SHA for every changed file matches the verified `main` baseline. Source mismatches abort BEFORE modifying any file. A backup of the 4 files is created inside `.git/adroute-supply-backup-<timestamp>/` before writing. If your source has changed since the audit, do not force-apply this ZIP; merge against that newer version.
+If any of the three baseline hashes mismatches, **stop**. Compare local code to this patch; do not force-overwrite newer changes.
 
-## Git Bash — after successful build and browser tests
+After tests pass, use Git Bash:
 
 ```bash
 cd /d/DarshanAdField
 git branch --show-current
 git diff --check
-git add src/components/AdminLayout.tsx src/App.tsx src/pages/PurchaseOrdersPage.tsx src/pages/SupplyOrdersPage.tsx
-git commit -m "feat: integrate supply-only execution into work orders"
+git add src/pages/BillingPage.tsx src/pages/ReportsPage.tsx src/lib/reportPortfolio.ts scripts/verify-report-billing.mjs
+git commit -m "fix: portrait evidence reports and consolidated completed-shop billing"
 git push origin main
 ```
 
-No Git pull/reset/force-push, SQL migration or new dependency is required by this patch. See CHANGES.md and QA_CHECKLIST.md.
+No pull, no new branch, and no force push required for this patch.

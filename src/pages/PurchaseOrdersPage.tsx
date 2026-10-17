@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import {
   Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, ProgressBar,
-  FilterButton, FilterDrawer, FilterSection, Drawer, Pagination,
+  FilterButton, FilterDrawer, FilterSection, Pagination,
 } from '@/components/ui';
 import { PurchaseOrder, POLineItem, POLineItemUtilization, Campaign, Zone, RateCard, PoAssignment } from '@/lib/types';
 import { logAudit, notifyLinkedOrg, createNotification } from '@/lib/helpers';
@@ -14,6 +14,11 @@ import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { computeUtilization, calculatePoProgress, formatQty, formatRupees, isAreaUom, UtilizationStage, fulfillmentTypeLabel, defaultUtilizationStage } from '@/lib/poUtilization';
 import type { PoProgressSummary } from '@/lib/poUtilization';
 import { DonutChart } from '@/components/DonutChart';
+import { deliveryByOrder, type DeliveryShop, type DeliverySummary } from '@/lib/agencyDelivery';
+import { useAgencyFinancials, financeForOrder } from '@/lib/agencyFinance';
+import { useOrderBillingReadiness, type BillingReadiness } from '@/lib/billingReadiness';
+import { milestoneProgress, type StageBucket } from '@/lib/workCompletion';
+import { isOwnerStage, stageMatches, ownerStageLabels, describeOrderNextStep, type OwnerStageFilter } from '@/lib/ownerOperations';
 import {
   Plus, Pencil, Trash2, ShoppingCart, FileText, Upload, X, Loader2, IndianRupee, ListChecks, AlertTriangle, TrendingUp, ChevronDown,
   Inbox, Check, XCircle, Building2, Store, ChevronRight, Calendar, Layers, Users, UserPlus, UserMinus,
@@ -46,7 +51,7 @@ type PoRow = PurchaseOrder & {
   clients: { name: string } | null;
   projects: { name: string } | null;
   campaigns: { name: string } | null;
-  po_line_items: { id: string; budgeted_area: number | null; budgeted_qty: number | null }[];
+  po_line_items: { id: string; budgeted_area: number | null; budgeted_qty: number | null; requires_survey: boolean; requires_design: boolean; requires_production: boolean; requires_installation: boolean }[];
   client_org: { name: string } | null;
 };
 
@@ -54,18 +59,20 @@ type PoRow = PurchaseOrder & {
  *  computed once here from the shared utilization rollup so the compact
  *  table row and the full detail drawer never show two different answers
  *  for "how complete is this PO". */
-function getPoMetrics(po: PoRow, utilization: POLineItemUtilization[]) {
+function getPoMetrics(po: PoRow, utilization: POLineItemUtilization[], sites?: DeliverySummary) {
   const lineCount = po.po_line_items?.length || 0;
   const poRows = utilization.filter((r) => r.purchase_order_id === po.id);
   const stage: UtilizationStage = defaultUtilizationStage(po.fulfillment_type);
   const summary = calculatePoProgress(poRows, stage, lineCount);
   const anyVariance = poRows.some(row => computeUtilization(row, stage).hasVariance);
   const campaignName = po.projects?.name || po.campaigns?.name || null;
+  const operational = sites && sites.total > 0 ? sites.percentage : null;
   return {
     lineCount, poRows, stage, anyVariance, campaignName,
     ...summary,
     // Existing row and drawer consumers use the same physical completion.
-    completionPct: summary.workPct,
+    completionPct: operational ?? summary.workPct,
+    completionSource: operational != null ? 'sites' as const : 'quantities' as const,
     hasBudget: summary.budgetedAmount != null,
   };
 }
@@ -98,6 +105,9 @@ function WorkOrdersList() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
+  const [listFinancialVisible, setListFinancialVisible] = useState(false);
+  const financeAllowed = profile?.role === 'agency_owner';
+  const { data: invoiceTotals, isError: agencyFinanceError } = useAgencyFinancials(orgId, financeAllowed && listFinancialVisible);
   const canDelete = profile?.role === 'agency_owner' || profile?.role === 'admin';
 
   // /purchase-orders?campaign=<client campaign id>  or  ?project=<agency campaign id>
@@ -106,6 +116,7 @@ function WorkOrdersList() {
   const [searchParams, setSearchParams] = useSearchParams();
   const campaignFilter = searchParams.get('campaign');
   const projectFilter = searchParams.get('project');
+  const stageFilter = isOwnerStage(searchParams.get('stage') || '') ? (searchParams.get('stage') as OwnerStageFilter) : null;
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editPo, setEditPo] = useState<PurchaseOrder | null>(null);
@@ -180,7 +191,7 @@ function WorkOrdersList() {
 
   useEffect(() => {
     setPage(0);
-  }, [search, statusFilter, clientFilter, fulfillmentFilter, campaignFilterValue, zoneFilter, sortBy, pageSize]);
+  }, [search, stageFilter, statusFilter, clientFilter, fulfillmentFilter, campaignFilterValue, zoneFilter, sortBy, pageSize]);
 
   useRealtimeInvalidate(['purchase_orders', 'po_line_items', 'work_items', 'invoices', 'invoice_items', 'shops'], orgId, [
     ['purchase_orders', orgId],
@@ -236,7 +247,7 @@ function WorkOrdersList() {
       const result: PoRow[] = [];
       for (let from = 0; ; from += 500) {
         let request = supabase.from('purchase_orders')
-          .select('*, clients(name), projects(name), campaigns(name), po_line_items(id, budgeted_area, budgeted_qty), client_org:organizations!purchase_orders_client_org_id_fkey(name)')
+          .select('*, clients(name), projects(name), campaigns(name), po_line_items(id, budgeted_area, budgeted_qty, requires_survey, requires_design, requires_production, requires_installation), client_org:organizations!purchase_orders_client_org_id_fkey(name)')
           .eq('organization_id', orgId);
         if (clientFilter) request = request.eq('client_id', clientFilter);
         const { data, error } = await request.order('created_at', { ascending: false })
@@ -262,11 +273,11 @@ function WorkOrdersList() {
     queryFn: async () => {
       // PostgREST caps a single response (commonly 1,000 rows). Fetch each
       // page so Work Orders always show every linked shop, not only page one.
-      const result: { purchase_order_id: string; zone_id: string | null }[] = [];
+      const result: (DeliveryShop & { zone_id: string | null })[] = [];
       const batchSize = 500;
       for (let start = 0; ; start += batchSize) {
         let request = supabase.from('shops')
-          .select('purchase_order_id, zone_id')
+          .select('id,client_id,purchase_order_id,status,zone_id')
           .eq('organization_id', orgId)
           .not('purchase_order_id', 'is', null);
         if (clientFilter) request = request.eq('client_id', clientFilter);
@@ -280,6 +291,7 @@ function WorkOrdersList() {
     },
     enabled: !!orgId,
   });
+  const deliveryMap = useMemo(() => deliveryByOrder(pos || [], poShopLinks || []), [pos, poShopLinks]);
   const shopCountByPo = useMemo(() => {
     const map = new Map<string, number>();
     for (const row of poShopLinks || []) {
@@ -352,6 +364,10 @@ function WorkOrdersList() {
       if (kind === 'camp' && po.campaign_id !== id) return false;
     }
     if (zoneFilter && !(zoneIdsByPo.get(po.id)?.has(zoneFilter))) return false;
+    if (stageFilter) {
+      const buckets = deliveryMap.get(po.id)?.stages;
+      if (!buckets || !Object.entries(buckets).some(([bucket, count]) => count > 0 && stageMatches(bucket as StageBucket, stageFilter))) return false;
+    }
     return true;
   });
 
@@ -376,13 +392,13 @@ function WorkOrdersList() {
   const currentPage = Math.min(page, totalPages - 1);
   const pagedPos = visiblePos.slice(currentPage * pageSize, currentPage * pageSize + pageSize);
 
-  const activeFilterCount = [statusFilter, clientFilter, fulfillmentFilter, campaignFilterValue, zoneFilter].filter(Boolean).length;
+  const activeFilterCount = [stageFilter, statusFilter, clientFilter, fulfillmentFilter, campaignFilterValue, zoneFilter].filter(Boolean).length;
   const SORT_OPTIONS = [
     { value: 'date_desc', label: 'Order Date (Newest first)' },
     { value: 'date_asc', label: 'Order Date (Oldest first)' },
     { value: 'po_number_asc', label: 'Work Order No. (A–Z)' },
     { value: 'client_asc', label: 'Client (A–Z)' },
-    { value: 'amount_desc', label: 'Amount (Highest first)' },
+    ...(financeAllowed && listFinancialVisible ? [{ value: 'amount_desc', label: 'Amount (Highest first)' }] : []),
   ];
 
   // Combined dropdown options for the Campaign filter — this agency's own
@@ -686,10 +702,12 @@ function WorkOrdersList() {
         {fulfillmentFilter === 'supply_only' && (
           <Link to="/purchase-orders?type=supply_only&workflow=supply" className="inline-flex items-center rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">Supply Workflow →</Link>
         )}
+        {financeAllowed && <button type="button" aria-pressed={listFinancialVisible} onClick={() => { setListFinancialVisible(v => !v); if (listFinancialVisible && sortBy === 'amount_desc') setSortBy('date_desc'); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:border-blue-300 focus-visible:outline-2 focus-visible:outline-blue-600">{listFinancialVisible ? 'Hide financials' : 'View financials ▾'}</button>}
         <FilterButton activeCount={activeFilterCount} onClick={() => setFilterDrawerOpen(true)} />
         <span className="ml-auto text-xs tabular-nums text-slate-500" role="status">{ordersLoading ? 'Loading…' : `${visiblePos.length.toLocaleString('en-IN')} work orders`}</span>
       </div>
 
+      {stageFilter && <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900"><span>Showing Work Orders with sites in: <strong>{ownerStageLabels[stageFilter]}</strong></span><button type="button" className="font-semibold underline" onClick={() => setSearchParams(prev => {const next = new URLSearchParams(prev); next.delete('stage'); return next;}, {replace:true})}>Clear stage</button></div>}
       <FilterDrawer
         open={filterDrawerOpen}
         onClose={() => setFilterDrawerOpen(false)}
@@ -748,7 +766,7 @@ function WorkOrdersList() {
                   <Building2 className="w-4 h-4 text-slate-400 shrink-0" />
                   <div>
                     <p className="font-medium text-slate-900 text-sm">{po.name ? `${po.name} — ${po.po_number}` : po.po_number} — {po.client_org?.name || 'A linked client'}</p>
-                    <p className="text-xs text-slate-500">{new Date(po.po_date).toLocaleDateString('en-IN')} · {po.po_line_items?.length || 0} line item{(po.po_line_items?.length || 0) === 1 ? '' : 's'}{po.total_amount != null ? ` · ₹${po.total_amount.toLocaleString('en-IN')}` : ''}</p>
+                    <p className="text-xs text-slate-500">{new Date(po.po_date).toLocaleDateString('en-IN')} · {po.po_line_items?.length || 0} line item{(po.po_line_items?.length || 0) === 1 ? '' : 's'}{financeAllowed && listFinancialVisible && po.total_amount != null ? ` · ₹${po.total_amount.toLocaleString('en-IN')}` : ''}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -784,16 +802,19 @@ function WorkOrdersList() {
       <Card className="overflow-hidden">
         <div className="divide-y divide-slate-100 md:hidden" role="region" aria-label="Work orders list on mobile">
           {!ordersLoading && !ordersError && pagedPos.map(po => {
-            const { completionPct, lineCount } = getPoMetrics(po, utilization || []);
+            const { completionPct, lineCount } = getPoMetrics(po, utilization || [], deliveryMap.get(po.id));
             const primary = getPrimaryStatus(po);
             return <div key={po.id}>
               <button type="button" onClick={() => openWorkOrder(po.id)} className="block w-full px-4 py-3 text-left hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
               <div className="flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium text-slate-900">{po.name || po.po_number}</p><p className="mt-0.5 text-xs text-slate-500">{po.po_number} · {po.clients?.name || 'Client not set'} · {fulfillmentTypeLabel(po.fulfillment_type)}</p></div><StatusBadge status={primary.status} label={primary.label}/></div>
               <div className="mt-3 flex items-center justify-between gap-3 text-xs text-slate-500"><span>{lineCount} items · {shopCountByPo.get(po.id) || 0} sites</span><span>{new Date(po.po_date).toLocaleDateString('en-IN')}</span></div>
               {completionPct == null
-                ? <p className="mt-2 text-xs text-slate-500">Set planned scope to calculate work completion</p>
+                ? <p className="mt-2 text-xs text-slate-500">Site links or measured quantities needed</p>
                 : <div className="mt-2 flex items-center gap-2"><ProgressBar pct={completionPct} className="flex-1"/><span className="w-10 text-right text-xs text-slate-600">{`${Math.round(completionPct)}%`}</span></div>}
+              <p className="mt-1 text-[11px] text-slate-500">{deliveryMap.get(po.id)?.total ? `${deliveryMap.get(po.id)!.completed}/${deliveryMap.get(po.id)!.total} sites delivered` : 'Measured line-item scope'}</p>
+              {financeAllowed && listFinancialVisible && <p className="mt-1 text-[11px] text-slate-500">{agencyFinanceError || !invoiceTotals ? 'Invoice amount unavailable' : `Invoiced: ${formatRupees(financeForOrder(po,invoiceTotals).invoiced)} · ${financeForOrder(po,invoiceTotals).percentage ?? '—'}% of PO value`}</p>}
               </button>
+              {financeAllowed && listFinancialVisible && <div className="flex flex-wrap items-center gap-2 px-4 pb-3"><Link onClick={event => event.stopPropagation()} to={`/billing?po=${encodeURIComponent(po.id)}&create=1`} className="inline-flex rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white">Prepare invoice →</Link></div>}
               {po.fulfillment_type === 'supply_only' && (
                 <div className="px-4 pb-3">
                   <Link to={`/purchase-orders?type=supply_only&workflow=supply&po=${encodeURIComponent(po.id)}`} className="inline-flex rounded-md bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100">Manage Supply →</Link>
@@ -805,21 +826,22 @@ function WorkOrdersList() {
           {!ordersLoading && !ordersError && !pagedPos.length && <p className="px-4 py-8 text-center text-sm text-slate-500">No matching work orders.</p>}
         </div>
         <div className="hidden overflow-x-auto md:block" role="region" aria-label="Work orders list" tabIndex={0}>
-          <table className="w-full text-sm min-w-[720px]">
+          <table className="w-full text-sm min-w-[900px]">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
               <tr>
                 <th className="text-left px-4 py-3 font-semibold">Work Order</th>
                 <th className="text-left px-4 py-3 font-semibold">Client</th>
                 <th className="text-left px-4 py-3 font-semibold">Status</th>
-                <th className="text-left px-4 py-3 font-semibold w-40">Completion</th>
-                <th className="text-right px-4 py-3 font-semibold">Amount</th>
+                <th className="text-left px-4 py-3 font-semibold w-40">Work delivery</th>
+                {financeAllowed && listFinancialVisible && <th className="text-right px-4 py-3 font-semibold">Amount</th>}
+                {financeAllowed && listFinancialVisible && <th className="text-right px-4 py-3 font-semibold">Invoiced</th>}
                 <th className="text-left px-4 py-3 font-semibold whitespace-nowrap">Date</th>
                 <th className="px-4 py-3 w-8"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {!ordersLoading && !ordersError && pagedPos.map((po) => {
-                const { lineCount, anyVariance, completionPct } = getPoMetrics(po, utilization || []);
+                const { lineCount, anyVariance, completionPct } = getPoMetrics(po, utilization || [], deliveryMap.get(po.id));
                 const shopCount = shopCountByPo.get(po.id) || 0;
                 const primary = getPrimaryStatus(po);
 
@@ -856,15 +878,18 @@ function WorkOrdersList() {
                           <ProgressBar pct={completionPct} className="flex-1" />
                           <span className="text-xs text-slate-500 w-8 text-right shrink-0">{`${Math.round(completionPct)}%`}</span>
                         </div>
-                      ) : <span className="text-slate-500 text-xs" title="Set planned quantities on every line item to calculate work completion">Scope needed</span>}
+                      ) : <span className="text-slate-500 text-xs" title="Link shops or record planned quantities">Scope needed</span>}
+                      <div className="mt-1 text-[11px] text-slate-500">{deliveryMap.get(po.id)?.total ? `${deliveryMap.get(po.id)!.completed}/${deliveryMap.get(po.id)!.total} sites delivered` : 'Measured scope'}</div>
                     </td>
-                    <td className="px-4 py-3.5 text-right whitespace-nowrap">
+                    {financeAllowed && listFinancialVisible && <td className="px-4 py-3.5 text-right whitespace-nowrap">
                       {po.total_amount != null ? (
                         <span className="text-slate-900 font-medium inline-flex items-center gap-0.5"><IndianRupee className="w-3.5 h-3.5" />{po.total_amount.toLocaleString('en-IN')}</span>
                       ) : <span className="text-slate-300">—</span>}
-                    </td>
+                    </td>}
+                    {financeAllowed && listFinancialVisible && <td className="px-4 py-3.5 text-right whitespace-nowrap"><div className="text-xs font-medium tabular-nums text-emerald-700">{agencyFinanceError || !invoiceTotals ? '—' : formatRupees(financeForOrder(po,invoiceTotals).invoiced)}</div><div className="mt-1 text-[11px] text-slate-500">{agencyFinanceError || !invoiceTotals ? 'Unavailable' : financeForOrder(po,invoiceTotals).percentage == null ? 'Budget needed' : `${financeForOrder(po,invoiceTotals).percentage}% of PO`}</div></td>}
                     <td className="px-4 py-3.5 text-slate-500 text-xs whitespace-nowrap">{new Date(po.po_date).toLocaleDateString('en-IN')}</td>
                     <td className="px-4 py-3.5">
+                      <div className="flex items-center gap-2">{financeAllowed && listFinancialVisible && <Link to={`/billing?po=${encodeURIComponent(po.id)}&create=1`} onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()} aria-label={`Prepare invoice for ${po.name || po.po_number}`} className="whitespace-nowrap rounded-md bg-blue-50 px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100">Bill →</Link>}
                       {po.fulfillment_type === 'supply_only' ? (
                         <Link
                           to={`/purchase-orders?type=supply_only&workflow=supply&po=${encodeURIComponent(po.id)}`}
@@ -873,17 +898,17 @@ function WorkOrdersList() {
                           aria-label={`Manage supply for ${po.name || po.po_number}`}
                           className="inline-block whitespace-nowrap rounded-md px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"
                         >Manage Supply →</Link>
-                      ) : <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-blue-500 transition-colors" />}
+                      ) : <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-blue-500 transition-colors" />}</div>
                     </td>
                   </tr>
                 );
               })}
               {ordersLoading && (
-                <tr><td colSpan={7} className="px-4 py-12 text-center text-sm text-slate-500"><Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin" />Loading work orders…</td></tr>
+                <tr><td colSpan={listFinancialVisible && financeAllowed ? 8 : 6} className="px-4 py-12 text-center text-sm text-slate-500"><Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin" />Loading work orders…</td></tr>
               )}
               {!ordersLoading && !ordersError && visiblePos.length === 0 && (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={listFinancialVisible && financeAllowed ? 8 : 6}>
                     <EmptyState
                       icon={<ShoppingCart className="w-12 h-12" />}
                       title={(pos || []).length === 0 ? 'No Work Orders yet' : 'No Work Orders match these filters'}
@@ -1030,12 +1055,15 @@ function WorkOrdersList() {
 
       {detailPo && (
         <WorkOrderDetailDrawer
+          key={detailPo.id}
           po={detailPo}
           utilization={(utilization || []).filter((r) => r.purchase_order_id === detailPo.id)}
           reconciledInvoiced={detailInvoicedAmount}
           billingPending={billingPending}
           billingError={billingError}
           shopCount={shopCountByPo.get(detailPo.id) || 0}
+          sites={deliveryMap.get(detailPo.id)}
+          linkedShops={(poShopLinks || []).filter(shop => shop.purchase_order_id === detailPo.id)}
           canDelete={canDelete}
           canHardDelete={detailPoIsEmpty}
           onClose={() => openWorkOrder(null)}
@@ -1192,7 +1220,7 @@ function DirectInstallTeamCard({ po }: { po: PoRow }) {
 }
 
 function WorkOrderDetailDrawer({
-  po, utilization, shopCount, canDelete, canHardDelete,
+  po, utilization, shopCount, sites, linkedShops, canDelete, canHardDelete,
   onClose, onEdit, onManageLineItems, onDelete, onRespond, isResponding,
   reconciledInvoiced, billingPending, billingError,
 }: {
@@ -1202,6 +1230,8 @@ function WorkOrderDetailDrawer({
   billingPending: boolean;
   billingError: boolean;
   shopCount: number;
+  sites: DeliverySummary | undefined;
+  linkedShops: DeliveryShop[];
   canDelete: boolean;
   canHardDelete: boolean;
   onClose: () => void;
@@ -1211,14 +1241,74 @@ function WorkOrderDetailDrawer({
   onRespond?: (decision: 'accepted' | 'rejected') => void;
   isResponding?: boolean;
 }) {
+  const { profile } = useAuth();
+  const [detailMode, setDetailMode] = useState<'work'|'financial'>('work');
+  const canViewFinancialDetails = profile?.role === 'agency_owner';
+  const financialVisible = canViewFinancialDetails && detailMode === 'financial';
+  const { data: readiness, isPending: readinessPending, isError: readinessError, refetch: retryReadiness } = useOrderBillingReadiness(
+    profile?.organization_id, po.id, po.client_id, po.fulfillment_type, financialVisible,
+  );
+  const pipeline = useMemo(() => milestoneProgress(linkedShops, po.fulfillment_type, po.po_line_items || []), [linkedShops, po.fulfillment_type, po.po_line_items]);
   const { anyVariance, stage } = getPoMetrics(po, utilization);
-  const progress = calculatePoProgress(utilization, stage, po.po_line_items?.length || 0, reconciledInvoiced);
+  // The PO header is DB-triggered from line items; keep financial progress
+  // available even when the optional utilization view has not refreshed.
+  const lineProgress = calculatePoProgress(utilization, stage, po.po_line_items?.length || 0, reconciledInvoiced);
+  const plannedValue = readiness ? readiness.plannedAmount : (lineProgress.budgetedAmount ?? (po.total_amount != null && po.total_amount > 0 ? Number(po.total_amount) : null));
+  const billedValue = reconciledInvoiced ?? lineProgress.invoicedAmount;
+  const progress: PoProgressSummary = {
+    ...lineProgress,
+    budgetedAmount: plannedValue,
+    invoicedAmount: billedValue,
+    balance: plannedValue == null ? null : plannedValue - billedValue,
+    financialPct: plannedValue && plannedValue > 0 ? Math.max(0, Math.min(100, billedValue * 100 / plannedValue)) : null,
+    overInvoicedAmount: plannedValue == null ? 0 : Math.max(0, billedValue - plannedValue),
+  };
   const primary = getPrimaryStatus(po);
+  const siteProgress = sites && sites.total > 0 ? sites : null;
   const isPending = po.origin === 'client_created' && po.assignment_status === 'pending_acceptance';
+  const nextOperational = siteProgress ? describeOrderNextStep(siteProgress.stages, isPending) : null;
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    closeButton.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+      // Keep keyboard navigation inside the active Work Order dialog.
+      if (event.key === 'Tab') {
+        const container = closeButton.current?.closest('[role="dialog"]');
+        const buttons = Array.from(container?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || []);
+        if (!buttons.length) return;
+        const first = buttons[0], last = buttons[buttons.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => { document.removeEventListener('keydown', onKeyDown); document.body.style.overflow = previousOverflow; previousFocus?.focus(); };
+    // The modal is mounted only for the selected PO; close callback is stable in intent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
-    <Drawer open={!!po} onClose={onClose} title={po.name || po.po_number} subtitle={po.name ? `${po.po_number}${po.clients?.name ? ` · ${po.clients.name}` : ''}` : (po.clients?.name || undefined)} width="xl">
-      <div className="space-y-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-2 sm:p-5" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="work-order-detail-title" className="flex max-h-[96dvh] w-full max-w-6xl flex-col overflow-hidden rounded-xl bg-slate-50 shadow-2xl sm:max-h-[92dvh] sm:rounded-2xl">
+        <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 sm:px-6 sm:py-4">
+          <div className="min-w-0"><h2 id="work-order-detail-title" className="truncate text-lg font-semibold text-slate-900">{po.name || po.po_number}</h2><p className="mt-0.5 text-xs text-slate-500">{po.po_number} · {po.clients?.name || 'Client'}</p></div>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            {canViewFinancialDetails && <div role="group" aria-label="Work Order information mode" className="inline-flex items-center gap-1 rounded-lg bg-slate-100 p-1">
+              <button type="button" aria-pressed={!financialVisible} onClick={() => setDetailMode('work')} className={`rounded-md px-3 py-2 text-xs font-semibold focus-visible:outline-2 focus-visible:outline-blue-600 ${!financialVisible ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>Work</button>
+              <button type="button" aria-pressed={financialVisible} onClick={() => setDetailMode('financial')} className={`rounded-md px-3 py-2 text-xs font-semibold focus-visible:outline-2 focus-visible:outline-blue-600 ${financialVisible ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>Financial ▾</button>
+            </div>}
+            <button ref={closeButton} type="button" onClick={onClose} aria-label="Close Work Order details" className="rounded-lg border border-slate-200 p-2 text-slate-500 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-blue-600"><X className="h-5 w-5"/></button>
+          </div>
+        </header>
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3 sm:p-5 lg:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 sm:p-4">
+          <div><p className="text-sm font-semibold text-slate-900">Work Order overview</p><p className="mt-0.5 text-xs text-slate-500">{financialVisible ? 'Owner-private billing readiness and invoicing progress' : siteProgress?.total ? `${siteProgress.completed}/${siteProgress.total} sites delivered · operational view` : 'Site scope not linked · operational view'}</p></div>
+
+        </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <StatusBadge status={primary.status} label={primary.label} />
           <StatusBadge status={po.fulfillment_type} label={fulfillmentTypeLabel(po.fulfillment_type)} />
@@ -1265,6 +1355,7 @@ function WorkOrderDetailDrawer({
           <button onClick={onManageLineItems} className="inline-flex items-center gap-1.5 rounded-md bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
             <ListChecks className="w-4 h-4" /> Line Items & Rates
           </button>
+          {financialVisible && <Link to={`/billing?po=${encodeURIComponent(po.id)}&create=1`} className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-blue-600"><IndianRupee className="h-4 w-4"/> Prepare invoice</Link>}
           {po.fulfillment_type === 'supply_only' && (
             <Link to={`/purchase-orders?type=supply_only&workflow=supply&po=${encodeURIComponent(po.id)}`} className="inline-flex items-center rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">Manage Supply →</Link>
           )}
@@ -1306,16 +1397,62 @@ function WorkOrderDetailDrawer({
           </div>
         </div>
 
-        <PoCompletionDonut
+        {siteProgress ? <section className="rounded-xl border border-blue-200 bg-white p-4 sm:p-5" aria-label="Shop delivery progress">
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-semibold text-slate-900">Site delivery</h3><p className="mt-1 text-xs text-slate-500">Completed final stage · {siteProgress.total.toLocaleString('en-IN')} linked active sites</p></div><strong className="text-2xl tabular-nums text-blue-700">{siteProgress.percentage}%</strong></div>
+          <div className="mt-3"><ProgressBar pct={siteProgress.percentage}/></div>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs"><span className="rounded-lg bg-emerald-50 px-3 py-2 font-semibold text-emerald-800">{siteProgress.completed.toLocaleString('en-IN')} delivered</span>{siteProgress.pending > 0 ? <span className="rounded-lg bg-amber-50 px-3 py-2 font-semibold text-amber-800">{siteProgress.pending.toLocaleString('en-IN')} remaining</span> : <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-50 px-3 py-2 font-semibold text-emerald-800"><Check size={14}/> All linked active sites delivered</span>}<Link className="ml-auto font-semibold text-blue-700 hover:underline" to={`/shops?po=${encodeURIComponent(po.id)}`}>All sites <ArrowRight size={13} className="inline" /></Link></div>
+          {(() => {
+            const active = ([
+              {label:'Pending / survey', key:'field' as const, count:siteProgress.stages.pending + siteProgress.stages.survey, help:'Open field work'},
+              {label:'Design', key:'design' as const, count:siteProgress.stages.design, help:'Under design'},
+              {label:'Production', key:'production' as const, count:siteProgress.stages.production, help:'Under production'},
+              {label:'Dispatched', key:'dispatch' as const, count:siteProgress.stages.dispatch, help: po.fulfillment_type==='supply_only'?'Check dispatch':'Awaiting installation'},
+              {label:'Installing', key:'installation' as const, count:siteProgress.stages.installation, help:'Installation underway'},
+              {label:'In review', key:'review' as const, count:siteProgress.stages.review, help:'Approval needed'},
+            ]).filter(item=>item.count>0);
+            return active.length ? <div className="mt-4"><h4 className="mb-2 text-xs font-semibold text-slate-700">Where the remaining work is <span className="font-normal text-slate-500">· click to view matching sites</span></h4><div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">{active.map(item=><Link key={item.key} to={`/shops?po=${encodeURIComponent(po.id)}&stage=${item.key}`} className="group rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 transition hover:border-blue-300 hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-blue-600"><div className="flex items-center justify-between"><strong className="text-xl tabular-nums text-slate-900">{item.count}</strong><ChevronRight size={16} className="text-slate-400 group-hover:text-blue-700"/></div><p className="text-xs font-semibold text-slate-700">{item.label}</p><p className="mt-1 text-[11px] text-slate-500">{item.help}</p></Link>)}</div></div> : <div className="mt-4 rounded-lg border border-emerald-100 bg-emerald-50 p-3 text-xs text-emerald-800"><CheckCircle2 size={15} className="mr-1 inline"/> No pending site stages. All applicable final delivery milestones have been reached.</div>;
+          })()}
+        </section> : <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">No linked active site records yet. <Link to={`/shops?po=${encodeURIComponent(po.id)}`} className="font-semibold underline">Review site associations →</Link></div>}
+        {!financialVisible ? <>
+          <section aria-label="Operational Work Order KPIs" className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <Link to={`/shops?po=${encodeURIComponent(po.id)}`} className="rounded-xl border border-slate-200 bg-white p-3 hover:border-blue-300"><p className="text-xs text-slate-500">Sites in scope</p><strong className="mt-1 block text-xl tabular-nums">{siteProgress?.total ?? '—'}</strong><p className="mt-1 text-[11px] text-blue-700">View all linked sites →</p></Link>
+            <Link to={`/shops?po=${encodeURIComponent(po.id)}&stage=complete`} className="rounded-xl border border-slate-200 bg-white p-3 hover:border-blue-300"><p className="text-xs text-slate-500">Delivered</p><strong className="mt-1 block text-xl tabular-nums text-emerald-700">{siteProgress?.completed ?? '—'}</strong><p className="mt-1 text-[11px] text-blue-700">View completed sites →</p></Link>
+            <Link to={`/shops?po=${encodeURIComponent(po.id)}${nextOperational && nextOperational.kind!=='done' ? `&stage=${nextOperational.stage}` : ''}`} className="col-span-2 rounded-xl border border-slate-200 bg-white p-3 hover:border-blue-300 sm:col-span-1"><p className="text-xs text-slate-500">Next operational step</p><strong className="mt-1 block text-sm text-slate-900">{nextOperational?.label || 'Check site links'}</strong><p className="mt-1 text-[11px] text-blue-700">Open related sites →</p></Link>
+          </section>
+          {siteProgress && (progress.workPct == null || Math.abs(siteProgress.percentage - progress.workPct) >= 1) && <details className="rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-700"><summary className="cursor-pointer font-semibold">Site count vs measured work · explanation</summary><p className="mt-2">Site delivery is {siteProgress.percentage}%, while measured quantity progress is {progress.workPct == null ? 'not available' : `${Math.round(progress.workPct)}%`}. Shop status does not invent measured quantity; verify work-item measurements before billing.</p></details>}
+        </> : <>
+          <section aria-label="Private financial Work Order KPIs" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {[
+              {label:'Budget (ex-GST)',value:formatRupees(progress.budgetedAmount),hint:'Contract value'},
+              {label:'Already invoiced',value:billingError ? 'Unavailable' : billingPending ? 'Checking…' : formatRupees(progress.invoicedAmount),hint:'Deduplicated invoice history'},
+              {label:'Verified ready to invoice',value:readinessPending ? 'Checking…' : readinessError ? 'Unavailable' : formatRupees(readiness?.readyAmount),hint:readiness ? `${readiness.readyShops} sites · ${readiness.readyItems} items` : 'Eligible measured work'},
+              {label:'Reconciliation needed',value:readinessPending ? 'Checking…' : readinessError ? 'Unavailable' : String(readiness?.needsReviewShops ?? '—'),hint:'Sites needing data checks'},
+            ].map(card=><div key={card.label} className="rounded-xl border border-slate-200 bg-white p-3"><p className="text-xs text-slate-500">{card.label}</p><strong className="mt-2 block break-words text-lg tabular-nums text-slate-900">{card.value}</strong><p className="mt-1 text-[11px] text-slate-500">{card.hint}</p></div>)}
+          </section>
+          {readiness && <section className="rounded-xl border border-slate-200 bg-white p-4" aria-label="Invoice-ready work by PO line">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-semibold text-slate-900">Invoice-ready work by PO line</h3><p className="mt-1 text-xs text-slate-500">Actual eligible, unbilled quantities · independently calculated per work item</p></div>{readiness.readyAmount>0 && <Link to={`/billing?po=${encodeURIComponent(po.id)}&create=1`} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700">Prepare eligible invoice →</Link>}</div>
+            <div className="overflow-x-auto"><table className="w-full min-w-[540px] text-xs"><thead className="bg-slate-50 text-slate-500"><tr><th className="px-3 py-2 text-left font-semibold">Work / PO line</th><th className="px-3 py-2 text-right font-semibold">Ready quantity</th><th className="px-3 py-2 text-right font-semibold">Sites / items</th><th className="px-3 py-2 text-right font-semibold">Ready value</th></tr></thead><tbody className="divide-y divide-slate-100">{readiness.readyLines.map(line=><tr key={line.poLineId}><td className="px-3 py-3 text-slate-900">{line.description}</td><td className="px-3 py-3 text-right tabular-nums">{line.quantity>0 ? `${line.quantity.toLocaleString('en-IN')} ${line.uom}` : 'Not yet eligible'}</td><td className="px-3 py-3 text-right text-slate-600 tabular-nums">{line.sites} / {line.workItems}</td><td className="px-3 py-3 text-right font-semibold tabular-nums text-blue-700">{formatRupees(line.amount)}</td></tr>)}</tbody></table></div>
+            {!readiness.readyLines.length && <p className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">No configured PO lines available for billing. Set up scope and rates first.</p>}
+            <p className="mt-3 text-[11px] text-slate-500">A line can have no ready value even when delivery is complete: missing measurements, blocked historical links or fully invoiced work must be reconciled before billing.</p>
+          </section>}
+          {readinessError && <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs">Billing readiness unavailable. <button type="button" onClick={() => void retryReadiness()} className="font-semibold underline">Retry</button></div>}
+          {readiness && readiness.issues.length > 0 && <details className="rounded-xl border border-amber-200 bg-white p-3 text-xs"><summary className="cursor-pointer font-semibold text-amber-800">Billing reconciliation · {readiness.issues.length} checks</summary><ul className="mt-2 list-inside list-disc space-y-1">{readiness.issues.map(issue => <li key={issue}>{issue}</li>)}</ul><Link to={`/shops?po=${encodeURIComponent(po.id)}`} className="mt-2 inline-block font-semibold text-blue-700">Review shops →</Link></details>}
+        </>}
+        {financialVisible && <PoCompletionDonut
           key={po.id}
           progress={progress}
           stage={stage}
           billingPending={billingPending}
           billingError={billingError}
-        />
+          sites={siteProgress}
+          readiness={readiness}
+          readinessPending={readinessPending}
+          readinessError={readinessError}
+          mode="financial"
+        />}
 
-        <PoStageProgressChart rows={utilization} stage={stage} fulfillmentType={po.fulfillment_type} />
-        <PoUtilizationTable rows={utilization} stage={stage} />
+        {!financialVisible && <PoStageProgressChart rows={utilization} stage={stage} fulfillmentType={po.fulfillment_type} pipeline={pipeline} />}
+        <PoUtilizationTable rows={utilization} stage={stage} showFinancial={financialVisible} />
 
         {(po.payment_terms || po.notes) && (
           <div className="space-y-3 border-t border-slate-100 pt-4">
@@ -1339,8 +1476,9 @@ function WorkOrderDetailDrawer({
             <FileText className="w-4 h-4" /> View source PO document
           </a>
         )}
-      </div>
-    </Drawer>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1354,7 +1492,7 @@ function WorkOrderDetailDrawer({
 // summary cards + stage progress chart above already answer "how's this
 // PO doing", so the full line-by-line breakdown only needs to take up
 // space when someone actually asks for it.
-function PoUtilizationTable({ rows, stage }: { rows: POLineItemUtilization[]; stage: UtilizationStage }) {
+function PoUtilizationTable({ rows, stage, showFinancial = false }: { rows: POLineItemUtilization[]; stage: UtilizationStage; showFinancial?: boolean }) {
   const [open, setOpen] = useState(false);
   if (rows.length === 0) return null;
   return (
@@ -1377,8 +1515,8 @@ function PoUtilizationTable({ rows, stage }: { rows: POLineItemUtilization[]; st
                 <th className="text-right px-3 py-2">Approved</th>
                 <th className="text-right px-3 py-2">Produced</th>
                 <th className="text-right px-3 py-2">Installed</th>
-                <th className="text-right px-3 py-2">Invoiced</th>
-                <th className="text-right px-3 py-2">Balance</th>
+                {showFinancial && <th className="text-right px-3 py-2">Invoiced</th>}
+                {showFinancial && <th className="text-right px-3 py-2">Balance</th>}
                 <th className="text-center px-3 py-2">%</th>
                 <th className="px-3 py-2"></th>
               </tr>
@@ -1396,10 +1534,10 @@ function PoUtilizationTable({ rows, stage }: { rows: POLineItemUtilization[]; st
                     <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.approved_area : row.approved_qty, row.uom)}</td>
                     <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.produced_qty, row.uom === 'sqft' ? 'piece' : row.uom)}</td>
                     <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.installed_area : row.installed_qty, row.uom)}</td>
-                    <td className="px-3 py-2 text-right text-slate-600">{formatRupees(fig.invoicedAmount)}</td>
-                    <td className={`px-3 py-2 text-right font-medium ${fig.remainingBalance != null && fig.remainingBalance < 0 ? 'text-red-600' : 'text-slate-900'}`}>
+                    {showFinancial && <td className="px-3 py-2 text-right text-slate-600">{formatRupees(fig.invoicedAmount)}</td>}
+                    {showFinancial && <td className={`px-3 py-2 text-right font-medium ${fig.remainingBalance != null && fig.remainingBalance < 0 ? 'text-red-600' : 'text-slate-900'}`}>
                       {formatRupees(fig.remainingBalance)}
-                    </td>
+                    </td>}
                     <td className="px-3 py-2">
                       <div className="mx-auto w-24 text-center" title={!comparable ? 'Production pieces cannot be compared with a sqft budget' : undefined}>
                         <ProgressBar pct={rowPct} />
@@ -1422,7 +1560,7 @@ function PoUtilizationTable({ rows, stage }: { rows: POLineItemUtilization[]; st
           </table>
         </div>
       )}
-      {open && <p className="mt-2 text-[11px] text-slate-500">Per-line invoicing includes only invoice items linked to that line. The financial overview also reconciles PO-level invoice items that were not linked individually.</p>}
+      {open && showFinancial && <p className="mt-2 text-[11px] text-slate-500">Per-line invoicing includes only invoice items linked to that line. The financial overview also reconciles PO-level invoice items that were not linked individually.</p>}
     </div>
   );
 }
@@ -1430,110 +1568,80 @@ function PoUtilizationTable({ rows, stage }: { rows: POLineItemUtilization[]; st
 // The existing donut is now one selectable, non-overlapping view. Work is
 // operational scope (default); Financial is billing against the PO budget.
 // These measures NEVER share a numerator: invoices do not prove work done.
-function PoCompletionDonut({ progress, stage, billingPending, billingError }: { progress: PoProgressSummary; stage: UtilizationStage; billingPending?: boolean; billingError?: boolean }) {
-  const [mode, setMode] = useState<'work' | 'financial'>('work');
+function PoCompletionDonut({ progress, stage, billingPending, billingError, sites, readiness, readinessPending, readinessError, mode }: {
+  progress: PoProgressSummary; stage: UtilizationStage; billingPending?: boolean; billingError?: boolean;
+  sites?: DeliverySummary | null; readiness?: BillingReadiness; readinessPending?: boolean; readinessError?: boolean; mode: 'work' | 'financial';
+}) {
   const isWork = mode === 'work';
-  const pct = isWork ? progress.workPct : (billingPending || billingError ? null : progress.financialPct);
   const budget = progress.budgetedAmount;
+  const billed = progress.invoicedAmount;
+  const ready = readiness?.readyAmount || 0;
+  const covered = budget != null ? Math.max(0, Math.min(ready, Math.max(0, budget - billed))) : 0;
+  const pct = isWork ? (sites && sites.total ? sites.percentage : progress.workPct)
+    : (billingPending || billingError || readinessPending || readinessError || !readiness || !budget || budget <= 0
+      ? null : Math.max(0, Math.min(100, (billed + covered) * 100 / budget)));
   const segments = isWork
-    ? [
-        { key: 'done', label: 'Executed', value: pct ?? 0, color: '#2563eb' },
-        { key: 'remaining', label: 'Remaining', value: 100 - (pct ?? 0), color: '#e2e8f0' },
-      ]
-    : [
-        { key: 'billed', label: 'Invoiced', value: budget != null ? Math.min(budget, progress.invoicedAmount) : 0, color: '#059669' },
-        { key: 'unbilled', label: 'Not invoiced', value: budget != null ? Math.max(0, budget - progress.invoicedAmount) : 0, color: '#e2e8f0' },
-      ];
-  return (
-    <section className="rounded-xl border border-slate-200 bg-white p-4" aria-label="Overall completion">
-      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-        <div>
-          <h3 className="text-sm font-semibold text-slate-900">Overall completion</h3>
-          <p className="text-xs text-slate-500 mt-0.5">{isWork ? `Actual ${stage === 'produced' ? 'production' : 'installation'} against planned scope` : 'Invoicing against planned line-item value (excl. GST)'}</p>
-        </div>
-        <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5" role="group" aria-label="Completion calculation">
-          {(['work', 'financial'] as const).map((value) => (
-            <button key={value} type="button" aria-pressed={mode === value} onClick={() => setMode(value)}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 ${mode === value ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>
-              {value === 'work' ? 'Work' : 'Financial'}
-            </button>
-          ))}
-        </div>
+    ? [{ key: 'done', label: 'Delivered', value: pct ?? 0, color: '#2563eb' },
+       { key: 'remaining', label: 'Remaining', value: 100 - (pct ?? 0), color: '#e2e8f0' }]
+    : [{ key: 'billed', label: 'Already invoiced', value: budget != null ? Math.min(budget, billed) : 0, color: '#059669' },
+       { key: 'ready', label: 'Ready to invoice', value: covered, color: '#2563eb' },
+       { key: 'unready', label: 'Not yet billable', value: budget != null ? Math.max(0, budget - billed - covered) : 0, color: '#e2e8f0' }];
+  return <section className="rounded-xl border border-slate-200 bg-white p-4" aria-label="Work and financial progress">
+    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div><h3 className="text-sm font-semibold text-slate-900">Overall progress</h3>
+        <p className="mt-0.5 text-xs text-slate-500">{isWork ? 'Delivered sites, based on actual shop stages' : 'Invoiced + verified ready-to-bill work · excluding GST'}</p></div>
+      <span className="rounded-md bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">{isWork ? 'Operational view' : 'Private · financial view'}</span>
+    </div>
+    {pct == null ? <div role="status" className="rounded-lg bg-slate-50 px-4 py-5 text-sm text-slate-600">
+      {isWork ? 'Link shops or record measurable line-item execution to calculate work completion.'
+        : billingError || readinessError ? 'Billing progress unavailable. Retry the Work Order data.'
+        : billingPending || readinessPending ? 'Calculating verified billing-ready value…'
+        : 'Enter complete PO quantity/area and rates to calculate a meaningful financial percentage.'}
+    </div> : <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
+      <DonutChart segments={segments} size={140} strokeWidth={17} centerValue={`${Math.round(pct)}%`} centerLabel={isWork ? 'delivered' : 'covered'} />
+      <div className="min-w-0 flex-1 space-y-2 text-xs">
+        {isWork ? <>
+          <p className="text-slate-600">{sites?.total ? `${sites.completed}/${sites.total} sites delivered; ${sites.total - sites.completed} remaining` : `${Math.round(100-pct)}% of measured planned scope remains`}</p>
+          {progress.groups.some(group=>group.completed>0) ? progress.groups.filter(group=>group.completed>0).map(group => <p key={group.uom} className="flex items-center justify-between gap-2"><span className="text-slate-500">Measured {group.uom}</span><span className="font-medium tabular-nums">{formatQty(group.completed, group.uom)} / {formatQty(group.planned, group.uom)}</span></p>) : progress.groups.length>0 && <details className="rounded-lg bg-slate-50 p-2"><summary className="cursor-pointer font-medium">Measured quantities not yet recorded · view scope</summary>{progress.groups.map(group=><p key={group.uom} className="mt-2">{formatQty(group.completed,group.uom)} of {formatQty(group.planned,group.uom)} {group.uom}</p>)}</details>}
+          {!!sites?.total && progress.workPct == null && <p className="text-amber-700">No comparable measured scope yet. Site completion does not create billable quantities.</p>}
+          {progress.excessScope && <p className="text-amber-700">Execution exceeds planned scope on at least one line.</p>}
+        </> : <>
+          <p className="flex justify-between gap-3"><span className="text-slate-500">PO value (excl. GST)</span><strong>{formatRupees(budget)}</strong></p>
+          <p className="flex justify-between gap-3"><span className="text-slate-500">Already invoiced</span><strong className="text-emerald-700">{formatRupees(billed)}</strong></p>
+          <p className="flex justify-between gap-3"><span className="text-slate-500">Verified ready to invoice</span><strong className="text-blue-700">{formatRupees(ready)}</strong></p>
+          <p className="flex justify-between gap-3 border-t border-slate-100 pt-2"><span className="text-slate-500">Remaining not yet billable</span><strong>{formatRupees(Math.max(0, (budget || 0) - billed - covered))}</strong></p>
+          <p className="text-[11px] text-slate-500">{budget != null && budget > billed ? `${Math.min(100, Math.round(ready / (budget - billed) * 100))}% of uninvoiced PO value is invoice-ready.` : 'No uninvoiced PO budget remains.'} Payment collection is separate.</p>
+          {ready > covered + 0.01 && <p className="text-amber-800">Ready work exceeds remaining PO value. Check PO scope and rates before invoicing.</p>}
+          {progress.overInvoicedAmount > 0 && <p className="text-red-700">Invoiced value exceeds PO budget by {formatRupees(progress.overInvoicedAmount)}.</p>}
+        </>}
       </div>
-      {pct == null ? (
-        <div className="rounded-lg bg-slate-50 px-4 py-5 text-sm text-slate-600" role="status">
-          {isWork
-            ? 'Work completion is not available until every line item has a planned quantity or area.'
-            : billingPending ? 'Reconciling invoice items…' : billingError ? 'Could not load invoice items. Please retry the Work Order.' : 'Financial completion is not available until every line item has planned scope and a rate, with a positive total budget.'}
-        </div>
-      ) : (
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
-          <DonutChart segments={segments} size={140} strokeWidth={17} centerValue={`${Math.round(pct)}%`} centerLabel={isWork ? 'work done' : 'invoiced'} />
-          <div className="min-w-0 flex-1 space-y-3">
-            {isWork ? (
-              <>
-                <p className="text-xs text-slate-600">{Math.round(100 - pct)}% of planned scope remains. Breakdown by unit:</p>
-                <div className="text-xs text-slate-600 space-y-1">
-                  {progress.groups.map((g) => <p key={g.uom} className="flex items-center justify-between gap-2"><span>{g.uom === 'sqft' ? 'Area' : g.uom === 'piece' ? 'Pieces' : 'Lots'}:</span><span className="font-medium tabular-nums">{formatQty(g.completed, g.uom)} / {formatQty(g.planned, g.uom)}</span></p>)}
-                </div>
-                {progress.groups.length > 1 && <p className="text-[11px] text-slate-500">Mixed units are reconciled within each unit, then weighted equally by unit type.</p>}
-                {progress.excessScope && <p className="text-xs text-amber-700">Recorded execution exceeds planned scope on at least one line. Progress is capped at 100%.</p>}
-              </>
-            ) : (
-              <>
-                <div className="space-y-2 text-xs">
-                  <p className="flex items-center justify-between gap-3"><span className="text-slate-500">Planned value</span><span className="font-semibold tabular-nums text-slate-900">{formatRupees(budget)}</span></p>
-                  <p className="flex items-center justify-between gap-3"><span className="text-slate-500">Invoiced</span><span className="font-semibold tabular-nums text-emerald-700">{formatRupees(progress.invoicedAmount)}</span></p>
-                  <p className="flex items-center justify-between gap-3 border-t border-slate-100 pt-2"><span className="text-slate-500">Uninvoiced balance</span><span className="font-semibold tabular-nums text-slate-900">{formatRupees(Math.max(0, progress.balance ?? 0))}</span></p>
-                </div>
-                {progress.overInvoicedAmount > 0 && <p className="text-xs font-medium text-red-700">Invoiced {formatRupees(progress.overInvoicedAmount)} above planned value. Chart is capped at 100%.</p>}
-                <p className="text-[11px] text-slate-500">Billing progress, not payment collection or physical work completion.</p>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-    </section>
-  );
+    </div>}
+  </section>;
 }
 
-function PoStageProgressChart({ rows, stage, fulfillmentType }: {
-  rows: POLineItemUtilization[];
-  stage: UtilizationStage;
-  fulfillmentType?: string | null;
+function PoStageProgressChart({ rows, stage, fulfillmentType, pipeline }: {
+  rows: POLineItemUtilization[]; stage: UtilizationStage; fulfillmentType?: string | null;
+  pipeline?: ReturnType<typeof milestoneProgress>;
 }) {
-  // Supply-only and direct-install skip these upstream stages entirely.
-  // The final installation/production % is already the donut above.
-  if (!rows.length || fulfillmentType === 'supply_only' || fulfillmentType === 'direct_install' || stage !== 'installed') return null;
-  const steps: { key: UtilizationStage; label: string; color: string }[] = [
-    { key: 'surveyed', label: 'Survey recorded', color: '#2563eb' },
-    { key: 'approved', label: 'Design approved', color: '#7c3aed' },
-    { key: 'produced', label: 'Production recorded', color: '#d97706' },
-  ];
-  return (
-    <section className="rounded-xl border border-slate-200 p-4">
-      <h3 className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-slate-900"><TrendingUp className="h-4 w-4 text-slate-500" /> Upstream stages</h3>
-      <div className="space-y-3">
-        {steps.map((s) => {
-          const summary = calculatePoProgress(rows, s.key);
-          const pct = summary.workPct;
-          const producedPieces = s.key === 'produced' ? rows.reduce((n, r) => n + Math.max(0, r.produced_qty || 0), 0) : 0;
-          return (
-            <div key={s.key}>
-              <div className="flex items-center justify-between gap-3 text-xs mb-1.5">
-                <span className="font-medium text-slate-600">{s.label}</span>
-                <span className="text-slate-500 tabular-nums">{pct == null ? (s.key === 'produced' ? `${producedPieces.toLocaleString('en-IN')} pcs recorded · no comparable area target` : 'Scope needed') : `${Math.round(pct)}%`}</span>
-              </div>
-              <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden" role="progressbar" aria-label={s.label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? 0}>
-                <div className="h-full rounded-full" style={{ width: `${pct ?? 0}%`, backgroundColor: s.color }} />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <p className="mt-3 text-[11px] text-slate-500">Stage figures are recorded quantities against planned scope, not paid value. Production is reported in pieces where area is not comparable.</p>
-    </section>
-  );
+  if (!pipeline) return null; // Line-item editor shows item utilization instead; no shop-state context here.
+  const labels: Record<string,string> = { survey: 'Survey / approval', design: 'Design validation', production: 'Production', dispatch: 'Dispatch', installation: 'Installation approved' };
+  return <section className="rounded-xl border border-slate-200 bg-white p-4" aria-label="Fulfillment milestone progress">
+    <h3 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-slate-900"><TrendingUp className="h-4 w-4 text-slate-500"/> Applicable fulfillment stages</h3>
+    <p className="mb-4 text-xs text-slate-500">Stages not required by this fulfillment type are excluded. Reaching a later stage counts earlier applicable milestones as passed.</p>
+    {!pipeline.total && <p className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">No linked active sites. Stage percentages cannot be verified from shop status.</p>}
+    {pipeline.milestones.some(step=>step.percentage===100) && <div className="mb-4">
+      <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Passed milestones</p>
+      <div className="flex flex-wrap gap-2">{pipeline.milestones.filter(step=>step.percentage===100).map(step =>
+        <span key={step.stage} className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-800"><CheckCircle2 className="h-3.5 w-3.5"/>{labels[step.stage]} · {step.reached}/{step.total}</span>
+      )}</div>
+    </div>}
+    {pipeline.milestones.some(step=>step.percentage!==100) ? <div className="space-y-3">{pipeline.milestones.filter(step=>step.percentage!==100).map(step => <div key={step.stage}>
+      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium text-slate-700">{labels[step.stage]}</span><span className="tabular-nums text-slate-500">{step.percentage == null ? 'No site evidence' : `${step.percentage}% · ${step.reached}/${step.total} sites`}</span></div>
+      <div className="h-2 overflow-hidden rounded-full bg-slate-100" role="progressbar" aria-label={labels[step.stage]} aria-valuemin={0} aria-valuemax={100} aria-valuenow={step.percentage ?? 0}><div className="h-full rounded-full bg-blue-600" style={{width:`${step.percentage ?? 0}%`}}/></div>
+    </div>)}</div> : pipeline.total>0 && <p className="text-xs text-emerald-800">All applicable milestones passed for the linked active sites.</p>}
+    <p className="mt-4 text-[11px] text-slate-500">Passed milestones are derived from downstream shop status, not backdated approvals. Billing still requires verified actual work measurements and reconciliation.</p>
+    {rows.length > 0 && <details className="mt-3 rounded-lg bg-slate-50 p-3 text-xs"><summary className="cursor-pointer font-semibold text-slate-700">Recorded quantities by stage (independent)</summary><div className="mt-3 space-y-2">{(['surveyed','approved','produced',stage] as UtilizationStage[]).filter((st,i,all) => all.indexOf(st) === i).map(st => { const p = calculatePoProgress(rows,st); return <p key={st} className="flex justify-between"><span className="capitalize">{st}</span><span>{p.workPct == null ? 'Not comparable / missing' : `${Math.round(p.workPct)}% measured`}</span></p>; })}</div></details>}
+  </section>;
 }
 
 function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: PurchaseOrder; onClose: () => void; canDelete: boolean; utilization: POLineItemUtilization[] }) {
@@ -1670,7 +1778,7 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
     setForm({ ...form, uom: v, budgeted_qty: v === 'sqft' ? '' : form.budgeted_qty, budgeted_area: v === 'sqft' ? form.budgeted_area : '' });
   }
 
-  const canSaveLineItem = !!form.description && !!form.rate && (isAreaUom ? !!form.budgeted_area : !!form.budgeted_qty);
+  const canSaveLineItem = !!form.description && !!form.rate && (isAreaUom(form.uom) ? !!form.budgeted_area : !!form.budgeted_qty);
 
   // Computed straight from the (always-fresh, query-invalidated) items
   // list rather than po.total_amount, so this total updates the instant a
@@ -1737,7 +1845,7 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
               })}
               {items?.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-3 py-6 text-center text-slate-400">No line items yet — add one below. PO total will fill in automatically.</td>
+                  <td colSpan={8} className="px-3 py-6 text-center text-slate-400">No line items yet — add one below. PO total will fill in automatically.</td>
                 </tr>
               )}
             </tbody>

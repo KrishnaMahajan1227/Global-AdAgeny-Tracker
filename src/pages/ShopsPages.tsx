@@ -1,3 +1,4 @@
+import { isOwnerStage, ownerStageLabels, statusesForStage } from '@/lib/ownerOperations';
 import { useState, useEffect, useMemo, type ReactNode } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as XLSX from 'xlsx';
@@ -5,7 +6,10 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { ProgressBar } from '@/components/ui';
-import { isDone, percent, type Order } from '@/lib/agencyProgress';
+import { type Order } from '@/lib/agencyProgress';
+import { deliveryByOrder, deliveryForOrders, type DeliveryShop } from '@/lib/agencyDelivery';
+import { useAgencyFinancials, financeForOrders } from '@/lib/agencyFinance';
+import { formatRupees } from '@/lib/poUtilization';
 import AgencyHierarchyPage from '@/pages/AgencyHierarchyPage';
 import {
   Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, PageHeader,
@@ -55,8 +59,9 @@ export function ClientsPage() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
+  const { data: invoiceTotals, isError: invoiceTotalsError } = useAgencyFinancials(orgId);
   // Keep the directory and its per-page delivery figures in sync with changes elsewhere.
-  useRealtimeInvalidate(['clients', 'purchase_orders'], orgId, [['clients', orgId], ['client-progress', orgId]]);
+  useRealtimeInvalidate(['clients', 'purchase_orders', 'shops', 'installation_jobs', 'surveys', 'design_tasks', 'production_orders'], orgId, [['clients', orgId], ['client-progress', orgId], ['client-site-progress', orgId]]);
   const canHardDelete = profile?.role === 'agency_owner' || profile?.role === 'admin';
   const [clientParams] = useSearchParams();
   const selectedClientId = clientParams.get('detail');
@@ -98,7 +103,7 @@ export function ClientsPage() {
       const orders: Order[] = [];
       for (let from = 0; ; from += 500) {
         const { data, error } = await supabase.from('purchase_orders')
-          .select('id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,created_at')
+          .select('id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,fulfillment_type,total_amount,created_at,po_line_items(requires_survey,requires_design,requires_production,requires_installation)')
           .eq('organization_id', orgId).in('client_id', pageClientIds)
           .order('id', { ascending: true }).range(from, from + 499);
         if (error) throw error;
@@ -108,17 +113,30 @@ export function ClientsPage() {
       return orders;
     },
   });
+  const { data: clientSiteProgress, isFetching: sitesProgressLoading, isError: sitesProgressError } = useQuery({
+    queryKey: ['client-site-progress', orgId, pageClientIds],
+    enabled: !!orgId && pageClientIds.length > 0,
+    queryFn: async () => {
+      const sites: DeliveryShop[] = [];
+      for (let from = 0; ; from += 500) {
+        const { data, error } = await supabase.from('shops')
+          .select('id,client_id,purchase_order_id,status')
+          .eq('organization_id', orgId).in('client_id', pageClientIds)
+          .order('id').range(from, from + 499);
+        if (error) throw error;
+        sites.push(...((data || []) as DeliveryShop[]));
+        if (!data || data.length < 500) break;
+      }
+      return sites;
+    },
+  });
   const progressByClient = useMemo(() => {
-    const result = new Map<string, { total: number; done: number }>();
-    for (const order of clientProgress || []) {
-      if (!order.client_id) continue;
-      const entry = result.get(order.client_id) || { total: 0, done: 0 };
-      entry.total++;
-      if (isDone(order)) entry.done++;
-      result.set(order.client_id, entry);
-    }
+    const orders = clientProgress || [];
+    const group = deliveryByOrder(orders, clientSiteProgress || []);
+    const result = new Map<string, ReturnType<typeof deliveryForOrders>>();
+    for (const id of pageClientIds) result.set(id, deliveryForOrders(orders.filter(o => o.client_id === id), group));
     return result;
-  }, [clientProgress]);
+  }, [clientProgress, clientSiteProgress, pageClientIds.join(',')]);
 
   useEffect(() => { setClientPage(1); }, [debouncedClientSearch, clientStatus]);
   useEffect(() => {
@@ -250,7 +268,7 @@ export function ClientsPage() {
   const totalClients = clientsPage?.count || 0;
   const totalClientPages = Math.max(1, Math.ceil(totalClients / CLIENT_PAGE_SIZE));
   const hardDeleteReady = confirmName.trim().toLowerCase() === (hardDeleteClient?.name || '').trim().toLowerCase();
-  const ordersFor = (id: string) => progressByClient.get(id) || { total: 0, done: 0 };
+  const ordersFor = (id: string) => progressByClient.get(id) || { total: 0, done: 0, open: 0, sites: 0, deliveredSites: 0, percentage: 0 };
   const workOrderUrl = (id: string) => `/purchase-orders?client=${encodeURIComponent(id)}`;
 
   // Bookmarked legacy URLs must lead to the canonical Work Orders screen,
@@ -286,23 +304,25 @@ export function ClientsPage() {
           <p className="shrink-0 text-xs tabular-nums text-slate-500" role="status">{clientsFetching ? 'Updating…' : `${totalClients.toLocaleString('en-IN')} ${totalClients === 1 ? 'client' : 'clients'}`}</p>
         </div>
         {clientsError ? <div className="p-8 text-center text-sm text-red-700" role="alert">Couldn't load clients. <button onClick={() => retryClients()} className="font-medium underline">Retry</button></div> : clientsLoading ? <div className="p-8 text-center text-sm text-slate-500" role="status">Loading clients…</div> : <>
-          {progressError && <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900" role="alert">Order progress is temporarily unavailable. <button onClick={() => retryProgress()} className="font-medium underline">Retry</button></div>}
+          {(progressError || sitesProgressError) && <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900" role="alert">Order progress is temporarily unavailable. <button onClick={() => retryProgress()} className="font-medium underline">Retry</button></div>}
           <div className="hidden overflow-x-auto md:block">
-            <table className="w-full min-w-[760px] text-left text-sm">
-              <thead className="bg-slate-50 text-xs font-medium text-slate-500"><tr><th scope="col" className="px-4 py-3 font-medium">Client</th><th scope="col" className="px-4 py-3 font-medium">Contact</th><th scope="col" className="px-4 py-3 font-medium">Work orders</th><th scope="col" className="px-4 py-3 font-medium">Orders closed</th><th scope="col" className="px-4 py-3 font-medium">Status</th><th scope="col" className="px-4 py-3 text-right font-medium">Manage</th></tr></thead>
-              <tbody className="divide-y divide-slate-100">{visibleClients.map(client => { const {done,total}=ordersFor(client.id);const ready = !progressLoading && !progressError;return <tr key={client.id} className="hover:bg-slate-50/70">
+            <table className="w-full min-w-[860px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs font-medium text-slate-500"><tr><th scope="col" className="px-4 py-3 font-medium">Client</th><th scope="col" className="px-4 py-3 font-medium">Contact</th><th scope="col" className="px-4 py-3 font-medium">Work orders</th><th scope="col" className="px-4 py-3 font-medium">Work delivered</th><th scope="col" className="px-4 py-3 font-medium">Invoiced</th><th scope="col" className="px-4 py-3 font-medium">Status</th><th scope="col" className="px-4 py-3 text-right font-medium">Manage</th></tr></thead>
+              <tbody className="divide-y divide-slate-100">{visibleClients.map(client => { const {done,total,sites,deliveredSites,percentage}=ordersFor(client.id);const ready = !progressLoading && !progressError && !sitesProgressLoading && !sitesProgressError;return <tr key={client.id} className="hover:bg-slate-50/70">
                 <td className="px-4 py-3"><Link to={workOrderUrl(client.id)} className="font-medium text-slate-900 hover:text-blue-700 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">{client.name} <ChevronRight size={14} className="inline text-slate-400"/></Link><div className="mt-0.5 text-xs text-slate-500">{[client.city,client.state].filter(Boolean).join(', ') || 'Location not set'}</div></td>
                 <td className="px-4 py-3 text-slate-600"><div>{client.contact_person || '—'}</div><div className="mt-0.5 text-xs text-slate-500">{client.contact_phone || client.contact_email || ''}</div></td>
                 <td className="px-4 py-3"><Link to={workOrderUrl(client.id)} className="font-medium tabular-nums text-blue-700 hover:underline">{ready ? total : '—'} <span className="font-normal">{ready ? 'View orders →' : ''}</span></Link></td>
-                <td className="px-4 py-3"><div className="flex items-center gap-2"><div className="w-20"><ProgressBar pct={ready && total ? percent(done, total) : 0}/></div><span className="whitespace-nowrap text-xs tabular-nums text-slate-600">{ready ? `${done}/${total}` : '—'}</span></div></td>
+                <td className="px-4 py-3"><div className="flex items-center gap-2"><div className="w-20"><ProgressBar pct={ready ? percentage : 0}/></div><span className="whitespace-nowrap text-xs tabular-nums text-slate-600">{ready ? (sites ? `${deliveredSites}/${sites} sites · ${percentage}%` : `${done}/${total} orders · ${percentage}%`) : '—'}</span></div></td>
+                <td className="px-4 py-3 text-xs font-medium tabular-nums text-emerald-700">{!invoiceTotals || invoiceTotalsError ? '—' : formatRupees(financeForOrders((clientProgress || []).filter(o => o.client_id === client.id),invoiceTotals).invoiced)}</td>
                 <td className="px-4 py-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${client.is_active?'bg-emerald-50 text-emerald-700':'bg-slate-100 text-slate-600'}`}>{client.is_active?'Active':'Inactive'}</span></td>
                 <td className="px-3 py-2"><div className="flex justify-end">{clientActions(client)}</div></td>
               </tr>;})}</tbody>
             </table>
           </div>
-          <div className="divide-y divide-slate-100 md:hidden">{visibleClients.map(client=>{const {done,total}=ordersFor(client.id);const ready=!progressLoading&&!progressError;return <div key={client.id} className="space-y-2 px-4 py-3">
+          <div className="divide-y divide-slate-100 md:hidden">{visibleClients.map(client=>{const {done,total,sites,deliveredSites,percentage}=ordersFor(client.id);const ready=!progressLoading&&!progressError&&!sitesProgressLoading&&!sitesProgressError;return <div key={client.id} className="space-y-2 px-4 py-3">
             <div className="flex items-start justify-between gap-2"><div className="min-w-0"><Link to={workOrderUrl(client.id)} className="font-medium text-slate-900 hover:text-blue-700">{client.name} <ChevronRight size={14} className="inline text-slate-400"/></Link><p className="mt-1 text-xs text-slate-500">{[client.city,client.contact_person].filter(Boolean).join(' · ') || 'No contact details'}</p></div><span className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-medium ${client.is_active?'bg-emerald-50 text-emerald-700':'bg-slate-100 text-slate-600'}`}>{client.is_active?'Active':'Inactive'}</span></div>
-            <div className="flex items-center justify-between"><Link to={workOrderUrl(client.id)} className="text-xs font-medium text-blue-700">{ready ? `${total} work orders · ${done} closed →` : 'Loading orders…'}</Link>{clientActions(client)}</div>
+            <p className="text-xs text-slate-500">Billed: {!invoiceTotals || invoiceTotalsError ? '—' : formatRupees(financeForOrders((clientProgress || []).filter(o => o.client_id === client.id),invoiceTotals).invoiced)}</p>
+            <div className="flex items-center justify-between"><Link to={workOrderUrl(client.id)} className="text-xs font-medium text-blue-700">{ready ? `${total} work orders · ${sites ? `${deliveredSites}/${sites} sites delivered` : `${done} delivered`} · ${percentage}% →` : 'Loading progress…'}</Link>{clientActions(client)}</div>
           </div>;})}</div>
           {!visibleClients.length && <p className="px-4 py-12 text-center text-sm text-slate-500">{debouncedClientSearch || clientStatus!=='all' ? 'No matching clients. Try another search or status.' : 'No clients yet. Select Add client to begin.'}</p>}
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3 text-xs text-slate-600">
@@ -851,6 +871,8 @@ export function ShopsPage() {
   // shareable/bookmarkable and survives a refresh.
   const [searchParams, setSearchParams] = useSearchParams();
   const poFilter = searchParams.get('po') || '';
+  const stageFilterRaw = searchParams.get('stage') || '';
+  const stageFilter = poFilter && isOwnerStage(stageFilterRaw) ? stageFilterRaw : '';
 
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search.trim(), 350);
@@ -927,7 +949,7 @@ export function ShopsPage() {
   useEffect(() => {
     setPage(0);
     setSelectedShopIds(new Set());
-  }, [poFilter, statusFilter, debouncedCityFilter, debouncedDistrictFilter, debouncedStateFilter, zoneFilter, campaignFilter, debouncedSearch, pageSize]);
+  }, [poFilter, stageFilter, statusFilter, debouncedCityFilter, debouncedDistrictFilter, debouncedStateFilter, zoneFilter, campaignFilter, debouncedSearch, pageSize]);
   // Selection is strictly scoped to the visible page. Never carry old IDs
   // into a new page/sort and accidentally mutate shops users cannot see.
   useEffect(() => { setSelectedShopIds(new Set()); }, [page, sortBy]);
@@ -1411,14 +1433,14 @@ export function ShopsPage() {
   // The Work Order this list is filtered to may be cancelled (so it
   // won't be in the "active" purchaseOrders list above) — fetched
   // separately, by id, just to label the filter banner correctly.
-  const { data: poFilterInfo } = useQuery({
-    queryKey: ['purchase_order_by_id', poFilter],
+  const { data: poFilterInfo, isFetched: poFilterResolved } = useQuery({
+    queryKey: ['purchase_order_by_id', orgId, poFilter],
     queryFn: async () => {
-      const { data, error } = await supabase.from('purchase_orders').select('id, po_number, status').eq('id', poFilter).maybeSingle();
+      const { data, error } = await supabase.from('purchase_orders').select('id, po_number, status, fulfillment_type, po_line_items(requires_survey, requires_design, requires_production, requires_installation)').eq('organization_id', orgId).eq('id', poFilter).maybeSingle();
       if (error) throw error;
-      return data as Pick<PurchaseOrder, 'id' | 'po_number' | 'status'> | null;
+      return data as (Pick<PurchaseOrder, 'id' | 'po_number' | 'status' | 'fulfillment_type'> & {po_line_items: {requires_survey:boolean;requires_design:boolean;requires_production:boolean;requires_installation:boolean}[]}) | null;
     },
-    enabled: !!poFilter,
+    enabled: !!poFilter && !!orgId,
   });
 
   // City/District/State — a narrow single-column-ish projection (not the
@@ -1443,7 +1465,8 @@ export function ShopsPage() {
   // zone, campaign, Work Order) is applied in the query itself, and only
   // one page (pageSize rows) comes back, alongside an exact total count
   // from Postgres for the "X–Y of Z" indicator and page controls below.
-  const shopsQueryKey = ['shops', orgId, { poFilter, statusFilter, zoneFilter, campaignFilter, city: debouncedCityFilter, district: debouncedDistrictFilter, state: debouncedStateFilter, q: debouncedSearch, sortBy, page, pageSize }];
+  const groupedStatuses = stageFilter ? (poFilterInfo ? statusesForStage(stageFilter, poFilterInfo.fulfillment_type, poFilterInfo.po_line_items || []) : []) : null;
+  const shopsQueryKey = ['shops', orgId, { poFilter, stageFilter, groupedStatuses, statusFilter, zoneFilter, campaignFilter, city: debouncedCityFilter, district: debouncedDistrictFilter, state: debouncedStateFilter, q: debouncedSearch, sortBy, page, pageSize }];
   const { data: shopsPage, isFetching: shopsLoading, error: shopsLoadError, refetch: refetchShops } = useQuery({
     queryKey: shopsQueryKey,
     queryFn: async () => {
@@ -1458,6 +1481,7 @@ export function ShopsPage() {
         .eq('organization_id', orgId);
 
       if (poFilter) query = query.eq('purchase_order_id', poFilter);
+      if (groupedStatuses) query = query.in('status', groupedStatuses.length ? groupedStatuses : ['__no_matching_stage__']);
       if (statusFilter) query = query.eq('status', statusFilter);
       if (zoneFilter) query = query.eq('zone_id', zoneFilter);
       if (campaignFilter) query = query.eq('purchase_orders.campaign_id', campaignFilter);
@@ -1491,6 +1515,7 @@ export function ShopsPage() {
           .select(`*, clients(name), projects(name), zones(name), ${poEmbed}`, { count: 'exact' })
           .eq('organization_id', orgId);
         if (poFilter) fallback = fallback.eq('purchase_order_id', poFilter);
+        if (groupedStatuses) fallback = fallback.in('status', groupedStatuses.length ? groupedStatuses : ['__no_matching_stage__']);
         if (statusFilter) fallback = fallback.eq('status', statusFilter);
         if (zoneFilter) fallback = fallback.eq('zone_id', zoneFilter);
         if (campaignFilter) fallback = fallback.eq('purchase_orders.campaign_id', campaignFilter);
@@ -1507,7 +1532,7 @@ export function ShopsPage() {
       }
       return { rows: data || [], total: count || 0 };
     },
-    enabled: !!orgId,
+    enabled: !!orgId && (!stageFilter || poFilterResolved),
     placeholderData: (prev) => prev,
   });
 
@@ -2044,8 +2069,8 @@ export function ShopsPage() {
   const cities = useMemo(() => [...new Set((locationRows || []).map((r) => r.city).filter(Boolean))].sort() as string[], [locationRows]);
   const districts = useMemo(() => [...new Set((locationRows || []).map((r) => r.district).filter(Boolean))].sort() as string[], [locationRows]);
   const states = useMemo(() => [...new Set((locationRows || []).map((r) => r.state).filter(Boolean))].sort() as string[], [locationRows]);
-  const hasActiveFilters = !!(search || statusFilter || cityFilter || districtFilter || stateFilter || zoneFilter || campaignFilter || poFilter);
-  const activeFilterCount = [statusFilter, cityFilter, districtFilter, stateFilter, zoneFilter, campaignFilter, poFilter].filter(Boolean).length;
+  const hasActiveFilters = !!(stageFilter || search || statusFilter || cityFilter || districtFilter || stateFilter || zoneFilter || campaignFilter || poFilter);
+  const activeFilterCount = [stageFilter, statusFilter, cityFilter, districtFilter, stateFilter, zoneFilter, campaignFilter, poFilter].filter(Boolean).length;
   const SORT_OPTIONS = [
     { value: 'created_desc', label: 'Newest first' },
     { value: 'created_asc', label: 'Oldest first' },
@@ -2099,8 +2124,8 @@ export function ShopsPage() {
       {poFilter && (
         <div className="mb-4 flex items-center gap-2 text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
           <FileText className="w-4 h-4 shrink-0" />
-          Showing shops for Work Order <span className="font-semibold">{poFilterInfo?.po_number || '…'}</span> only.
-          <button onClick={() => setPoFilter('')} className="ml-1 underline hover:no-underline">Clear filter</button>
+          Showing shops for Work Order <span className="font-semibold">{poFilterInfo?.po_number || '…'}</span> {stageFilter ? `· ${ownerStageLabels[stageFilter]} stage` : ''} only.
+          {stageFilter && <button type="button" onClick={() => { const next = new URLSearchParams(searchParams); next.delete('stage'); setSearchParams(next, { replace:true }); }} className="ml-1 underline hover:no-underline">All stages</button>}<button onClick={() => { const next = new URLSearchParams(searchParams); next.delete('stage'); next.delete('po'); setSearchParams(next, { replace:true }); }} className="ml-1 underline hover:no-underline">Clear Work Order</button>
         </div>
       )}
 

@@ -1,15 +1,21 @@
-import { isShopFinished } from './workCompletion';
+import { isShopFinished, type StageRequirements } from './workCompletion';
 /** PO-first invoicing: shop IDs are internal evidence, never customer invoice labels. */
 export const money2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 export const qty4 = (value: number): number => Math.round((value + Number.EPSILON) * 10000) / 10000;
 
 /** Last stage is fulfillment-specific; a dispatch is NOT final for installation orders. */
-export function isFinalizedShop(type: string | null | undefined, status: string | null | undefined): boolean {
-  return isShopFinished(type, status);
+export function isFinalizedShop(type: string | null | undefined, status: string | null | undefined, requirements: StageRequirements[] = []): boolean {
+  return isShopFinished(type, status, requirements);
 }
 
-export function billingStageLabel(type: string | null | undefined): string {
-  return type === 'supply_only' ? 'Dispatched' : 'Installed';
+export function billingStageLabel(type: string | null | undefined, requirements: StageRequirements[] = []): string {
+  if (type === 'supply_only') return 'Dispatched';
+  if (type === 'custom' && requirements.length && requirements.every(r => r.requires_installation === false)) {
+    if (requirements.some(r => r.requires_production !== false)) return 'Production complete';
+    if (requirements.some(r => r.requires_design !== false)) return 'Design approved';
+    return 'Survey approved';
+  }
+  return 'Installed';
 }
 
 
@@ -22,13 +28,15 @@ export interface CompletedWorkRow {
   shop_status?: string | null;
   status?: string | null;
   installed_area?: number | null;
+  survey_area?: number | null;
+  survey_quantity?: number | null;
   approved_area?: number | null;
   approved_quantity?: number | null;
   installed_quantity?: number | null;
   produced_quantity?: number | null;
   excluded_from_calculations?: boolean | null;
 }
-export interface RateRow {
+export interface RateRow extends StageRequirements {
   po_line_item_id: string;
   description: string;
   uom: string;
@@ -39,6 +47,7 @@ export interface RateRow {
   budgeted_area?: number | null;
 }
 export interface BilledRow {
+  id?: string;
   work_item_id?: string | null;
   shop_id?: string | null;
   po_line_item_id?: string | null;
@@ -81,6 +90,7 @@ export function buildPendingAllocations(
   billed: BilledRow[],
   selectedShopIds: string[],
   fulfillmentType: string | null | undefined,
+  requirements: StageRequirements[] = rateRows,
 ): { allocations: BillingAllocation[]; issues: string[] } {
   const selected = new Set(selectedShopIds);
   const byPo = new Map(rateRows.map((row) => [row.po_line_item_id, row]));
@@ -117,7 +127,7 @@ export function buildPendingAllocations(
   const seenIds = new Set<string>();
   for (const item of items) {
     if (!selected.has(item.shop_id) || item.excluded_from_calculations) continue;
-    if (item.shop_status && !isFinalizedShop(fulfillmentType, item.shop_status)) {
+    if (item.shop_status && !isFinalizedShop(fulfillmentType, item.shop_status, requirements)) {
       issues.push('Shop has not reached the final fulfillment stage for this Work Order.');
       continue;
     }
@@ -141,30 +151,48 @@ export function buildPendingAllocations(
     // Backfilled installed work may carry approved dimensions but missing installed
     // fields. Use them ONLY if the work item is explicitly marked installed;
     // a survey or approval alone is never billable.
-    const approvedInstalledFallback = fulfillmentType !== 'supply_only' && item.status === 'installed' && isFinalizedShop(fulfillmentType, item.shop_status);
+    // Custom work can end at production, design or survey according to the
+    // *matched PO line's* required stages. Never assume every custom line
+    // must be installed, and never treat one completed stage as evidence of a
+    // missing quantity on another line.
+    const finalStage = fulfillmentType === 'supply_only' ? 'produced'
+      : fulfillmentType !== 'custom' || po.requires_installation !== false ? 'installed'
+      : po.requires_production !== false ? 'produced'
+      : po.requires_design !== false ? 'approved' : 'surveyed';
+    const approvedInstalledFallback = finalStage === 'installed' && item.status === 'installed' && isFinalizedShop(fulfillmentType, item.shop_status, requirements);
     const installedArea = nonNegative(item.installed_area) || (approvedInstalledFallback ? nonNegative(item.approved_area) : 0);
     const installedQuantity = nonNegative(item.installed_quantity) || (approvedInstalledFallback ? nonNegative(item.approved_quantity) : 0);
+    const producedArea = nonNegative(item.approved_quantity) && nonNegative(item.approved_area)
+      ? qty4(nonNegative(item.approved_area) * nonNegative(item.produced_quantity) / nonNegative(item.approved_quantity)) : 0;
     const completed = basis === 'area'
-      ? fulfillmentType === 'supply_only'
-        ? (nonNegative(item.approved_quantity) && nonNegative(item.approved_area)
-          ? qty4(nonNegative(item.approved_area) * nonNegative(item.produced_quantity) / nonNegative(item.approved_quantity))
-          : 0)
-        : installedArea
-      : nonNegative(fulfillmentType === 'supply_only' ? item.produced_quantity : installedQuantity);
+      ? finalStage === 'produced' ? producedArea : finalStage === 'approved' ? nonNegative(item.approved_area)
+        : finalStage === 'surveyed' ? nonNegative(item.survey_area) : installedArea
+      : finalStage === 'produced' ? nonNegative(item.produced_quantity)
+        : finalStage === 'approved' ? nonNegative(item.approved_quantity)
+        : finalStage === 'surveyed' ? nonNegative(item.survey_quantity) : installedQuantity;
     if (completed === 0) {
-      if (basis === 'area' && fulfillmentType === 'supply_only' && nonNegative(item.produced_quantity)) {
-        issues.push('A produced supply-only item is missing approved area/quantity needed for sq.ft billing.');
+      if (basis === 'area' && finalStage === 'produced' && nonNegative(item.produced_quantity)) {
+        issues.push('A completed production item is missing approved area/quantity needed for sq.ft billing.');
       }
       continue;
     }
     let alreadyBilled = 0;
+    let ambiguousHistory = false;
     for (const old of invoicesByWork.get(item.id) || []) {
       if (old.po_line_item_id && old.po_line_item_id !== po.po_line_item_id) {
         issues.push('Historical billing line has a mismatched Work Order item.');
+        ambiguousHistory = true;
         continue;
       }
-      alreadyBilled += nonNegative(basis === 'area' ? old.area : old.quantity);
+      const oldUnits = basis === 'area' ? old.area : old.quantity;
+      if ((oldUnits == null || !Number.isFinite(Number(oldUnits)) || Number(oldUnits) <= 0) && Number(old.amount || 0) > 0) {
+        issues.push('A previous invoice item has an amount but no matching billable unit. Reconcile its quantity before billing again.');
+        ambiguousHistory = true;
+        continue;
+      }
+      alreadyBilled += nonNegative(oldUnits);
     }
+    if (ambiguousHistory) continue;
     const remaining = qty4(completed - alreadyBilled);
     if (remaining < -0.0001) { issues.push('Historical invoiced quantity exceeds completed quantity. Review before billing.'); continue; }
     if (remaining <= 0) continue;
@@ -175,7 +203,7 @@ export function buildPendingAllocations(
       description: po.description || item.work_type_name || 'Work item',
       hsn: po.hsn_code || '', uom: po.uom || (basis === 'area' ? 'sqft' : 'piece'),
       basis, completed,
-      displayQuantity: nonNegative(fulfillmentType === 'supply_only' ? item.produced_quantity : installedQuantity) || 1,
+      displayQuantity: nonNegative(finalStage === 'produced' ? item.produced_quantity : finalStage === 'approved' ? item.approved_quantity : finalStage === 'surveyed' ? item.survey_quantity : installedQuantity) || 1,
       alreadyBilled, pending: remaining, rate, amount: money2(remaining * rate),
     });
   }

@@ -1,5 +1,6 @@
 import type { PurchaseOrder } from '@/lib/types';
-export type Order = Pick<PurchaseOrder, 'id' | 'client_id' | 'project_id' | 'campaign_id' | 'status' | 'assignment_status' | 'name' | 'po_number' | 'created_at'>;
+import type { StageRequirements } from '@/lib/workCompletion';
+export type Order = { po_line_items?: StageRequirements[] } & Pick<PurchaseOrder, 'id' | 'client_id' | 'project_id' | 'campaign_id' | 'status' | 'assignment_status' | 'name' | 'po_number' | 'created_at'> & Partial<Pick<PurchaseOrder, 'fulfillment_type' | 'total_amount'>>;
 export const percent = (done: number, total: number) => total > 0 ? Math.max(0, Math.min(100, Math.round(done * 100 / total))) : 0;
 export const isDone = (o: Order) => o.status === 'closed' || o.assignment_status === 'completed';
 export const orderState = (o: Order) => isDone(o) ? 'Done' : o.assignment_status === 'pending_acceptance' ? 'Review' : o.status === 'cancelled' || o.assignment_status === 'rejected' ? 'Cancelled' : o.assignment_status === 'in_progress' ? 'In Progress' : 'Pending';

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { fetchAllPages } from '@/lib/paginatedQuery';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
@@ -12,6 +13,7 @@ import type { Organization, Client, Invoice, InvoiceItem, PurchaseOrder, POLineI
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
 import { buildPendingAllocations, consolidateInvoiceLines, isFinalizedShop, billingStageLabel, type BilledRow, type CompletedWorkRow, type RateRow } from '@/lib/poBilling';
 import { getShopCompletion } from '@/lib/workCompletion';
+import { fetchOrderInvoiceHistory } from '@/lib/poBillingHistory';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 
 // Every line item bills by EITHER quantity OR area, never both blindly
@@ -77,6 +79,8 @@ export default function BillingPage() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
+  const [billingUrlParams, setBillingUrlParams] = useSearchParams();
+  const [billingDeepLinkError, setBillingDeepLinkError] = useState('');
   // Work stage changes must refresh the current billing scope without a full reload.
   useRealtimeInvalidate(['shops', 'work_items', 'invoice_items', 'invoices', 'po_line_items'], orgId, [
     ['billing-completed-shops', orgId], ['billing-completed-work-items', orgId],
@@ -161,7 +165,7 @@ export default function BillingPage() {
     queryKey: ['po-line-rates-for-billing', orgId, form.purchase_order_id],
     queryFn: async () => {
       const rows = await fetchAllPages<any>((a,b) => supabase.from('po_line_items')
-        .select('id,description,uom,rate,hsn_code,work_type_id,budgeted_qty,budgeted_area')
+        .select('id,description,uom,rate,hsn_code,work_type_id,budgeted_qty,budgeted_area,requires_survey,requires_design,requires_production,requires_installation')
         .eq('organization_id', orgId!).eq('purchase_order_id', form.purchase_order_id)
         .order('id').range(a,b));
       return rows.map(row => ({ ...row, po_line_item_id: row.id })) as RateRow[];
@@ -216,18 +220,15 @@ export default function BillingPage() {
     },
     enabled: !!orgId && !!form.purchase_order_id && !!selectedPO && !!poRateData && !editingInvoiceId,
   });
-  const workOrderCompletion = getShopCompletion(completionShopsData ?? EMPTY_SHOPS, selectedPO?.fulfillment_type);
+  const workOrderCompletion = getShopCompletion(completionShopsData ?? EMPTY_SHOPS, selectedPO?.fulfillment_type, poRates);
   const completionShops = (completionShopsData ?? EMPTY_SHOPS).filter((shop: any) =>
-    isFinalizedShop(selectedPO?.fulfillment_type, shop.status));
+    isFinalizedShop(selectedPO?.fulfillment_type, shop.status, poRates));
   // The shop is an eligibility filter, not a billing unit. Every completed
   // work-item is reconciled against its own historical invoice quantities.
   const { data: billedWorkData, isLoading: billedWorkLoading, error: billedWorkError } = useQuery({
-    queryKey: ['billing-work-item-history', orgId, form.purchase_order_id],
-    queryFn: async () => fetchAllPages<BilledRow>((a,b) => supabase.from('invoice_items')
-      .select('work_item_id,shop_id,po_line_item_id,quantity,area,rate,amount,invoices!inner(purchase_order_id)')
-      .eq('organization_id', orgId!).eq('invoices.purchase_order_id', form.purchase_order_id)
-      .order('id').range(a,b)),
-    enabled: !!orgId && !!form.purchase_order_id && !editingInvoiceId,
+    queryKey: ['billing-work-item-history', orgId, form.purchase_order_id, poRateData],
+    queryFn: () => fetchOrderInvoiceHistory(orgId!,form.purchase_order_id,poRates.map(row => row.po_line_item_id)),
+    enabled: !!orgId && !!form.purchase_order_id && !!poRateData && !editingInvoiceId,
   });
   const billedWork = billedWorkData ?? EMPTY_BILLED_WORK;
   const { data: completedWorkItemsData, isLoading: completedItemsLoading, error: completedItemsError } = useQuery({
@@ -238,7 +239,7 @@ export default function BillingPage() {
       const rows: CompletedWorkRow[] = [];
       for (let start = 0; start < ids.length; start += 100) {
         const batch = await fetchAllPages<CompletedWorkRow>((a,b) => supabase.from('work_items')
-          .select('id,shop_id,status,work_type_id,work_type_name,po_line_item_id,installed_area,approved_area,approved_quantity,installed_quantity,produced_quantity,excluded_from_calculations')
+          .select('id,shop_id,status,work_type_id,work_type_name,po_line_item_id,installed_area,survey_area,survey_quantity,approved_area,approved_quantity,installed_quantity,produced_quantity,excluded_from_calculations')
           .eq('organization_id', orgId!).in('shop_id', ids.slice(start, start + 100))
           .order('id').range(a,b));
         rows.push(...batch.filter(item => {
@@ -255,11 +256,11 @@ export default function BillingPage() {
     && !completionShopsError && !completedItemsError && !billedWorkError && !poRatesError;
   const calculatedBatch = useMemo(() => buildPendingAllocations(
     completedWorkItems, poRates, billedWork,
-    selectedShopIds, selectedPO?.fulfillment_type,
+    selectedShopIds, selectedPO?.fulfillment_type, poRates,
   ), [completedWorkItems, poRateData, billedWork, selectedShopIds, selectedPO?.fulfillment_type]);
   const eligibleShopIds = useMemo(() => new Set(buildPendingAllocations(
     completedWorkItems, poRates, billedWork,
-    completionShops.map((shop: any) => shop.id), selectedPO?.fulfillment_type,
+    completionShops.map((shop: any) => shop.id), selectedPO?.fulfillment_type, poRates,
   ).allocations.map((row) => row.shopId)), [completedWorkItems, poRateData, billedWork, completionShops, selectedPO?.fulfillment_type]);
   const eligibleShops = completionShops.filter((shop: any) => eligibleShopIds.has(shop.id));
   // Final-stage shops with no usable work measurement are not silently billed.
@@ -388,7 +389,7 @@ export default function BillingPage() {
       const freshWork: CompletedWorkRow[] = [];
       for (let start = 0; start < selectedShopIds.length; start += 100) {
         const batch = await fetchAllPages<CompletedWorkRow>((a,b) => supabase.from('work_items')
-          .select('id,shop_id,status,work_type_id,work_type_name,po_line_item_id,installed_area,approved_area,approved_quantity,installed_quantity,produced_quantity,excluded_from_calculations')
+          .select('id,shop_id,status,work_type_id,work_type_name,po_line_item_id,installed_area,survey_area,survey_quantity,approved_area,approved_quantity,installed_quantity,produced_quantity,excluded_from_calculations')
           .eq('organization_id', orgId).in('shop_id', selectedShopIds.slice(start, start + 100))
           .order('id').range(a,b));
         freshWork.push(...batch.filter(item => {
@@ -397,7 +398,7 @@ export default function BillingPage() {
         }).map(item => ({ ...item, shop_status: statuses.get(item.shop_id) }))); 
       }
       const freshRateRows = await fetchAllPages<any>((a,b) => supabase.from('po_line_items')
-        .select('id,description,uom,rate,hsn_code,work_type_id,budgeted_qty,budgeted_area')
+        .select('id,description,uom,rate,hsn_code,work_type_id,budgeted_qty,budgeted_area,requires_survey,requires_design,requires_production,requires_installation')
         .eq('organization_id', orgId).eq('purchase_order_id', form.purchase_order_id)
         .order('id').range(a,b));
       const freshRates: RateRow[] = freshRateRows.map(row => ({ ...row, po_line_item_id: row.id }));
@@ -668,6 +669,33 @@ export default function BillingPage() {
     }));
   }
 
+  // Work Order → one-click draft: choose client, PO, terms, GST and all eligible
+  // completed work automatically. Never post an invoice without review.
+  useEffect(() => {
+    const deepLinkPoId = billingUrlParams.get('po');
+    if (billingUrlParams.get('create') !== '1' || !deepLinkPoId || !purchaseOrders || !clients) return;
+    const po = purchaseOrders.find(row => row.id === deepLinkPoId);
+    if (po) {
+      const client = clients.find(row => row.id === po.client_id);
+      setBillingDeepLinkError('');
+      setConfirmPost(false);
+      setEditingInvoiceId(null);
+      setInitializedPO('');
+      setSelectedShopIds([]);
+      setShopSearch('');
+      setForm({ ...emptyForm, invoice_date: localDateISO(), items: [],
+        client_id: po.client_id, project_id: po.project_id || '', purchase_order_id: po.id,
+        gst_rate: po.gst_percentage != null ? String(po.gst_percentage) : '18',
+        terms: po.payment_terms || '', bill_to_name: client?.name || '',
+        bill_to_address: client?.address || '', bill_to_city: client?.city || '',
+        bill_to_state: client?.state || '', bill_to_gst: client?.gst_number || '' });
+      setModalOpen(true);
+    } else {
+      setBillingDeepLinkError('This Work Order is no longer available for invoicing.');
+    }
+    setBillingUrlParams(current => { const next = new URLSearchParams(current); next.delete('create'); return next; }, { replace: true });
+  }, [billingUrlParams, setBillingUrlParams, purchaseOrders, clients]);
+
   // Picking a PO line item autofills description + rate + HSN code from
   // the budget row (owner can still edit all three after) and remembers
   // the link so it's saved on the invoice_item for reconciliation. It also
@@ -826,6 +854,8 @@ export default function BillingPage() {
         </button>
       </div>
 
+      {billingDeepLinkError && <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900"><span>{billingDeepLinkError}</span><button type="button" onClick={() => setBillingDeepLinkError('')} className="rounded border border-amber-300 px-2 py-1 font-medium">Dismiss</button></div>}
+
       <section aria-label="Invoice filters" className="rounded-xl border border-slate-200 bg-white px-3 py-3">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(180px,2fr)_minmax(120px,1fr)_minmax(170px,1.5fr)_minmax(100px,0.85fr)_minmax(100px,0.85fr)]">
           <label className="text-[11px] font-medium text-slate-600">Search
@@ -936,7 +966,7 @@ export default function BillingPage() {
                     <span className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200">{workOrderCompletion.completed}/{workOrderCompletion.total} shops completed · {selectedShopIds.length} billable selected</span>
                   </div>
                   {canSelectShops && completionShops.length === 0 &&
-                    <p className="mt-2 text-xs text-slate-600">No shops have reached the final {billingStageLabel(selectedPO.fulfillment_type).toLowerCase()} stage for this Work Order.</p>}
+                    <p className="mt-2 text-xs text-slate-600">No shops have reached the final {billingStageLabel(selectedPO.fulfillment_type, poRates).toLowerCase()} stage for this Work Order.</p>}
                   {canSelectShops && needsReconciliation.length > 0 && (
                     <div role="status" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                       <p className="font-semibold">{needsReconciliation.length} completed shop(s) require measurement / Work Order linkage verification.</p>

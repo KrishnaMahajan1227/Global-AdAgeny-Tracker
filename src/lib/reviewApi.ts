@@ -53,7 +53,8 @@ export async function refreshReviewViews(qc: QueryClient, shopId?: string) {
     'survey-field-corrections', 'installation-field-corrections', 'surveys-review', 'survey-review-counts', 'installation-review',
     'installation-review-counts', 'shops', 'shop', 'shop-work-items', 'shop-surveys', 'shop-installations', 'shop-survey-photos',
     'shop-field-review-decisions', 'shop-field-corrections', 'shop-design-tasks', 'design-task-list', 'design-task-stats', 'design-task-detail',
-    'dashboard-stats', 'nav-pending-counts', 'po-utilization', 'review-evidence-work-items', 'review-evidence-proofs',
+    'dashboard-stats', 'agency-operations-dashboard', 'agency-hierarchy', 'client-progress', 'client-site-progress',
+    'po-shop-links', 'purchase_orders', 'agency-finance', 'nav-pending-counts', 'po-utilization', 'review-evidence-work-items', 'review-evidence-proofs',
   ];
   await Promise.all(keys.map((k) => qc.invalidateQueries({ queryKey: [k] })));
   if (shopId) await Promise.all([qc.invalidateQueries({ queryKey: ['shop', shopId] }), qc.invalidateQueries({ queryKey: ['shop-installations', shopId] })]);

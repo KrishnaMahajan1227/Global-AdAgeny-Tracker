@@ -25,7 +25,7 @@ export default function AgencyHierarchyPage({ kind, selectedId }: { kind: 'clien
       fetchAllPages<Pick<Client,'id'|'name'|'is_active'>>((a,b) => supabase.from('clients').select('id,name,is_active').eq('organization_id', orgId).order('id').range(a,b)),
       fetchAllPages<Pick<Project,'id'|'name'|'client_id'|'start_date'|'end_date'|'status'|'created_at'>>((a,b) => supabase.from('projects').select('id,name,client_id,start_date,end_date,status,created_at').eq('organization_id', orgId).order('id').range(a,b)),
       fetchAllPages<Pick<Campaign,'id'|'name'|'start_date'|'end_date'|'status'|'created_at'>>((a,b) => supabase.from('campaigns').select('id,name,start_date,end_date,status,created_at').order('id').range(a,b)),
-      fetchAllPages<Order>((a,b) => supabase.from('purchase_orders').select('id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,fulfillment_type,total_amount,created_at,po_line_items(requires_survey,requires_design,requires_production,requires_installation)').eq('organization_id', orgId).order('id').range(a,b)),
+      fetchAllPages<Order>((a,b) => supabase.from('purchase_orders').select('id,client_id,project_id,campaign_id,name,po_number,status,assignment_status,fulfillment_type,delivery_receipt_required,total_amount,created_at,po_line_items(requires_survey,requires_design,requires_production,requires_installation)').eq('organization_id', orgId).order('id').range(a,b)),
       fetchAllPages<DeliveryShop>((a,b) => supabase.from('shops').select('id,client_id,purchase_order_id,status').eq('organization_id',orgId).order('id').range(a,b)),
     ]);
     return { clients, projects, campaigns, orders, shops };

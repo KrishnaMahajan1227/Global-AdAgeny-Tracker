@@ -3724,6 +3724,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const assignMutation = useMutation({
     mutationFn: async () => {
       if (!assignUserId || !assignModal || !shop) throw new Error('Pick a person to assign first.');
+      if (assignModal === 'surveyor' && (purchaseOrders || []).some(po => po.id === shop.purchase_order_id && po.fulfillment_type === 'production_install')) throw new Error('Survey is not required for Production & Installation. Select Design Review instead.');
 
       // Designers are owned by design_tasks rather than shop_assignments.
       // Keep one canonical task per shop and update/reassign it here so the

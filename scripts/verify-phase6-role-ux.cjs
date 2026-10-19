@@ -1,0 +1,31 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+let ts; try { ts = require('typescript'); } catch { ts = require('/opt/nvm/versions/node/v22.16.0/lib/node_modules/typescript'); }
+const root=path.resolve(__dirname,'..');
+const read = p => fs.readFileSync(path.join(root,p),'utf8');
+const helper = 'src/lib/operationalNavigation.ts';
+const js = ts.transpileModule(read(helper), {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+const exp={}; new Function('exports', 'require', js)(exp,()=>({}));
+const {orderNextActionPath,orderDetailsPath,validWorkOrderId} = exp;
+const id='c792a399-9aa4-4912-b4df-66bf17ef7705';
+let n=0;function test(label,fn){fn();console.log('PASS',label);n++;}
+test('URL IDs reject malformed or escaped user parameters',()=>{assert.equal(validWorkOrderId(id),id);assert.equal(validWorkOrderId('abc'), '');assert.equal(validWorkOrderId('xxx,other_id.eq.yyy'),'');});
+test('Assignment and missing scope show exact Work Order detail',()=>{assert.equal(orderNextActionPath({id,assignment_status:'pending_acceptance'},{stage:'production'},true),orderDetailsPath(id));assert.equal(orderNextActionPath({id},{stage:'design'},false),orderDetailsPath(id));});
+test('Survey status navigates exact PO shop stage',()=>{assert.equal(orderNextActionPath({id},{stage:'survey'},true),`/shops?po=${id}&stage=survey`);});
+test('Designer and printing queue deep links preserve correct PO',()=>{assert.equal(orderNextActionPath({id},{stage:'design'},true),`/design?po=${id}`);assert.equal(orderNextActionPath({id},{stage:'production'},true),`/production?po=${id}`);});
+test('Installation review navigates to evidence queue with PO filter',()=>{assert.equal(orderNextActionPath({id},{stage:'review'},true),`/installation-review?po=${id}`);});
+test('Supply dispatch navigates supply workflow dispatch step, not installation',()=>{assert.equal(orderNextActionPath({id,fulfillment_type:'supply_only',delivery_receipt_required:true},{stage:'dispatch'},true),`/purchase-orders?type=supply_only&workflow=supply&po=${id}&step=dispatch`);});
+test('Installation-required dispatch navigates incomplete sites, not supply module',()=>{assert.equal(orderNextActionPath({id,fulfillment_type:'production_install'},{stage:'dispatch'},true),`/shops?po=${id}&stage=dispatch`);});
+test('Done work orders open details, not empty current-stage filter',()=>{assert.equal(orderNextActionPath({id},{stage:'complete',kind:'done'},true),orderDetailsPath(id));});
+test('Dashboard and Work Order detail use the same action resolver',()=>{assert.match(read('src/pages/DashboardPage.tsx'),/orderNextActionPath\(item.order, item.next, item.delivery.total > 0\)/);assert.match(read('src/pages/PurchaseOrdersPage.tsx'),/orderNextActionPath\(po, nextOperational/);});
+test('Deep-linked work order filters exist in all four departments',()=>{for(const p of ['DesignerPage.tsx','ProductionPage.tsx','SurveyReviewPage.tsx','InstallationReviewPage.tsx']){const code=read('src/pages/'+p);assert.match(code,/validWorkOrderId\(routeParams.get\('po'\)\)/);assert.match(code,/setRouteParams/);}});
+test('Review/production routes truly filter queries by PO',()=>{const x=read('src/pages/InstallationReviewPage.tsx');assert.match(x,/query.eq\('shops.purchase_order_id', linkedPoId\)/);assert.match(x,/shops!inner\(name, city, purchase_order_id/);for(const p of ['DesignerPage.tsx','ProductionPage.tsx'])assert.match(read('src/pages/'+p),/q.eq\('po_id', poFilter\)/);});
+test('Client manager is not trapped without allowed sidebar navigation',()=>{const code=read('src/components/AdminLayout.tsx');assert.match(code,/const isClientManager = profile\?\.role === 'client_manager'/);assert.match(code,/label: 'Clients'.*isClientManager/);assert.match(code,/label: 'Work Orders'.*isClientManager/);});
+test('Mobile sidebar traps focus and restores it safely',()=>{const code=read('src/components/AdminLayout.tsx');assert.match(code,/event.key !== 'Tab'/);assert.match(code,/previousFocus\?\.isConnected/);assert.match(code,/app-sidebar-scroll/);});
+test('Owner finances are opt-in; staff does not receive private toggle',()=>{const code=read('src/pages/DashboardPage.tsx');assert.match(code,/Boolean\(isOwner && privateFinance\)/);assert.match(code,/useAgencyFinancials\(orgId, financialView\)/);assert.match(read('src/pages/PurchaseOrdersPage.tsx'),/const financialVisible = canViewFinancialDetails && detailMode === 'financial'/);});
+test('Client overview offers direct campaigns navigation and labels polling honestly',()=>{const code=read('src/pages/client/ClientOverviewPage.tsx');assert.match(code,/Campaigns & Work Orders/);assert.match(code,/Auto-refresh/);assert.match(code,/refetchInterval: 20000/);});
+test('No new database migration in purely navigational Phase 6',()=>{assert.ok(!fs.existsSync(path.join(root,'supabase/migrations/20261031100000_0101_phase6.sql')));});
+const paths = ['src/pages/DashboardPage.tsx','src/pages/PurchaseOrdersPage.tsx','src/pages/DesignerPage.tsx','src/pages/ProductionPage.tsx','src/pages/SurveyReviewPage.tsx','src/pages/InstallationReviewPage.tsx','src/components/AdminLayout.tsx','src/pages/client/ClientOverviewPage.tsx',helper];
+test('Every changed TS/TSX source parses cleanly',()=>{for(const p of paths){const source=ts.createSourceFile(p,read(p),ts.ScriptTarget.Latest,true,p.endsWith('tsx')?ts.ScriptKind.TSX:ts.ScriptKind.TS);assert.deepEqual(source.parseDiagnostics.map(d=>ts.flattenDiagnosticMessageText(d.messageText,' ')),[],p);}});
+console.log(`ALL ${n} PHASE 6 ROLE & NAVIGATION TESTS PASSED`);

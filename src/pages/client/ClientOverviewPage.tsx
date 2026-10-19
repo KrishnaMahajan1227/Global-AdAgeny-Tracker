@@ -7,7 +7,7 @@ import { Card, EmptyState, ProgressBar } from '@/components/ui';
 import { DonutChart } from '@/components/DonutChart';
 import type { PurchaseOrder, Campaign, ClientPOLineItemProgress } from '@/lib/types';
 import {
-  siteBucket, stagePct, finalStage, clientPoWorkStatus, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS,
+  siteBucket, stagePct, finalStage, receiptCompletionPercent, clientPoWorkStatus, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS,
 } from '@/lib/clientPortal';
 import { useClientRealtimeInvalidate } from '@/lib/useClientRealtimeInvalidate';
 import {
@@ -25,10 +25,11 @@ const SITE_DONUT_COLORS: Record<'pending' | 'in_progress' | 'completed', string>
 };
 
 const FULFILLMENT_LABELS: Record<string, string> = {
-  survey_install: 'Full Branding',
-  supply_only: 'Supply Only',
+  survey_install: 'Survey & Installation',
+  production_install: 'Production & Installation',
+  supply_only: 'Production & Delivery',
   custom: 'Custom Scope',
-  direct_install: 'Direct Installation',
+  direct_install: 'On-site Execution',
 };
 
 function greeting() {
@@ -190,9 +191,10 @@ export default function ClientOverviewPage() {
   const activePos = (pos || []).filter((po) => po.status !== 'cancelled' && po.assignment_status !== 'rejected');
   const activeCampaignsCount = (campaigns || []).filter((c) => c.status === 'active').length;
 
+  const poById = new Map((pos || []).map((po) => [po.id, po]));
   const siteCounts = { pending: 0, in_progress: 0, completed: 0 };
   for (const row of shopStatusCounts || []) {
-    const bucket = siteBucket(row.status);
+    const bucket = siteBucket(row.status, poById.get(row.purchase_order_id)?.fulfillment_type, poById.get(row.purchase_order_id)?.delivery_receipt_required === true);
     if (bucket === 'cancelled') continue;
     siteCounts[bucket] += row.shop_count;
   }
@@ -201,12 +203,11 @@ export default function ClientOverviewPage() {
 
   // Agency-wise split — % of sites completed, per agency this client has
   // assigned work to.
-  const poById = new Map((pos || []).map((po) => [po.id, po]));
   const agencyMap = new Map<string, { name: string; total: number; completed: number }>();
   for (const row of shopStatusCounts || []) {
     const po = row.purchase_order_id ? poById.get(row.purchase_order_id) : null;
     if (!po?.assigned_agency_id) continue;
-    const bucket = siteBucket(row.status);
+    const bucket = siteBucket(row.status, poById.get(row.purchase_order_id)?.fulfillment_type, poById.get(row.purchase_order_id)?.delivery_receipt_required === true);
     if (bucket === 'cancelled') continue;
     const key = po.assigned_agency_id;
     const entry = agencyMap.get(key) || { name: po.agency_org?.name || 'Agency', total: 0, completed: 0 };
@@ -225,7 +226,7 @@ export default function ClientOverviewPage() {
   // furthest ahead.
   const regionMap = new Map<string, { total: number; completed: number; inProgress: number }>();
   for (const s of shopsGeo || []) {
-    const bucket = siteBucket(s.status);
+    const bucket = siteBucket(s.status, s.purchase_order_id ? poById.get(s.purchase_order_id)?.fulfillment_type : undefined, s.purchase_order_id ? poById.get(s.purchase_order_id)?.delivery_receipt_required === true : false);
     if (bucket === 'cancelled') continue;
     const region = s.state || s.zone || 'Unspecified';
     const entry = regionMap.get(region) || { total: 0, completed: 0, inProgress: 0 };
@@ -274,7 +275,9 @@ export default function ClientOverviewPage() {
   }
   function poCompletion(po: PoRow) {
     const poProgress = progressByPo.get(po.id) || [];
-    const pct = stagePct(poProgress, finalStage(po.fulfillment_type));
+    const pct = po.fulfillment_type === 'supply_only' && po.delivery_receipt_required
+      ? receiptCompletionPercent((shopStatusCounts || []).filter(row => row.purchase_order_id === po.id).map(row => ({status:row.status,count:row.shop_count})))
+      : stagePct(poProgress, finalStage(po.fulfillment_type));
     return { pct, workStatus: clientPoWorkStatus(po, pct) };
   }
 
@@ -304,18 +307,19 @@ export default function ClientOverviewPage() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">{greeting()}{firstName ? `, ${firstName}` : ''}</h1>
           <p className="text-sm text-slate-500 mt-1">{today} · Your campaigns across every linked agency, at a glance</p>
         </div>
-        <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-full px-3 py-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link to="/client/campaigns" className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-blue-600">Campaigns & Work Orders <ArrowRight size={14}/></Link>
+          <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs font-medium text-slate-600" title="Client overview queries refresh approximately every 20 seconds; data may be slightly delayed."><span className="h-1.5 w-1.5 rounded-full bg-emerald-600"/> Auto-refresh</span>
+        </div>
       </div>
 
       {/* ---------- Top: Site Status (hero, ~68%) + KPIs & Quick Access (~32%, stacked) ---------- */}
-      <div className="grid grid-cols-1 lg:grid-cols-10 gap-6 mb-6 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-10 gap-4 mb-4 items-start">
         <div className="lg:col-span-7">
           <Card className="p-5">
             <div className="mb-5">
@@ -395,7 +399,7 @@ export default function ClientOverviewPage() {
           rather than one long stack of full-width cards. Stretched to
           equal height so the pair reads as one designed row, not two
           cards of whatever height their own content happened to need. */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-stretch">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4 items-stretch">
         {/* Needs Attention — what actually wants a decision from the
             client, ahead of anything that's just informational. A calm
             all-clear state when there's genuinely nothing pending,
@@ -470,7 +474,7 @@ export default function ClientOverviewPage() {
           else's in the room. Same equal-height treatment as the row
           above so the chart's bars have real vertical room to read,
           instead of being squeezed against a fixed height. */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6 items-stretch">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4 items-stretch">
         <Card className="p-5 flex flex-col">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -568,7 +572,7 @@ export default function ClientOverviewPage() {
       {/* Recent Work Orders + Summary — side by side. Work Orders gets
           the wider column since it's a scannable list; Summary is one
           paragraph and reads fine narrower. */}
-      <div className="grid grid-cols-1 lg:grid-cols-10 gap-6 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-10 gap-4 items-start">
         <div className="lg:col-span-6">
           <Card className="p-5">
             <div className="flex items-center justify-between mb-4">

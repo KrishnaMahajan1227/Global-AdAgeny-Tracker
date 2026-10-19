@@ -12,7 +12,7 @@ export type Role = 'agency_owner' | 'admin' | 'client_manager' | 'surveyor' | 'd
 //   — no survey, no design, no production; the ground crew's own on-site
 //   photo+size submission (InstallerPage's "Direct Install" tab) IS the
 //   installation record. See migration 0077.
-export type FulfillmentType = 'survey_install' | 'supply_only' | 'custom' | 'direct_install';
+export type FulfillmentType = 'survey_install' | 'production_install' | 'supply_only' | 'custom' | 'direct_install';
 
 export interface Profile {
   id: string;
@@ -125,6 +125,8 @@ export interface PurchaseOrder {
   name: string | null;
   po_date: string;
   fulfillment_type: FulfillmentType;
+  /** Phase 4: only newly created supply orders wait for acknowledged delivery. */
+  delivery_receipt_required?: boolean;
   storage_path: string | null;
   file_url: string | null;
   total_amount: number | null;

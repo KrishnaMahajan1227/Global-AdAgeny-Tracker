@@ -7,7 +7,7 @@ import { LineItemProgressChart } from '@/components/LineItemProgressChart';
 import { exportClientCampaignReport, exportClientPhotoComplianceReport, exportClientSiteDetailReport, exportClientCampaignReportPDF, exportClientSiteDetailPDF } from '@/lib/reports';
 import { STATUS_LABELS, type PurchaseOrder, type ClientPOLineItemProgress, type Campaign, type WorkItem, type SurveyPhoto, type Organization } from '@/lib/types';
 import {
-  buildClientCampaignRows, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS, stagePct, finalStage,
+  buildClientCampaignRows, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS, stagePct, finalStage, receiptCompletionPercent,
 } from '@/lib/clientPortal';
 import { Download, FileBarChart, Image as ImageIcon, PieChart, AlertTriangle, Megaphone, Building2, ShoppingCart, CheckCircle2, Loader2, FileDown } from 'lucide-react';
 
@@ -360,7 +360,9 @@ export default function ClientReportsPage() {
   const selectedProgressRow = lineItemsForProgressPo.find((r) => r.po_line_item_id === progressLineItemId) || null;
   const selectedPo = posInCampaignFilter.find((p) => p.id === progressPoId) || null;
   const progressFinalStage = selectedPo ? finalStage(selectedPo.fulfillment_type) : 'installed';
-  const progressCompletionPct = selectedProgressRow ? stagePct([selectedProgressRow], progressFinalStage) : null;
+  const progressCompletionPct = selectedPo?.fulfillment_type === 'supply_only' && selectedPo.delivery_receipt_required
+    ? receiptCompletionPercent((shops || []).filter(shop => shop.purchase_order_id === selectedPo.id))
+    : selectedProgressRow ? stagePct([selectedProgressRow], progressFinalStage) : null;
   const progressStageValues = selectedProgressRow
     ? STAGE_STEPS.map((s) => ({ key: s.key, label: s.label, pct: stagePct([selectedProgressRow], s.key) }))
     : [];

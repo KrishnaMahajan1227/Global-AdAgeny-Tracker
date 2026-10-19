@@ -11,17 +11,21 @@ import {
 import { PurchaseOrder, POLineItem, POLineItemUtilization, Campaign, Zone, RateCard, PoAssignment } from '@/lib/types';
 import { logAudit, notifyLinkedOrg, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
-import { computeUtilization, calculatePoProgress, formatQty, formatRupees, isAreaUom, UtilizationStage, fulfillmentTypeLabel, defaultUtilizationStage } from '@/lib/poUtilization';
+import { computeUtilization, calculatePoProgress, formatQty, formatRupees, isAreaUom, getActualForStage, UtilizationStage, fulfillmentTypeLabel, defaultUtilizationStage } from '@/lib/poUtilization';
 import type { PoProgressSummary } from '@/lib/poUtilization';
 import { DonutChart } from '@/components/DonutChart';
 import { deliveryByOrder, type DeliveryShop, type DeliverySummary } from '@/lib/agencyDelivery';
 import { useAgencyFinancials, financeForOrder } from '@/lib/agencyFinance';
 import { useOrderBillingReadiness, type BillingReadiness } from '@/lib/billingReadiness';
+import { reconcileOrderExecution, finalLineMeasurementStage, type ExecutionWorkItem, type ExecutionReconciliation } from '@/lib/poExecutionReconciliation';
+import { fetchAllPages } from '@/lib/paginatedQuery';
 import { milestoneProgress, type StageBucket } from '@/lib/workCompletion';
+import { FULFILLMENT_PRESETS, fulfillmentOptions, fulfillmentPreset } from '@/lib/fulfillment';
 import { isOwnerStage, stageMatches, ownerStageLabels, describeOrderNextStep, type OwnerStageFilter } from '@/lib/ownerOperations';
+import { orderNextActionPath } from '@/lib/operationalNavigation';
 import {
   Plus, Pencil, Trash2, ShoppingCart, FileText, Upload, X, Loader2, IndianRupee, ListChecks, AlertTriangle, TrendingUp, ChevronDown,
-  Inbox, Check, XCircle, Building2, Store, ChevronRight, Calendar, Layers, Users, UserPlus, UserMinus,
+  Inbox, Check, CheckCircle2, ArrowRight, XCircle, Building2, Store, ChevronRight, Calendar, Layers, Users, UserPlus, UserMinus,
 } from 'lucide-react';
 
 const UOM_OPTIONS = [
@@ -30,11 +34,7 @@ const UOM_OPTIONS = [
   { value: 'lot', label: 'Lot' },
 ];
 
-const FULFILLMENT_OPTIONS = [
-  { value: 'survey_install', label: 'Survey + Install', description: 'Full Dealer Boards pipeline — field survey, design approval, production, then an installer completes an on-site install job per shop.' },
-  { value: 'supply_only', label: 'Supply Only', description: 'Production + zone-wise dispatch (tape, flex printing, nails...). No field survey and no on-site install job.' },
-  { value: 'direct_install', label: 'Direct Installation', description: 'Wall-painting / on-ground campaigns with no shop list up front (e.g. "paint dealer walls between City A and City B, wherever possible"). No survey, no design, no production — the ground crew/agency team goes straight to a wall, paints it, and logs the site, size and photos themselves from the Installer app. Budgeted qty/area on the line items below is still tracked exactly the same way, against what actually gets logged.' },
-];
+const FULFILLMENT_OPTIONS = FULFILLMENT_PRESETS;
 
 const emptyPoForm = {
   client_id: '', project_id: '', po_number: '', name: '', po_date: '', fulfillment_type: 'survey_install',
@@ -146,13 +146,13 @@ function WorkOrdersList() {
   // Fulfillment is a primary filter: persist it in the URL for sharing and refresh.
   const urlFulfillment = searchParams.get('type') || '';
   const [fulfillmentFilter, setFulfillmentFilter] = useState(() =>
-    FULFILLMENT_OPTIONS.some(option => option.value === urlFulfillment) ? urlFulfillment : ''
+    fulfillmentOptions(urlFulfillment).some(option => option.value === urlFulfillment) ? urlFulfillment : ''
   );
   useEffect(() => {
-    setFulfillmentFilter(FULFILLMENT_OPTIONS.some(option => option.value === urlFulfillment) ? urlFulfillment : '');
+    setFulfillmentFilter(fulfillmentOptions(urlFulfillment).some(option => option.value === urlFulfillment) ? urlFulfillment : '');
   }, [urlFulfillment]);
   const changeFulfillmentFilter = (type: string) => {
-    if (type && !FULFILLMENT_OPTIONS.some(option => option.value === type)) return;
+    if (type && !fulfillmentOptions(type).some(option => option.value === type)) return;
     setFulfillmentFilter(type);
     setSearchParams(previous => {
       const next = new URLSearchParams(previous);
@@ -196,6 +196,7 @@ function WorkOrdersList() {
   useRealtimeInvalidate(['purchase_orders', 'po_line_items', 'work_items', 'invoices', 'invoice_items', 'shops'], orgId, [
     ['purchase_orders', orgId],
     ['po-utilization', orgId],
+    ['po-execution-reconciliation', orgId],
     ['po-shop-links', orgId],
     ['po-billing-items', orgId],
   ]);
@@ -691,7 +692,7 @@ function WorkOrdersList() {
         </div>
         <select aria-label="Filter by fulfillment type" value={fulfillmentFilter} onChange={(e) => changeFulfillmentFilter(e.target.value)} className="min-w-[164px] max-w-full rounded-lg border border-blue-200 bg-blue-50/50 px-3 py-2 text-sm font-medium text-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
           <option value="">All Work Types</option>
-          {FULFILLMENT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          {fulfillmentOptions(fulfillmentFilter).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
         <select aria-label="Filter work orders by status" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
           <option value="">All statuses</option><option value="active">Active</option><option value="awaiting_response">Awaiting response</option><option value="closed">Closed</option><option value="cancelled">Cancelled</option>
@@ -967,12 +968,14 @@ function WorkOrdersList() {
             label="Fulfillment Type"
             value={form.fulfillment_type}
             onChange={(v) => setForm({ ...form, fulfillment_type: v })}
-            options={FULFILLMENT_OPTIONS}
+            options={fulfillmentOptions(editPo?.fulfillment_type)}
             required
           />
           <p className="text-xs text-slate-500 -mt-2">
-            {FULFILLMENT_OPTIONS.find((f) => f.value === form.fulfillment_type)?.description}
+            {fulfillmentPreset(form.fulfillment_type)?.description || (form.fulfillment_type === 'custom' ? 'Historical custom configuration is preserved.' : '')}
           </p>
+
+          {fulfillmentPreset(form.fulfillment_type) && <p aria-label="Automatic workflow stages" className="rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs text-blue-800">Workflow: {fulfillmentPreset(form.fulfillment_type)!.steps.join(' → ')}. Non-applicable departments are skipped automatically.</p>}
 
           <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 flex items-center justify-between">
             <div>
@@ -1243,16 +1246,40 @@ function WorkOrderDetailDrawer({
 }) {
   const { profile } = useAuth();
   const [detailMode, setDetailMode] = useState<'work'|'financial'>('work');
+  const [utilizationExpanded, setUtilizationExpanded] = useState(false);
   const canViewFinancialDetails = profile?.role === 'agency_owner';
   const financialVisible = canViewFinancialDetails && detailMode === 'financial';
   const { data: readiness, isPending: readinessPending, isError: readinessError, refetch: retryReadiness } = useOrderBillingReadiness(
     profile?.organization_id, po.id, po.client_id, po.fulfillment_type, financialVisible,
   );
+  // Lazy site-item reconciliation: the SQL view misses historical work_items
+  // without po_line_item_id. Fetch only the selected order's shop items;
+  // never manufacture quantities from how many shops are marked installed.
+  const { data: execution, isPending: executionLoading, isError: executionError, refetch: retryExecution } = useQuery({
+    queryKey: ['po-execution-reconciliation', profile?.organization_id, po.id],
+    enabled: !!profile?.organization_id && detailMode === 'work' && linkedShops.length > 0,
+    staleTime: 15000,
+    queryFn: async () => {
+      const organizationId = profile?.organization_id;
+      if (!organizationId) throw new Error('Organization unavailable');
+      const ids = [...new Set(linkedShops.map(shop => shop.id).filter((id): id is string => !!id))];
+      const items: ExecutionWorkItem[] = [];
+      for (let i = 0; i < ids.length; i += 80) {
+        const slice = ids.slice(i, i + 80);
+        items.push(...await fetchAllPages<ExecutionWorkItem>((from, to) => supabase.from('work_items')
+          .select('id,shop_id,po_line_item_id,work_type_id,work_type_name,status,excluded_from_calculations,survey_area,survey_quantity,approved_area,approved_quantity,produced_quantity,installed_area,installed_quantity')
+          .eq('organization_id',organizationId).in('shop_id', slice)
+          .order('id').range(from,to)));
+      }
+      return reconcileOrderExecution(utilization, linkedShops.filter(shop => !!shop.id).map(shop => ({id: shop.id!, status: shop.status, purchase_order_id: shop.purchase_order_id})), items, po.fulfillment_type, po.po_line_items || [], po.delivery_receipt_required === true);
+    },
+  });
+  const measuredRows = execution?.rows || utilization;
   const pipeline = useMemo(() => milestoneProgress(linkedShops, po.fulfillment_type, po.po_line_items || []), [linkedShops, po.fulfillment_type, po.po_line_items]);
-  const { anyVariance, stage } = getPoMetrics(po, utilization);
+  const { anyVariance, stage } = getPoMetrics(po, measuredRows);
   // The PO header is DB-triggered from line items; keep financial progress
   // available even when the optional utilization view has not refreshed.
-  const lineProgress = calculatePoProgress(utilization, stage, po.po_line_items?.length || 0, reconciledInvoiced);
+  const lineProgress = calculatePoProgress(measuredRows, stage, po.po_line_items?.length || 0, reconciledInvoiced);
   const plannedValue = readiness ? readiness.plannedAmount : (lineProgress.budgetedAmount ?? (po.total_amount != null && po.total_amount > 0 ? Number(po.total_amount) : null));
   const billedValue = reconciledInvoiced ?? lineProgress.invoicedAmount;
   const progress: PoProgressSummary = {
@@ -1266,7 +1293,7 @@ function WorkOrderDetailDrawer({
   const primary = getPrimaryStatus(po);
   const siteProgress = sites && sites.total > 0 ? sites : null;
   const isPending = po.origin === 'client_created' && po.assignment_status === 'pending_acceptance';
-  const nextOperational = siteProgress ? describeOrderNextStep(siteProgress.stages, isPending) : null;
+  const nextOperational = siteProgress ? describeOrderNextStep(siteProgress.stages, isPending, po.fulfillment_type, po.delivery_receipt_required === true) : null;
   const closeButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1306,8 +1333,17 @@ function WorkOrderDetailDrawer({
         </header>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3 sm:p-5 lg:p-6">
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 sm:p-4">
-          <div><p className="text-sm font-semibold text-slate-900">Work Order overview</p><p className="mt-0.5 text-xs text-slate-500">{financialVisible ? 'Owner-private billing readiness and invoicing progress' : siteProgress?.total ? `${siteProgress.completed}/${siteProgress.total} sites delivered · operational view` : 'Site scope not linked · operational view'}</p></div>
-
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-slate-950">{financialVisible ? 'Financial review' : 'Work Order delivery overview'}</p>
+            <p className="mt-1 text-xs text-slate-500">{financialVisible ? 'Owner-private billing readiness, invoiced work and reconciliation' : siteProgress?.total
+              ? `${siteProgress.completed.toLocaleString('en-IN')} of ${siteProgress.total.toLocaleString('en-IN')} sites at their final required stage`
+              : 'No linked active site scope. Check associations to track progress.'}</p>
+          </div>
+          {financialVisible ? <span className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-700">Private · Owner only</span>
+            : isPending ? <span className="rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">Owner acceptance pending</span>
+            : siteProgress?.pending ? <Link to={orderNextActionPath(po, nextOperational, !!siteProgress?.total)} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-blue-600">Next stage <ArrowRight size={14}/></Link>
+            : siteProgress?.total ? <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800"><CheckCircle2 size={15}/> Final stage complete</span>
+            : <Link to={`/shops?po=${encodeURIComponent(po.id)}`} className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-blue-200 px-3 text-xs font-semibold text-blue-700">Check linked sites <ArrowRight size={14}/></Link>}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <StatusBadge status={primary.status} label={primary.label} />
@@ -1414,25 +1450,27 @@ function WorkOrderDetailDrawer({
           })()}
         </section> : <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">No linked active site records yet. <Link to={`/shops?po=${encodeURIComponent(po.id)}`} className="font-semibold underline">Review site associations →</Link></div>}
         {!financialVisible ? <>
-          <section aria-label="Operational Work Order KPIs" className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <Link to={`/shops?po=${encodeURIComponent(po.id)}`} className="rounded-xl border border-slate-200 bg-white p-3 hover:border-blue-300"><p className="text-xs text-slate-500">Sites in scope</p><strong className="mt-1 block text-xl tabular-nums">{siteProgress?.total ?? '—'}</strong><p className="mt-1 text-[11px] text-blue-700">View all linked sites →</p></Link>
-            <Link to={`/shops?po=${encodeURIComponent(po.id)}&stage=complete`} className="rounded-xl border border-slate-200 bg-white p-3 hover:border-blue-300"><p className="text-xs text-slate-500">Delivered</p><strong className="mt-1 block text-xl tabular-nums text-emerald-700">{siteProgress?.completed ?? '—'}</strong><p className="mt-1 text-[11px] text-blue-700">View completed sites →</p></Link>
-            <Link to={`/shops?po=${encodeURIComponent(po.id)}${nextOperational && nextOperational.kind!=='done' ? `&stage=${nextOperational.stage}` : ''}`} className="col-span-2 rounded-xl border border-slate-200 bg-white p-3 hover:border-blue-300 sm:col-span-1"><p className="text-xs text-slate-500">Next operational step</p><strong className="mt-1 block text-sm text-slate-900">{nextOperational?.label || 'Check site links'}</strong><p className="mt-1 text-[11px] text-blue-700">Open related sites →</p></Link>
+          <section aria-label="Next work order action" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Next action</p>
+              <p className="mt-0.5 text-sm font-semibold text-slate-900">{nextOperational?.label || 'Check site scope and assignments'}</p>
+              <p className="mt-0.5 text-xs text-slate-500">{siteProgress?.pending ? `${siteProgress.pending.toLocaleString('en-IN')} sites have not reached the required final stage.` : siteProgress?.total ? 'All linked sites reached their required final stage.' : 'No active sites linked to this Work Order.'}</p>
+            </div>
+            <Link to={orderNextActionPath(po, nextOperational, !!siteProgress?.total)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-blue-600">{siteProgress?.pending ? 'Open next action' : 'Open Work Order'} <ArrowRight size={14}/></Link>
           </section>
-          {siteProgress && (progress.workPct == null || Math.abs(siteProgress.percentage - progress.workPct) >= 1) && <details className="rounded-lg border border-slate-200 bg-white p-3 text-xs text-slate-700"><summary className="cursor-pointer font-semibold">Site count vs measured work · explanation</summary><p className="mt-2">Site delivery is {siteProgress.percentage}%, while measured quantity progress is {progress.workPct == null ? 'not available' : `${Math.round(progress.workPct)}%`}. Shop status does not invent measured quantity; verify work-item measurements before billing.</p></details>}
         </> : <>
           <section aria-label="Private financial Work Order KPIs" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             {[
               {label:'Budget (ex-GST)',value:formatRupees(progress.budgetedAmount),hint:'Contract value'},
               {label:'Already invoiced',value:billingError ? 'Unavailable' : billingPending ? 'Checking…' : formatRupees(progress.invoicedAmount),hint:'Deduplicated invoice history'},
               {label:'Verified ready to invoice',value:readinessPending ? 'Checking…' : readinessError ? 'Unavailable' : formatRupees(readiness?.readyAmount),hint:readiness ? `${readiness.readyShops} sites · ${readiness.readyItems} items` : 'Eligible measured work'},
-              {label:'Reconciliation needed',value:readinessPending ? 'Checking…' : readinessError ? 'Unavailable' : String(readiness?.needsReviewShops ?? '—'),hint:'Sites needing data checks'},
+              {label:'Reconciliation needed',value:readinessPending ? 'Checking…' : readinessError ? 'Unavailable' : readiness ? (readiness.needsReviewShops > 0 ? String(readiness.needsReviewShops) : 'Clear') : '—',hint:'Sites needing data checks'},
             ].map(card=><div key={card.label} className="rounded-xl border border-slate-200 bg-white p-3"><p className="text-xs text-slate-500">{card.label}</p><strong className="mt-2 block break-words text-lg tabular-nums text-slate-900">{card.value}</strong><p className="mt-1 text-[11px] text-slate-500">{card.hint}</p></div>)}
           </section>
           {readiness && <section className="rounded-xl border border-slate-200 bg-white p-4" aria-label="Invoice-ready work by PO line">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-semibold text-slate-900">Invoice-ready work by PO line</h3><p className="mt-1 text-xs text-slate-500">Actual eligible, unbilled quantities · independently calculated per work item</p></div>{readiness.readyAmount>0 && <Link to={`/billing?po=${encodeURIComponent(po.id)}&create=1`} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700">Prepare eligible invoice →</Link>}</div>
-            <div className="overflow-x-auto"><table className="w-full min-w-[540px] text-xs"><thead className="bg-slate-50 text-slate-500"><tr><th className="px-3 py-2 text-left font-semibold">Work / PO line</th><th className="px-3 py-2 text-right font-semibold">Ready quantity</th><th className="px-3 py-2 text-right font-semibold">Sites / items</th><th className="px-3 py-2 text-right font-semibold">Ready value</th></tr></thead><tbody className="divide-y divide-slate-100">{readiness.readyLines.map(line=><tr key={line.poLineId}><td className="px-3 py-3 text-slate-900">{line.description}</td><td className="px-3 py-3 text-right tabular-nums">{line.quantity>0 ? `${line.quantity.toLocaleString('en-IN')} ${line.uom}` : 'Not yet eligible'}</td><td className="px-3 py-3 text-right text-slate-600 tabular-nums">{line.sites} / {line.workItems}</td><td className="px-3 py-3 text-right font-semibold tabular-nums text-blue-700">{formatRupees(line.amount)}</td></tr>)}</tbody></table></div>
-            {!readiness.readyLines.length && <p className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">No configured PO lines available for billing. Set up scope and rates first.</p>}
+            <div className="overflow-x-auto"><table className="w-full min-w-[540px] text-xs"><thead className="bg-slate-50 text-slate-500"><tr><th className="px-3 py-2 text-left font-semibold">Work / PO line</th><th className="px-3 py-2 text-right font-semibold">Ready quantity</th><th className="px-3 py-2 text-right font-semibold">Sites / items</th><th className="px-3 py-2 text-right font-semibold">Ready value</th></tr></thead><tbody className="divide-y divide-slate-100">{readiness.readyLines.filter(line => line.amount > 0).map(line=><tr key={line.poLineId}><td className="px-3 py-3 text-slate-900">{line.description}</td><td className="px-3 py-3 text-right tabular-nums">{line.quantity>0 ? `${line.quantity.toLocaleString('en-IN')} ${line.uom}` : 'Not yet eligible'}</td><td className="px-3 py-3 text-right text-slate-600 tabular-nums">{line.sites} / {line.workItems}</td><td className="px-3 py-3 text-right font-semibold tabular-nums text-blue-700">{formatRupees(line.amount)}</td></tr>)}</tbody></table></div>
+            {!readiness.readyLines.some(line => line.amount > 0) && <p className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">No unbilled measured quantity is currently eligible. If delivery is complete, review measurement and prior-invoice reconciliation below.</p>}
             <p className="mt-3 text-[11px] text-slate-500">A line can have no ready value even when delivery is complete: missing measurements, blocked historical links or fully invoiced work must be reconciled before billing.</p>
           </section>}
           {readinessError && <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs">Billing readiness unavailable. <button type="button" onClick={() => void retryReadiness()} className="font-semibold underline">Retry</button></div>}
@@ -1451,8 +1489,24 @@ function WorkOrderDetailDrawer({
           mode="financial"
         />}
 
-        {!financialVisible && <PoStageProgressChart rows={utilization} stage={stage} fulfillmentType={po.fulfillment_type} pipeline={pipeline} />}
-        <PoUtilizationTable rows={utilization} stage={stage} showFinancial={financialVisible} />
+        {!financialVisible && <PoStageProgressChart
+          rows={measuredRows} stage={stage} fulfillmentType={po.fulfillment_type}
+          requirements={po.po_line_items} pipeline={pipeline} poId={po.id} execution={execution}
+          loading={executionLoading && !!linkedShops.length} error={executionError}
+          onRetry={() => void retryExecution()}
+          nextStage={nextOperational?.stage}
+          onReviewLineItems={() => { setUtilizationExpanded(true); document.getElementById('po-line-items')?.scrollIntoView({behavior:'smooth',block:'start'}); }}
+        />}
+        {(!financialVisible && !!linkedShops.length && (executionLoading || executionError))
+          ? <div className="rounded-lg border border-slate-200 bg-white px-3 py-3 text-xs text-slate-600" role={executionError ? 'alert' : 'status'}>
+              {executionError ? 'Recorded quantities are unavailable. Use Retry above to check work-item evidence.' : 'Checking recorded quantities from linked work items…'}
+            </div>
+          : <PoUtilizationTable rows={measuredRows} stage={stage} showFinancial={financialVisible}
+              requirements={po.po_line_items} fulfillmentType={po.fulfillment_type}
+              open={utilizationExpanded} onToggle={() => setUtilizationExpanded(value => !value)}
+              showUnrecorded={!!siteProgress?.completed && !financialVisible}
+            />}
+
 
         {(po.payment_terms || po.notes) && (
           <div className="space-y-3 border-t border-slate-100 pt-4">
@@ -1492,19 +1546,26 @@ function WorkOrderDetailDrawer({
 // summary cards + stage progress chart above already answer "how's this
 // PO doing", so the full line-by-line breakdown only needs to take up
 // space when someone actually asks for it.
-function PoUtilizationTable({ rows, stage, showFinancial = false }: { rows: POLineItemUtilization[]; stage: UtilizationStage; showFinancial?: boolean }) {
-  const [open, setOpen] = useState(false);
+function PoUtilizationTable({ rows, stage, showFinancial = false, open, onToggle, showUnrecorded = false, requirements, fulfillmentType }: {
+  rows: POLineItemUtilization[]; stage: UtilizationStage; showFinancial?: boolean;
+  open?: boolean; onToggle?: () => void; showUnrecorded?: boolean;
+  requirements?: PoRow['po_line_items']; fulfillmentType?: string | null;
+}) {
+  const [localOpen, setLocalOpen] = useState(false);
+  const expanded = open ?? localOpen;
   if (rows.length === 0) return null;
   return (
-    <div>
+    <div id="po-line-items">
       <button
-        onClick={() => setOpen((v) => !v)}
+        type="button"
+        aria-expanded={expanded}
+        onClick={onToggle || (() => setLocalOpen(value => !value))}
         className="w-full flex items-center justify-between text-sm font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg px-3.5 py-2.5 transition"
       >
-        <span>Utilization — budget vs actual ({rows.length} line item{rows.length === 1 ? '' : 's'})</span>
-        <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+        <span>Recorded work-item quantities ({rows.length} PO line{rows.length === 1 ? '' : 's'})</span>
+        <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />
       </button>
-      {open && (
+      {expanded && (
         <div className="border border-slate-200 border-t-0 rounded-b-lg overflow-x-auto -mt-px">
           <table className="w-full text-sm min-w-[820px]">
             <thead className="bg-slate-50 text-slate-500 text-xs uppercase">
@@ -1523,17 +1584,19 @@ function PoUtilizationTable({ rows, stage, showFinancial = false }: { rows: POLi
             </thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((row) => {
-                const fig = computeUtilization(row, stage);
-                const comparable = !(stage === 'produced' && isAreaUom(row.uom));
+                const rowStage = finalLineMeasurementStage(fulfillmentType, requirements?.find(item => item.id === row.po_line_item_id));
+                const actualStage = fulfillmentType ? rowStage : stage;
+                const fig = computeUtilization(row, actualStage);
+                const comparable = !(actualStage === 'produced' && isAreaUom(row.uom));
                 const rowPct = comparable ? fig.utilizationPct : null;
                 return (
                   <tr key={row.po_line_item_id} className="hover:bg-slate-50">
                     <td className="px-3 py-2 text-slate-900">{row.description}</td>
                     <td className="px-3 py-2 text-right text-slate-600">{formatQty(fig.budgetedPrimary, row.uom)}</td>
-                    <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.surveyed_area : row.surveyed_qty, row.uom)}</td>
-                    <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.approved_area : row.approved_qty, row.uom)}</td>
-                    <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.produced_qty, row.uom === 'sqft' ? 'piece' : row.uom)}</td>
-                    <td className="px-3 py-2 text-right text-slate-600">{formatQty(row.uom === 'sqft' ? row.installed_area : row.installed_qty, row.uom)}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">{showUnrecorded && !(row.uom === 'sqft' ? row.surveyed_area : row.surveyed_qty) ? '—' : formatQty(row.uom === 'sqft' ? row.surveyed_area : row.surveyed_qty, row.uom)}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">{showUnrecorded && !(row.uom === 'sqft' ? row.approved_area : row.approved_qty) ? '—' : formatQty(row.uom === 'sqft' ? row.approved_area : row.approved_qty, row.uom)}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">{showUnrecorded && !row.produced_qty ? '—' : formatQty(row.produced_qty, row.uom === 'sqft' ? 'piece' : row.uom)}</td>
+                    <td className="px-3 py-2 text-right text-slate-600">{showUnrecorded && !(row.uom === 'sqft' ? row.installed_area : row.installed_qty) ? '—' : formatQty(row.uom === 'sqft' ? row.installed_area : row.installed_qty, row.uom)}</td>
                     {showFinancial && <td className="px-3 py-2 text-right text-slate-600">{formatRupees(fig.invoicedAmount)}</td>}
                     {showFinancial && <td className={`px-3 py-2 text-right font-medium ${fig.remainingBalance != null && fig.remainingBalance < 0 ? 'text-red-600' : 'text-slate-900'}`}>
                       {formatRupees(fig.remainingBalance)}
@@ -1542,7 +1605,7 @@ function PoUtilizationTable({ rows, stage, showFinancial = false }: { rows: POLi
                       <div className="mx-auto w-24 text-center" title={!comparable ? 'Production pieces cannot be compared with a sqft budget' : undefined}>
                         <ProgressBar pct={rowPct} />
                         <span className="text-[11px] text-slate-500">
-                          {rowPct == null ? '—' : `${Math.round(Math.max(0, Math.min(100, rowPct)))}%${rowPct > 100 ? '+' : ''}`}
+                          {showUnrecorded && !fig.actualPrimary ? 'Not recorded' : rowPct == null ? '—' : `${Math.round(Math.max(0, Math.min(100, rowPct)))}%${rowPct > 100 ? '+' : ''}`}
                         </span>
                       </div>
                     </td>
@@ -1560,7 +1623,8 @@ function PoUtilizationTable({ rows, stage, showFinancial = false }: { rows: POLi
           </table>
         </div>
       )}
-      {open && showFinancial && <p className="mt-2 text-[11px] text-slate-500">Per-line invoicing includes only invoice items linked to that line. The financial overview also reconciles PO-level invoice items that were not linked individually.</p>}
+      {expanded && showUnrecorded && <p className="mt-2 px-2 text-[11px] text-slate-500">— means the stage quantity has not been evidenced for a delivered site. It is not a claim that work was not done. The delivery percentage uses site statuses; invoice readiness uses verified work items.</p>}
+      {expanded && showFinancial && <p className="mt-2 text-[11px] text-slate-500">Per-line invoicing includes only invoice items linked to that line. The financial overview also reconciles PO-level invoice items that were not linked individually.</p>}
     </div>
   );
 }
@@ -1619,28 +1683,62 @@ function PoCompletionDonut({ progress, stage, billingPending, billingError, site
   </section>;
 }
 
-function PoStageProgressChart({ rows, stage, fulfillmentType, pipeline }: {
+function PoStageProgressChart({ rows, stage, pipeline, poId, fulfillmentType, requirements, execution, loading, error, nextStage, onRetry, onReviewLineItems }: {
   rows: POLineItemUtilization[]; stage: UtilizationStage; fulfillmentType?: string | null;
-  pipeline?: ReturnType<typeof milestoneProgress>;
+  requirements?: PoRow['po_line_items'];
+  pipeline?: ReturnType<typeof milestoneProgress>; poId: string;
+  execution?: ExecutionReconciliation; loading?: boolean; error?: boolean; nextStage?: OwnerStageFilter;
+  onRetry?: () => void; onReviewLineItems?: () => void;
 }) {
-  if (!pipeline) return null; // Line-item editor shows item utilization instead; no shop-state context here.
-  const labels: Record<string,string> = { survey: 'Survey / approval', design: 'Design validation', production: 'Production', dispatch: 'Dispatch', installation: 'Installation approved' };
-  return <section className="rounded-xl border border-slate-200 bg-white p-4" aria-label="Fulfillment milestone progress">
-    <h3 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-slate-900"><TrendingUp className="h-4 w-4 text-slate-500"/> Applicable fulfillment stages</h3>
-    <p className="mb-4 text-xs text-slate-500">Stages not required by this fulfillment type are excluded. Reaching a later stage counts earlier applicable milestones as passed.</p>
-    {!pipeline.total && <p className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">No linked active sites. Stage percentages cannot be verified from shop status.</p>}
-    {pipeline.milestones.some(step=>step.percentage===100) && <div className="mb-4">
-      <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Passed milestones</p>
-      <div className="flex flex-wrap gap-2">{pipeline.milestones.filter(step=>step.percentage===100).map(step =>
-        <span key={step.stage} className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-800"><CheckCircle2 className="h-3.5 w-3.5"/>{labels[step.stage]} · {step.reached}/{step.total}</span>
-      )}</div>
+  if (!pipeline) return null;
+  const labels: Record<string,string> = { survey:'Survey', design:'Design', production:'Production', dispatch:'Dispatch', installation:'Installation' };
+  const passed = pipeline.milestones.filter(m => m.percentage === 100);
+  const active = pipeline.milestones.filter(m => m.percentage !== 100);
+  const finalLine = rows.length === 1 ? rows[0] : null;
+  const singleLineStage = finalLineMeasurementStage(fulfillmentType, requirements?.find(item => item.id === finalLine?.po_line_item_id));
+  const canShowOneUnit = !!finalLine && !!execution && !(singleLineStage === 'produced' && isAreaUom(finalLine.uom));
+  const measuredFinal = finalLine ? getActualForStage(finalLine, singleLineStage) : 0;
+  const completedLink = `/shops?po=${encodeURIComponent(poId)}`;
+  const nextLink = `${completedLink}${nextStage ? `&stage=${encodeURIComponent(nextStage)}` : ''}`;
+
+  return <section className="rounded-xl border border-slate-200 bg-white p-4" aria-label="Work Order stage and recorded quantity evidence">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div><h3 className="text-sm font-semibold text-slate-900">Execution milestones</h3>
+        <p className="mt-1 text-xs text-slate-500">Stages reached from site status · applicable milestones only</p></div>
+      <Link to={completedLink} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-blue-700 hover:bg-blue-50">All sites <ArrowRight size={13}/></Link>
+    </div>
+    {pipeline.total === 0 ? <p className="mt-3 text-xs text-slate-600">No linked active sites. <Link to={completedLink} className="font-semibold text-blue-700">Check site scope →</Link></p> : <>
+      {!!passed.length && <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        {passed.map(item => <Link key={item.stage} to={completedLink} className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2.5 py-1.5 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100 focus-visible:outline-2" title="This milestone is inferred from downstream status; open all linked sites"><CheckCircle2 size={13}/> {labels[item.stage]} · passed</Link>)}
+      </div>}
+      {!!active.length && <div className="mt-3 space-y-2">{active.map(item => <div key={item.stage} className="rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-semibold text-slate-800">{labels[item.stage]}</span><span className="tabular-nums text-slate-600">{item.reached}/{item.total} sites · {item.percentage ?? 0}% reached</span></div>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-blue-600" style={{width:`${item.percentage || 0}%`}}/></div>
+        <Link to={nextLink} className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-blue-700 hover:underline">View remaining site work <ArrowRight size={13}/></Link>
+      </div>)}</div>}
+    </>}
+
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+      <div className="min-w-0">
+        <p className="text-xs font-semibold text-slate-800">Measured execution evidence</p>
+        {loading ? <p role="status" className="mt-1 text-xs text-slate-500">Checking individual work-item records…</p>
+        : error ? <p role="alert" className="mt-1 text-xs text-amber-800">Could not load work-item measurements; totals are unverified. <button type="button" onClick={onRetry} className="font-semibold underline">Retry</button></p>
+        : execution ? <p className="mt-1 text-xs text-slate-600">
+          {execution.measuredFinalSites}/{execution.finalSites} delivered sites have recorded final-stage quantities
+          {canShowOneUnit ? ` · ${formatQty(measuredFinal, finalLine!.uom)} measured on this PO line` : ''}
+        </p> : <p className="mt-1 text-xs text-slate-500">Shop status alone is not billable quantity.</p>}
+      </div>
+      {!!rows.length && <button type="button" onClick={onReviewLineItems} className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-lg border border-blue-200 bg-white px-3 text-xs font-semibold text-blue-700 hover:bg-blue-50">Recorded quantities <ArrowRight size={13}/></button>}
+    </div>
+    {execution && (execution.missingFinalSites > 0 || execution.unmatchedItems > 0) && <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
+      <span><AlertTriangle size={14} className="mr-1 inline"/>
+        {execution.missingFinalSites > 0 ? `${execution.missingFinalSites} delivered site(s) need item-level measurement reconciliation.` : ''}
+        {execution.unmatchedItems > 0 ? ` ${execution.unmatchedItems} work item(s) have ambiguous PO-line links.` : ''}
+      </span>
+      <Link to={`${completedLink}&stage=complete`} className="shrink-0 font-semibold text-amber-900 underline">Review delivered sites →</Link>
     </div>}
-    {pipeline.milestones.some(step=>step.percentage!==100) ? <div className="space-y-3">{pipeline.milestones.filter(step=>step.percentage!==100).map(step => <div key={step.stage}>
-      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium text-slate-700">{labels[step.stage]}</span><span className="tabular-nums text-slate-500">{step.percentage == null ? 'No site evidence' : `${step.percentage}% · ${step.reached}/${step.total} sites`}</span></div>
-      <div className="h-2 overflow-hidden rounded-full bg-slate-100" role="progressbar" aria-label={labels[step.stage]} aria-valuemin={0} aria-valuemax={100} aria-valuenow={step.percentage ?? 0}><div className="h-full rounded-full bg-blue-600" style={{width:`${step.percentage ?? 0}%`}}/></div>
-    </div>)}</div> : pipeline.total>0 && <p className="text-xs text-emerald-800">All applicable milestones passed for the linked active sites.</p>}
-    <p className="mt-4 text-[11px] text-slate-500">Passed milestones are derived from downstream shop status, not backdated approvals. Billing still requires verified actual work measurements and reconciliation.</p>
-    {rows.length > 0 && <details className="mt-3 rounded-lg bg-slate-50 p-3 text-xs"><summary className="cursor-pointer font-semibold text-slate-700">Recorded quantities by stage (independent)</summary><div className="mt-3 space-y-2">{(['surveyed','approved','produced',stage] as UtilizationStage[]).filter((st,i,all) => all.indexOf(st) === i).map(st => { const p = calculatePoProgress(rows,st); return <p key={st} className="flex justify-between"><span className="capitalize">{st}</span><span>{p.workPct == null ? 'Not comparable / missing' : `${Math.round(p.workPct)}% measured`}</span></p>; })}</div></details>}
+    {execution && execution.legacyItemsRecovered > 0 && <p className="mt-2 text-[11px] text-slate-600">{execution.legacyItemsRecovered} legacy work item(s) were matched to an unambiguous PO line for this read-only view. Existing records were not changed.</p>}
+    <p className="mt-2 text-[11px] text-slate-500">A downstream site status marks earlier operational stages reached, but does not invent survey/production quantities or bypass billing verification.</p>
   </section>;
 }
 
@@ -1796,7 +1894,7 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
           <p className="text-sm font-semibold text-blue-900">{formatRupees(computedTotal)}</p>
         </div>
 
-        <PoStageProgressChart rows={utilization} stage={defaultUtilizationStage(po.fulfillment_type)} fulfillmentType={po.fulfillment_type} />
+        <PoStageProgressChart rows={utilization} stage={defaultUtilizationStage(po.fulfillment_type)} fulfillmentType={po.fulfillment_type} poId={po.id} />
 
         <PoUtilizationTable rows={utilization} stage={defaultUtilizationStage(po.fulfillment_type)} />
 

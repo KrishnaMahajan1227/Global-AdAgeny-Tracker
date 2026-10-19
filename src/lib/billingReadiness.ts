@@ -32,10 +32,10 @@ const chunks = <T,>(values: T[], size: number) => Array.from({ length: Math.ceil
 
 export function summarizeBillingReadiness(
   shops: Shop[], workItems: CompletedWorkRow[], rates: RateRow[], billed: BilledRow[],
-  type: string | null | undefined,
+  type: string | null | undefined, receiptRequired = false,
 ): BillingReadiness {
-  const eligible = shops.filter(shop => isFinalizedShop(type, shop.status, rates));
-  const result = buildPendingAllocations(workItems, rates, billed, eligible.map(shop => shop.id), type, rates);
+  const eligible = shops.filter(shop => isFinalizedShop(type, shop.status, rates, receiptRequired));
+  const result = buildPendingAllocations(workItems, rates, billed, eligible.map(shop => shop.id), type, rates, receiptRequired);
   const readyShopIds = new Set(result.allocations.map(allocation => allocation.shopId));
   const lineTotals = new Map<string,{quantity:number;amount:number;workItems:Set<string>;sites:Set<string>}>();
   for (const allocation of result.allocations) {
@@ -55,7 +55,7 @@ export function summarizeBillingReadiness(
   // A previously invoiced *item ID* does not prove that the *full* actual
   // quantity was invoiced. Rebuild the completed ceiling without invoice
   // history, then compare all old invoices in the correct basis per item.
-  const complete = buildPendingAllocations(workItems, rates, [], eligible.map(shop => shop.id), type, rates);
+  const complete = buildPendingAllocations(workItems, rates, [], eligible.map(shop => shop.id), type, rates, receiptRequired);
   const completedByItem = new Map(complete.allocations.map(row => [row.workItemId,row]));
   const readyWorkIds = new Set(result.allocations.map(row => row.workItemId));
   const isFullyBilled = (item: CompletedWorkRow) => {
@@ -108,13 +108,15 @@ export function useOrderBillingReadiness(orgId: string | undefined, orderId: str
     staleTime: 15000,
     queryFn: async () => {
       if (!orgId || !orderId || !clientId) throw new Error('Missing Work Order context');
-      const [rates, linkedShops] = await Promise.all([
+      const [rates, linkedShops, orderPolicy] = await Promise.all([
         fetchAllPages<any>((a,b) => supabase.from('po_line_items')
           .select('id,description,uom,rate,hsn_code,work_type_id,budgeted_qty,budgeted_area,requires_survey,requires_design,requires_production,requires_installation')
           .eq('organization_id',orgId).eq('purchase_order_id',orderId).order('id').range(a,b)),
         fetchAllPages<Shop>((a,b) => supabase.from('shops').select('id,status,client_id,purchase_order_id')
           .eq('organization_id',orgId).eq('purchase_order_id',orderId).order('id').range(a,b)),
+        supabase.from('purchase_orders').select('delivery_receipt_required').eq('organization_id',orgId).eq('id',orderId).single(),
       ]);
+      if (orderPolicy.error) throw orderPolicy.error;
       const rateRows: RateRow[] = rates.map(row => ({...row, po_line_item_id: row.id}));
       const found = new Map(linkedShops.map(row => [row.id,row]));
       // Mirror Billing's legacy recovery: PO-line-linked work on unassigned
@@ -131,7 +133,8 @@ export function useOrderBillingReadiness(orgId: string | undefined, orderId: str
         }
       }
       const shops = Array.from(found.values());
-      const completedShops = shops.filter(shop => isFinalizedShop(type, shop.status, rates));
+      const receiptRequired = orderPolicy.data?.delivery_receipt_required === true;
+      const completedShops = shops.filter(shop => isFinalizedShop(type, shop.status, rateRows, receiptRequired));
       const workItems: CompletedWorkRow[] = [];
       for (const ids of chunks(completedShops.map(shop => shop.id), 100)) {
         const rows = await fetchAllPages<CompletedWorkRow>((a,b) => supabase.from('work_items')
@@ -143,8 +146,9 @@ export function useOrderBillingReadiness(orgId: string | undefined, orderId: str
         workItems.push(...rows.filter(row => parent.get(row.shop_id) === orderId || (!!row.po_line_item_id && lineIds.has(row.po_line_item_id)))
           .map(row => ({...row,shop_status: statuses.get(row.shop_id)})));
       }
-      const billed = await fetchOrderInvoiceHistory(orgId,orderId,rateRows.map(row => row.po_line_item_id));
-      return summarizeBillingReadiness(shops, workItems, rateRows, billed, type);
+      const billed = await fetchOrderInvoiceHistory(orgId,orderId,
+        rateRows.map(row => row.po_line_item_id), workItems.map(row => row.id), completedShops.map(shop => shop.id));
+      return summarizeBillingReadiness(shops, workItems, rateRows, billed, type, receiptRequired);
     },
   });
 }

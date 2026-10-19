@@ -18,7 +18,7 @@ type PhotoRow = { id: string; photo_url: string; caption: string | null; photo_t
 // scoped inside each PO's own detail page instead, on request — a client
 // wants "where are the sites on THIS campaign", not a mixed-agency map by
 // default. No agency filter here since a PO only ever has one agency.
-export function ClientPoSiteMap({ shops }: { shops: MapShop[] }) {
+export function ClientPoSiteMap({ shops, fulfillmentType, receiptRequired = false }: { shops: MapShop[]; fulfillmentType?: string | null; receiptRequired?: boolean }) {
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
   const mapContainerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- window.google has no real typings in this project (see google-maps.d.ts)
@@ -58,7 +58,7 @@ export function ClientPoSiteMap({ shops }: { shops: MapShop[] }) {
 
     const bounds = new window.google.maps.LatLngBounds();
     const newMarkers = geoShops.map((s) => {
-      const bucket = mapPinBucket(s.status);
+      const bucket = mapPinBucket(s.status, fulfillmentType, receiptRequired);
       const position = { lat: s.latitude as number, lng: s.longitude as number };
       bounds.extend(position);
       const marker = new window.google.maps.Marker({
@@ -80,7 +80,7 @@ export function ClientPoSiteMap({ shops }: { shops: MapShop[] }) {
     markersRef.current = newMarkers;
     clustererRef.current = new MarkerClusterer({ map, markers: newMarkers });
     if (!bounds.isEmpty()) map.fitBounds(bounds, 60);
-  }, [mapLoaded, geoShops]);
+  }, [mapLoaded, geoShops, fulfillmentType, receiptRequired]);
 
   const legendItems: MapPinBucket[] = ['pending', 'in_progress', 'completed', 'issue'];
 
@@ -142,7 +142,7 @@ export function ClientPoSiteMap({ shops }: { shops: MapShop[] }) {
                   <MapPin className="w-3 h-3 mt-0.5 shrink-0" /> {[selectedShop.address, selectedShop.city, selectedShop.state].filter(Boolean).join(', ')}
                 </p>
               )}
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium mb-3" style={{ backgroundColor: `${MAP_PIN_COLORS[mapPinBucket(selectedShop.status)]}1a`, color: MAP_PIN_COLORS[mapPinBucket(selectedShop.status)] }}>
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium mb-3" style={{ backgroundColor: `${MAP_PIN_COLORS[mapPinBucket(selectedShop.status, fulfillmentType, receiptRequired)]}1a`, color: MAP_PIN_COLORS[mapPinBucket(selectedShop.status, fulfillmentType, receiptRequired)] }}>
                 {STATUS_LABELS[selectedShop.status] || selectedShop.status}
               </span>
               <div>

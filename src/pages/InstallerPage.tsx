@@ -1824,6 +1824,8 @@ interface DirectInstallPhoto {
   url: string;
   storagePath: string;
   angle: 'front' | 'side' | 'other';
+  localId?: string;
+  queued?: boolean;
 }
 
 function DirectInstallWizard({ onExit }: { onExit: () => void }) {
@@ -1853,6 +1855,8 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
   const [locateError, setLocateError] = useState<string | null>(null);
 
   const [creating, setCreating] = useState(false);
+  const createInFlight = useRef(false); // Protect against double taps while network writes are pending.
+  const createRequestId = useRef<string | null>(null); // Kept across retries after a network timeout.
   const [createError, setCreateError] = useState<string | null>(null);
   const [shopId, setShopId] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -1861,6 +1865,33 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
   const [cameraOpen, setCameraOpen] = useState(false);
   const [nextAngle, setNextAngle] = useState<'front' | 'side' | 'other'>('front');
   const [photos, setPhotos] = useState<DirectInstallPhoto[]>([]);
+  // Durable photos are retried by the shared offline installer queue.
+  useEffect(() => {
+    if (!profile?.id || !shopId || !jobId) return;
+    let active = true;
+    const restoreAndSync = async () => {
+      const pending = (await pendingInstallationPhotos(profile.id, shopId)).filter(p => p.jobId === jobId);
+      if (!active) return;
+      setPhotos(previous => {
+        const next = [...previous];
+        for (const item of pending) if (!next.some(p => p.storagePath === item.path)) {
+          next.push({ url:item.dataUrl,storagePath:item.path,angle:item.angle,localId:item.id,queued:true });
+        }
+        return next;
+      });
+      if (!navigator.onLine) return;
+      for (const item of pending) {
+        const result = await syncInstallationPhoto(item);
+        if (result && active) setPhotos(previous => previous.map(p => p.storagePath === item.path
+          ? {url:result.url,storagePath:result.storagePath,angle:result.angle} : p));
+      }
+    };
+    void restoreAndSync().catch(error => console.warn('Direct proof sync deferred',error));
+    const reconnect = () => void restoreAndSync().catch(error => console.warn('Direct proof retry deferred',error));
+    window.addEventListener('online', reconnect);
+    return () => { active=false; window.removeEventListener('online',reconnect); };
+  }, [profile?.id, shopId, jobId]);
+
   const [finishing, setFinishing] = useState(false);
   const [completed, setCompleted] = useState(false);
 
@@ -1957,90 +1988,48 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
   const canContinueStep2 = siteName.trim().length > 0 && (isAreaUom ? widthNum > 0 && heightNum > 0 : qtyNum > 0);
 
   async function createSiteAndJob() {
-    if (!profile || !selectedPo || !selectedLineItem) return;
+    if (!profile || !selectedPo || !selectedLineItem || createInFlight.current || shopId || jobId) return;
+    createInFlight.current = true;
     setCreating(true);
     setCreateError(null);
     try {
-      const { data: shop, error: shopError } = await supabase.from('shops').insert({
-        organization_id: profile.organization_id,
-        client_id: selectedPo.client_id,
-        project_id: selectedPo.project_id,
-        purchase_order_id: selectedPo.id,
-        name: siteName.trim(),
-        address: address.trim() || null,
-        city: city.trim() || null,
-        state: state.trim() || null,
-        latitude: gps?.lat ?? null,
-        longitude: gps?.lng ?? null,
-        // Goes straight to the same review queue every other completed
-        // installation lands on (migration 0014) — Owner/Admin approves
-        // it from the existing Installation Review page, no new screen.
-        status: 'installation_review',
-        extra_details: landmark.trim() ? { landmark: landmark.trim() } : {},
-      }).select().single();
-      if (shopError) throw new Error(`Could not save the site: ${shopError.message}`);
-
-      const { data: workItem, error: workItemError } = await supabase.from('work_items').insert({
-        organization_id: profile.organization_id,
-        shop_id: shop.id,
-        work_type_id: selectedLineItem.work_type_id,
-        work_type_name: workTypeName,
-        po_line_item_id: selectedLineItem.id,
-        // Store canonical feet for owner-side tally, but retain the exact entered units for display.
-        installed_width: isAreaUom ? toFeet(widthNum, unit) : null,
-        installed_height: isAreaUom ? toFeet(heightNum, heightUnit) : null,
-        installed_unit: isAreaUom ? 'ft' : null,
-        entered_width: isAreaUom ? widthNum : null,
-        entered_height: isAreaUom ? heightNum : null,
-        entered_width_unit: isAreaUom ? unit : null,
-        entered_height_unit: isAreaUom ? heightUnit : null,
-        installed_quantity: qtyNum,
-        installed_area: isAreaUom ? computedArea : null,
-        installed_notes: notes.trim() || null,
-        installed_at: new Date().toISOString(),
-        status: 'installed',
-      }).select().single();
-      if (workItemError) throw new Error(`Could not save the painted size: ${workItemError.message}`);
-
-      const { data: job, error: jobError } = await supabase.from('installation_jobs').insert({
-        organization_id: profile.organization_id,
-        shop_id: shop.id,
-        installer_id: profile.id,
-        status: 'completed',
-        review_status: 'pending',
-        // No vehicle/load-check applies here — there's no pre-approved
-        // board to check against, the on-site photo IS the proof.
-        material_check_confirmed: true,
-        gps_lat: gps?.lat ?? null,
-        gps_lng: gps?.lng ?? null,
-        gps_accuracy: gps?.accuracy ?? null,
-        gps_captured_at: gps ? new Date().toISOString() : null,
-        started_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-        notes: notes.trim() || null,
-      }).select().single();
-      if (jobError) throw new Error(`Could not save the installation record: ${jobError.message}`);
-
-      // Best-effort — lets this show up in the installer's own "Done"
-      // count on Home/My Work the same way an assigned job would. Never
-      // blocks the flow if it fails.
-      await supabase.from('shop_assignments').insert({
-        organization_id: profile.organization_id,
-        shop_id: shop.id,
-        user_id: profile.id,
-        role: 'installer',
-        status: 'completed',
-        completed_at: new Date().toISOString(),
+      // One database transaction replaces separate Shop, Work Item and Job
+      // inserts. Retry with the same ID to recover the original record after
+      // an uncertain network response; never invent billing measurements.
+      if (!createRequestId.current) createRequestId.current = crypto.randomUUID();
+      const { data: result, error } = await supabase.rpc('phase4_create_direct_install_site', {
+        p_request_id: createRequestId.current,
+        p_po_id: selectedPo.id,
+        p_po_line_id: selectedLineItem.id,
+        p_site_name: siteName.trim(),
+        p_address: address.trim() || null,
+        p_city: city.trim() || null,
+        p_state: state.trim() || null,
+        p_landmark: landmark.trim() || null,
+        p_lat: gps?.lat ?? null,
+        p_lng: gps?.lng ?? null,
+        p_accuracy: gps?.accuracy ?? null,
+        p_width_ft: isAreaUom ? toFeet(widthNum, unit) : null,
+        p_height_ft: isAreaUom ? toFeet(heightNum, heightUnit) : null,
+        p_entered_width: isAreaUom ? widthNum : null,
+        p_entered_height: isAreaUom ? heightNum : null,
+        p_entered_width_unit: isAreaUom ? unit : null,
+        p_entered_height_unit: isAreaUom ? heightUnit : null,
+        p_quantity: qtyNum,
+        p_notes: notes.trim() || null,
       });
-
-      setShopId(shop.id);
-      setShopName(shop.name);
-      setJobId(job.id);
+      if (error) throw new Error(`Site could not be saved: ${error.message}`);
+      if (!result?.shop_id || !result?.job_id) throw new Error('Site response was incomplete. Retry safely.');
+      setShopId(String(result.shop_id));
+      setJobId(String(result.job_id));
+      setShopName(String(result.shop_name || siteName.trim()));
+      createRequestId.current = null;
       setStep(3);
     } catch (err: any) {
-      console.error('[DirectInstallWizard] createSiteAndJob failed:', err);
-      setCreateError(err?.message || 'Something went wrong saving this site. Please try again.');
+      console.error('[DirectInstallWizard] atomic site creation failed:', err);
+      setCreateError(err?.message || 'Could not save site. Check connection and retry; duplicate sites will not be created.');
     } finally {
+      createInFlight.current = false;
       setCreating(false);
     }
   }
@@ -2068,31 +2057,24 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
         console.error('[DirectInstallWizard] geo-tag stamp failed (non-fatal, uploading unstamped):', stampErr);
       }
 
-      const res = await fetch(uploadDataUrl);
-      const blob = await res.blob();
-      const file = new File([blob], fileName, { type: blob.type });
-      const path = `${profile.organization_id}/${jobId}/direct-${angle}-${Date.now()}-${fileName}`;
-      const { error: uploadError } = await supabase.storage.from('installation-proof').upload(path, file);
-      if (uploadError) { fieldNotice('Photo upload failed: ' + uploadError.message); return; }
-      const { data: urlData } = supabase.storage.from('installation-proof').getPublicUrl(path);
-
-      const { error: insertError } = await supabase.from('installation_proofs').insert({
-        organization_id: profile.organization_id,
-        installation_job_id: jobId,
-        shop_id: shopId,
-        storage_path: path,
-        photo_url: urlData.publicUrl,
-        photo_type: 'installed',
-        angle,
-        gps_lat: photoGps?.lat ?? null,
-        gps_lng: photoGps?.lng ?? null,
-        gps_accuracy: photoGps?.accuracy ?? null,
-      });
-      if (insertError) { fieldNotice('Could not save the photo record: ' + insertError.message); return; }
-
-      setPhotos((prev) => [...prev, { url: urlData.publicUrl, storagePath: path, angle }]);
-      // Cycle front -> side -> other -> other..., matching Section 7's
-      // "at least front + side" convention from the normal install flow.
+      const localId = newLocalId();
+      const cleanName = fileName.replace(/[^a-zA-Z0-9._-]/g,'_').slice(-90);
+      let originalHash: string | null = null;
+      try { originalHash = await computeImageHash(dataUrl); } catch { /* optional duplicate detection */ }
+      const entry: PendingInstallationPhoto = {
+        id:localId,workerId:profile.id,organizationId:profile.organization_id,shopId,jobId,
+        path:`${profile.organization_id}/${jobId}/direct-${angle}-${localId}-${cleanName}`,
+        dataUrl:uploadDataUrl,originalHash,angle,workItemId:null,caption:null,
+        gps:photoGps,createdAt:new Date().toISOString(),
+      };
+      // Save FIRST; if the upload fails/offline, photos survive reconnect.
+      await offlineDb.installationPhotos.put(entry);
+      setPhotos(previous => [...previous,{url:uploadDataUrl,storagePath:entry.path,angle,localId,queued:true}]);
+      if (navigator.onLine) {
+        const synced = await syncInstallationPhoto(entry);
+        if (synced) setPhotos(previous => previous.map(photo => photo.storagePath === entry.path
+          ? {url:synced.url,storagePath:synced.storagePath,angle:synced.angle} : photo));
+      }
       setNextAngle((a) => (a === 'front' ? 'side' : 'other'));
     } catch (err: any) {
       console.error('[DirectInstallWizard] handlePhotoCaptured failed:', err);
@@ -2101,36 +2083,31 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
   }
 
   async function removePhoto(photo: DirectInstallPhoto) {
-    setPhotos((prev) => prev.filter((p) => p.storagePath !== photo.storagePath));
-    await supabase.from('installation_proofs').delete().eq('storage_path', photo.storagePath);
-    await supabase.storage.from('installation-proof').remove([photo.storagePath]);
+    if (photo.localId && isInstallationPhotoSyncing(photo.localId)) {
+      fieldNotice('Photo is uploading; remove after sync completes.'); return;
+    }
+    if (photo.localId) await offlineDb.installationPhotos.delete(photo.localId);
+    else {
+      const {error} = await supabase.from('installation_proofs').delete().eq('storage_path', photo.storagePath);
+      if (error) { fieldNotice('Could not remove proof: '+error.message); return; }
+      await supabase.storage.from('installation-proof').remove([photo.storagePath]);
+    }
+    setPhotos(previous => previous.filter(p => p.storagePath !== photo.storagePath));
   }
 
   async function finish() {
-    if (!profile || !jobId || !shopId) return;
+    if (!profile || !jobId || !shopId || finishing || completed) return;
     setFinishing(true);
     try {
-      await logAudit('installation_jobs', jobId, 'complete', null, null, null, `Direct Install logged for ${shopName} (${selectedPo?.po_number || ''})`);
-
-      const { data: admins } = await supabase.from('profiles').select('id').eq('organization_id', profile.organization_id).in('role', ['agency_owner', 'admin']);
-      for (const admin of admins || []) {
-        await createNotification(
-          admin.id,
-          'Direct Install Logged',
-          `${profile.full_name} logged a new Direct Install site "${shopName}" against ${selectedPo?.po_number || 'a Work Order'} — waiting for your review.`,
-          'info',
-          '/installation-review'
-        );
-      }
-
+      // Server confirms proof exists, audits once and notifies Owner/Admin
+      // atomically. Retry after a timeout returns already_submitted.
+      const { error } = await supabase.rpc('phase4_submit_direct_install', { p_job_id: jobId });
+      if (error) throw new Error(error.message);
       queryClient.invalidateQueries();
       setCompleted(true);
     } catch (err: any) {
       console.error('[DirectInstallWizard] finish failed:', err);
-      // Everything that actually matters (shop/work item/job/photos) is
-      // already saved at this point — a notification/audit hiccup here
-      // shouldn't strand the installer on this screen.
-      setCompleted(true);
+      fieldNotice(`Could not confirm submission: ${err?.message || 'Unknown error'}. Check connection and retry.`);
     } finally {
       setFinishing(false);
     }
@@ -2363,14 +2340,14 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
           <div className="space-y-4">
             <Card className="p-4">
               <p className="font-semibold text-slate-900">{shopName}</p>
-              <p className="text-xs text-slate-500">Add at least one photo of the painted wall — a wide shot and a close-up work best.</p>
+              <p className="text-xs text-slate-500">Capture wall evidence. Photos save to this device first and upload automatically when connected.</p>
             </Card>
 
             <div className="grid grid-cols-3 gap-2">
               {photos.map((p) => (
                 <div key={p.storagePath} className="relative aspect-square rounded-lg overflow-hidden border border-slate-200">
                   <img src={p.url} alt={p.angle} className="w-full h-full object-contain bg-slate-100" />
-                  <span className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-[10px] text-center py-0.5 capitalize">{p.angle}</span>
+                  <span className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-[10px] text-center py-0.5 capitalize">{p.angle}{p.queued ? ' · waiting to sync' : ''}</span>
                   <button onClick={() => removePhoto(p)} className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-0.5">
                     <Trash2 className="w-3 h-3" />
                   </button>
@@ -2391,8 +2368,21 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
               </button>
             </div>
 
+            {photos.some(photo => photo.queued) && <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+              {photos.filter(photo => photo.queued).length} photo(s) saved locally, pending upload. Submit unlocks only when the server has the proof.
+              <button type="button" onClick={() => {
+                if (!profile || !shopId || !jobId) return;
+                void pendingInstallationPhotos(profile.id,shopId).then(async entries => {
+                  for (const entry of entries.filter(item=>item.jobId===jobId)) {
+                    const synced = await syncInstallationPhoto(entry);
+                    if (synced) setPhotos(previous => previous.map(photo => photo.storagePath===entry.path
+                      ? {url:synced.url,storagePath:synced.storagePath,angle:synced.angle} : photo));
+                  }
+                }).catch(error => fieldNotice('Photo retry failed: '+String(error)));
+              }} className="ml-2 font-semibold underline">Retry upload</button>
+            </div>}
             <button
-              disabled={photos.length === 0 || finishing}
+              disabled={photos.length === 0 || photos.some(photo => photo.queued) || finishing}
               onClick={finish}
               className="w-full bg-slate-900 disabled:bg-slate-300 text-white font-bold py-3.5 rounded-lg flex items-center justify-center gap-2"
             >

@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
@@ -38,13 +38,13 @@ export default function SupplyOrdersPage({ embedded = false, workOrderId = '', i
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
           <div>
             <Link className="text-xs font-medium text-blue-700 hover:underline" to={workOrderId ? `/purchase-orders?type=supply_only&order=${encodeURIComponent(workOrderId)}` : '/purchase-orders?type=supply_only'}>← Work Orders</Link>
-            <p className="mt-1 text-sm font-semibold text-slate-900">Supply Only · Execution</p>
+            <p className="mt-1 text-sm font-semibold text-slate-900">Production & Delivery · Execution</p>
             <p className="text-xs text-slate-500">Design → Production → Dispatch. Work Order selection is maintained across steps.</p>
           </div>
-          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">Supply Only</span>
+          <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">Production & Delivery</span>
         </div>
       ) : (
-        <PageHeader title="Supply Only · Execution" subtitle="Design → Production → Dispatch for your existing Supply Only Work Orders." />
+        <PageHeader title="Production & Delivery · Execution" subtitle="Design → Production → Dispatch for your existing Production & Delivery Work Orders." />
       )}
 
       <div className="flex gap-2 mb-6 border-b border-slate-200">
@@ -75,7 +75,7 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
   const [form, setForm] = useState({
     purchase_order_id: workOrderId, po_line_item_id: '', shop_mode: 'existing', shop_id: '', new_shop_name: '',
     new_shop_contact_person: '', new_shop_contact_phone: '', new_shop_address: '',
-    quantity: '', designer_id: '', notes: '',
+    quantity: '', designer_id: '', artwork_source: 'agency', notes: '',
   });
 
   useEffect(() => {
@@ -178,7 +178,7 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
       if (!selectedLineItem.work_type_id) {
         throw new Error('This line item has no Work Type set — add one from the Purchase Orders page first.');
       }
-      if (!form.designer_id) throw new Error('Pick a designer to assign this job to before saving.');
+      if (form.artwork_source === 'agency' && !form.designer_id) throw new Error('Choose the assigned designer, or select company-provided artwork.');
       const qty = Number(form.quantity);
       if (!form.quantity || isNaN(qty) || qty <= 0) throw new Error('Enter a valid quantity.');
 
@@ -290,11 +290,11 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
           organization_id: orgId,
           shop_id: shopId,
           status: 'assigned',
-          designer_id: form.designer_id,
+          designer_id: form.artwork_source === 'agency' ? form.designer_id : null,
         });
         if (taskInsertError) throw new Error(`Could not create design task: ${taskInsertError.message}`);
       } else {
-        const { error: taskUpdateError } = await supabase.from('design_tasks').update({ designer_id: form.designer_id }).eq('id', existingTask.id).select('id');
+        const { error: taskUpdateError } = await supabase.from('design_tasks').update({ designer_id: form.artwork_source === 'agency' ? form.designer_id : null }).eq('id', existingTask.id).select('id');
         if (taskUpdateError) throw new Error(`Could not assign designer: ${taskUpdateError.message}`);
       }
       // The designer needs to know they've got a new board to design — not
@@ -302,7 +302,7 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
       // owner/admin-only concern everywhere else on the Design Studio
       // screen too (see DesignerPage.tsx), so this notification text stays
       // scoped to just the work itself.
-      await createNotification(form.designer_id, 'New Design Task', `You've been assigned to design "${selectedLineItem.description}"`, 'info', '/design');
+      if (form.artwork_source === 'agency' && form.designer_id) await createNotification(form.designer_id, 'New Design Task', `You've been assigned to design "${selectedLineItem.description}"`, 'info', '/design');
 
       await logAudit('work_items', workItem.id, 'insert', null, null, null, `Supply Only entry: ${qty} ${selectedLineItem.uom} of ${selectedLineItem.description} for PO ${selectedPO.name || selectedPO.po_number} — sent to Design`);
     },
@@ -314,14 +314,14 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
       queryClient.invalidateQueries({ queryKey: ['supply-produced-by-line-item', orgId] });
       queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
       setModalOpen(false);
-      setForm({ purchase_order_id: workOrderId, po_line_item_id: '', shop_mode: 'existing', shop_id: '', new_shop_name: '', new_shop_contact_person: '', new_shop_contact_phone: '', new_shop_address: '', quantity: '', designer_id: '', notes: '' });
+      setForm({ purchase_order_id: workOrderId, po_line_item_id: '', shop_mode: 'existing', shop_id: '', new_shop_name: '', new_shop_contact_person: '', new_shop_contact_phone: '', new_shop_address: '', quantity: '', designer_id: '', artwork_source: 'agency', notes: '' });
     },
   });
 
   return (
     <div>
-      {poLoading && <p role="status" className="mb-3 text-sm text-slate-500">Loading Supply Only Work Orders…</p>}
-      {poError && <p role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Could not load Supply Only Work Orders. Refresh to retry.</p>}
+      {poLoading && <p role="status" className="mb-3 text-sm text-slate-500">Loading Production & Delivery Work Orders…</p>}
+      {poError && <p role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Could not load Production & Delivery Work Orders. Refresh to retry.</p>}
       <div className="flex justify-between items-center mb-4">
         <p className="text-sm text-slate-500 max-w-xl">
           Pick a Supply Only PO's line item, set a quantity, and assign a designer — it goes to the Designer's queue first (artwork/layout for foam sheet, vinyl, logo, desk mat...),
@@ -341,7 +341,7 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
                 {po.name && <p className="text-xs text-slate-400">{po.po_number}</p>}
                 <p className="text-sm text-slate-500">{po.clients?.name}</p>
               </div>
-              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-teal-100 text-teal-700">Supply Only</span>
+              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-teal-100 text-teal-700">Production & Delivery</span>
             </div>
             <div className="space-y-2">
               {po.po_line_items.length === 0 && <p className="text-xs text-slate-400 italic">No line items yet — add them from Purchase Orders.</p>}
@@ -458,16 +458,17 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Input label={`Quantity${selectedLineItem ? ` (${selectedLineItem.uom})` : ''}`} type="number" value={form.quantity} onChange={(v) => setForm({ ...form, quantity: v })} required />
-            <Select
-              label="Assign Designer"
-              value={form.designer_id}
+            <Select label="Artwork source" value={form.artwork_source}
+              onChange={(v) => setForm({ ...form, artwork_source: v })}
+              options={[{value:'agency',label:'Agency will create artwork'},{value:'client',label:'Company artwork received'}]} />
+            {form.artwork_source === 'agency' && <Select
+              label="Assign Designer" value={form.designer_id}
               onChange={(v) => setForm({ ...form, designer_id: v })}
-              options={(designers || []).map((d) => ({ value: d.id, label: d.full_name }))}
-              required
-            />
+              options={(designers || []).map((d) => ({ value: d.id, label: d.full_name }))} required />}
           </div>
+          {form.artwork_source === 'client' && <p className="rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">No designer assignment. Upload the company artwork in Design Review, approve it internally, then release to Production. Approval is not skipped.</p>}
           {selectedLineItem?.work_type_id && (
             <p className="text-xs text-slate-400">
               {consumables && consumables.length > 0
@@ -481,13 +482,13 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
 
           <button
             onClick={() => createMutation.mutate()}
-            disabled={createMutation.isPending || !form.purchase_order_id || !form.po_line_item_id || !form.quantity || !form.designer_id}
+            disabled={createMutation.isPending || !form.purchase_order_id || !form.po_line_item_id || !form.quantity || (form.artwork_source === 'agency' && !form.designer_id)}
             className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition disabled:opacity-50"
           >
             {createMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-            {createMutation.isPending ? 'Creating...' : 'Create Entry & Send to Design'}
+            {createMutation.isPending ? 'Creating...' : 'Create Entry & Continue'}
           </button>
-          <p className="text-xs text-slate-400">This creates a design task in the Designer's queue. Once the design is approved and released, it moves automatically to Production Studio.</p>
+          <p className="text-xs text-slate-400">Creates the correct Design Review task. Company artwork needs no assigned designer; owner/admin can upload and approve the supplied file before Production.</p>
         </div>
       </Modal>
     </div>
@@ -505,11 +506,15 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
     dispatch_mode: 'staff', transport_mode: '', tracking_reference: '',
   });
   const [createOpen, setCreateOpen] = useState(false);
+  const dispatchRequestId = useRef<string | null>(null);
+  const [receiptTarget, setReceiptTarget] = useState<{ id: string; name: string } | null>(null);
+  const [receiptForm, setReceiptForm] = useState({ received_by: '', proof_reference: '', notes: '' });
   useEffect(() => { setSelectedShopIds(new Set()); }, [workOrderId]);
 
   useRealtimeInvalidate(['shops', 'routes', 'route_stops'], orgId, [
     ['dispatch-ready-shops', orgId],
     ['dispatch-routes', orgId],
+    ['po-billing-readiness', orgId],
   ]);
 
   const { data: readyShops } = useQuery({
@@ -543,7 +548,7 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('routes')
-        .select('*, profiles:user_id(full_name), confirmed_by_profile:owner_confirmed_by(full_name), route_stops(id, shop_id, status, shops(name))')
+        .select('*, profiles:user_id(full_name), confirmed_by_profile:owner_confirmed_by(full_name), route_stops(id, shop_id, status, shops(name,purchase_order_id,purchase_orders(fulfillment_type)), supply_delivery_receipts(received_by,confirmed_at,proof_reference))')
         .eq('organization_id', orgId)
         .order('created_at', { ascending: false })
         .limit(20);
@@ -551,14 +556,14 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
       return data as (Route & {
         profiles: { full_name: string } | null;
         confirmed_by_profile: { full_name: string } | null;
-        route_stops: { id: string; shop_id: string; status: string; shops: { name: string } | null }[];
+        route_stops: { id: string; shop_id: string; status: string; shops: { name: string; purchase_order_id: string | null; purchase_orders: { fulfillment_type: string } | null } | null; supply_delivery_receipts: { received_by: string; confirmed_at: string; proof_reference: string | null }[] | { received_by: string; confirmed_at: string; proof_reference: string | null } | null }[];
       })[];
     },
     enabled: !!orgId,
   });
 
   // §3.3's "Confirm to Owner" checkpoint (migration 0045) — an
-  // Owner/Admin explicitly acknowledging a dispatch happened, between
+  // Owner/Admin acknowledging that dispatch was arranged, between
   // Dispatch and Billing. Flag only, never blocks billing.
   const canConfirmDispatch = profile?.role === 'agency_owner' || profile?.role === 'admin';
   const confirmDispatchMutation = useMutation({
@@ -572,14 +577,24 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
       await logAudit('routes', route.id, 'update', 'owner_confirmed_at', null, 'confirmed', 'Dispatch confirmed by Owner/Admin');
 
       // Billing isn't gated on this, but Accounts should still know a
-      // dispatch has been looked at and is clear to invoice against.
+      // dispatch was reviewed. Delivery receipt remains a separate checkpoint.
       const { data: accountsUsers } = await supabase.from('profiles').select('id').eq('organization_id', profile.organization_id).eq('role', 'accounts').eq('is_active', true);
       for (const u of accountsUsers || []) {
-        await createNotification(u.id, 'Dispatch Confirmed', `${route.name || 'A dispatch route'} has been confirmed by ${profile.full_name} — clear to bill.`, 'info', '/billing');
+        await createNotification(u.id, 'Dispatch Confirmed', `${route.name || 'A dispatch route'} has been confirmed by ${profile.full_name} — receipt confirmation is required for new Production & Delivery Work Orders before billing.`, 'info', '/billing');
       }
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['dispatch-routes', orgId] }),
   });
+
+  // Do not offer roles that the dispatch RPC will reject. One eligible staff
+  // member can be preselected, avoiding an unnecessary dropdown selection.
+  const deliveryStaff = useMemo(() => (staff || []).filter(person =>
+    ['installer','admin','agency_owner','client_manager','printing'].includes(person.role)), [staff]);
+  useEffect(() => {
+    if (deliveryStaff.length === 1) {
+      setRouteForm(previous => previous.user_id ? previous : ({...previous,user_id:deliveryStaff[0].id}));
+    }
+  }, [deliveryStaff]);
 
   const zoneGroups = useMemo(() => {
     const groups = new Map<string, (Shop & { clients: { name: string } | null; zones: { name: string } | null })[]>();
@@ -601,70 +616,62 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
 
   const createRouteMutation = useMutation({
     mutationFn: async () => {
-      if (selectedShopIds.size === 0) throw new Error('Select at least one shop to dispatch.');
-      if (routeForm.dispatch_mode === 'staff' && !routeForm.user_id) throw new Error('Pick who is doing this delivery run.');
-      if (routeForm.dispatch_mode === 'courier' && !routeForm.transport_mode.trim()) throw new Error('Enter the courier / transport company name.');
-
-      const shopIds = Array.from(selectedShopIds);
-      // If every selected shop shares one zone, tag the route with it —
-      // per doc Section 6.4 ("zone-wise dispatch"). Left null when the
-      // selection spans multiple zones rather than guessing.
-      const selectedShops = (readyShops || []).filter((s) => selectedShopIds.has(s.id));
-      const zoneIds = new Set(selectedShops.map((s) => s.zone_id).filter(Boolean));
-      const zoneId = zoneIds.size === 1 ? Array.from(zoneIds)[0] : null;
-
-      const { data: route, error: routeError } = await supabase.from('routes').insert({
-        organization_id: orgId,
-        // Courier/transport-company dispatch has no internal staff to
-        // assign — user_id is nullable for exactly this case (migration
-        // 0027), so only send it when a staff member was actually picked.
-        user_id: routeForm.dispatch_mode === 'staff' ? routeForm.user_id : null,
-        name: routeForm.name || `Dispatch ${new Date(routeForm.route_date).toLocaleDateString('en-IN')}`,
-        route_date: routeForm.route_date,
-        status: 'planned',
-        transport_mode: routeForm.dispatch_mode === 'courier' ? routeForm.transport_mode.trim() : null,
-        tracking_reference: routeForm.tracking_reference.trim() || null,
-        zone_id: zoneId,
-      }).select().single();
-      if (routeError) throw new Error(`Could not create route: ${routeError.message}`);
-
-      const stopsPayload = shopIds.map((shopId, i) => ({
-        organization_id: orgId,
-        route_id: route.id,
-        shop_id: shopId,
-        stop_order: i + 1,
-        status: 'pending',
-      }));
-      const { error: stopsError } = await supabase.from('route_stops').insert(stopsPayload);
-      if (stopsError) throw new Error(`Could not add stops: ${stopsError.message}`);
-
-      const { error: shopsError } = await supabase.from('shops').update({ status: 'dispatched' }).in('id', shopIds);
-      if (shopsError) throw new Error(`Could not update shop status: ${shopsError.message}`);
-
-      // Section 4.2 — keep the standalone supply_destinations record (if
-      // one exists for these shops) in sync with the dispatch: status
-      // moves to 'dispatched' and route_id points at the route just
-      // created, so a report/export reading supply_destinations directly
-      // sees the same picture as the shop-based pipeline. Non-fatal if it
-      // fails — the actual dispatch (routes/route_stops/shops above) has
-      // already succeeded by this point.
-      const { error: destSyncError } = await supabase
-        .from('supply_destinations')
-        .update({ status: 'dispatched', route_id: route.id })
-        .in('shop_id', shopIds);
-      if (destSyncError) console.error('[SupplyOrders] could not sync supply_destinations on dispatch (non-fatal):', destSyncError.message);
-
-      await logAudit('routes', route.id, 'insert', null, null, null, `Dispatch route created for ${shopIds.length} shop(s)`);
+      if (selectedShopIds.size === 0) throw new Error('Select at least one destination.');
+      if (routeForm.dispatch_mode === 'staff' && !routeForm.user_id) throw new Error('Choose delivery staff.');
+      if (routeForm.dispatch_mode === 'courier' && !routeForm.transport_mode.trim()) throw new Error('Enter the transport company.');
+      // Reuse the same request ID after network failure/timeouts. The server
+      // serializes retries and returns the original route without duplicating stops.
+      if (!dispatchRequestId.current) dispatchRequestId.current = crypto.randomUUID();
+      const { error } = await supabase.rpc('phase4_create_supply_dispatch', {
+        p_request_id: dispatchRequestId.current,
+        p_shop_ids: Array.from(selectedShopIds),
+        p_name: routeForm.name.trim() || 'Supply dispatch',
+        p_route_date: routeForm.route_date,
+        p_driver_id: routeForm.dispatch_mode === 'staff' ? routeForm.user_id : null,
+        p_transport_mode: routeForm.dispatch_mode === 'courier' ? routeForm.transport_mode.trim() : null,
+        p_tracking_reference: routeForm.tracking_reference.trim() || null,
+      });
+      if (error) throw new Error(`Dispatch not saved: ${error.message}`);
     },
     onSuccess: () => {
+      dispatchRequestId.current = null;
       queryClient.invalidateQueries({ queryKey: ['dispatch-ready-shops', orgId] });
       queryClient.invalidateQueries({ queryKey: ['dispatch-routes', orgId] });
       queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['po-billing-readiness', orgId] });
       setSelectedShopIds(new Set());
       setCreateOpen(false);
       setRouteForm({ name: '', route_date: new Date().toISOString().split('T')[0], user_id: '', dispatch_mode: 'staff', transport_mode: '', tracking_reference: '' });
     },
   });
+
+  const receiptMutation = useMutation({
+    mutationFn: async () => {
+      if (!receiptTarget) throw new Error('Select a destination.');
+      if (receiptForm.received_by.trim().length < 2) throw new Error('Enter the recipient name.');
+      const { error } = await supabase.rpc('phase4_confirm_supply_receipt', {
+        p_route_stop_id: receiptTarget.id,
+        p_received_by: receiptForm.received_by.trim(),
+        p_proof_reference: receiptForm.proof_reference.trim() || null,
+        p_notes: receiptForm.notes.trim() || null,
+      });
+      if (error) throw new Error(`Delivery receipt not recorded: ${error.message}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dispatch-routes', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['po-billing-readiness', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['billing-completed-shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['agency-operations-dashboard', orgId] });
+      setReceiptTarget(null);
+      setReceiptForm({ received_by: '', proof_reference: '', notes: '' });
+    },
+  });
+
+  const canRecordReceipt = profile?.role === 'agency_owner' || profile?.role === 'admin';
+  const supplyRoutes = (routes || []).filter(route => route.route_stops.some(stop =>
+    stop.shops?.purchase_orders?.fulfillment_type === 'supply_only' &&
+    (!workOrderId || stop.shops.purchase_order_id === workOrderId)));
 
   return (
     <div>
@@ -682,7 +689,7 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
       </div>
       <div className="flex justify-between items-center mb-4 gap-3 flex-wrap">
         <p className="text-sm text-slate-500 max-w-xl">
-          Shops with a Supply Only production order marked completed, ready to be grouped into a zone-wise dispatch batch. Select shops below and hand them off to Dispatch — this also marks them as billing-eligible.
+          Completed production destinations, grouped by zone. Dispatch creates a transport record; new orders become invoice-ready only after delivery receipt is confirmed.
         </p>
         <button
           onClick={() => setCreateOpen(true)}
@@ -701,7 +708,14 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
             <Card key={zoneName} className="p-4">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-1.5"><MapPin className="w-4 h-4 text-slate-400" /> {zoneName}</h3>
-                <span className="text-xs font-medium text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-full px-2 py-0.5">{shops.length} ready</span>
+                <button type="button" onClick={() => setSelectedShopIds(previous => {
+                    const next = new Set(previous);
+                    const allSelected = shops.every(shop => next.has(shop.id));
+                    shops.forEach(shop => allSelected ? next.delete(shop.id) : next.add(shop.id));
+                    return next;
+                  })} className="rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100">
+                  {shops.every(shop => selectedShopIds.has(shop.id)) ? 'Clear zone' : `Select all ${shops.length}`}
+                </button>
               </div>
               <div className="space-y-1.5">
                 {shops.map((shop) => (
@@ -727,10 +741,10 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
 
       <div className="flex items-center gap-2 mb-3">
         <span className="flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-[11px] font-semibold shrink-0">2</span>
-        <h3 className="text-sm font-semibold text-slate-800 flex items-center gap-1.5"><Truck className="w-4 h-4 text-blue-500" /> Dispatch — routes created from the hand-off above</h3>
+        <h3 className="text-sm font-semibold text-slate-800 flex items-center gap-1.5"><Truck className="w-4 h-4 text-blue-500" /> Dispatch tracking &amp; delivery receipts</h3>
       </div>
       <div className="space-y-2">
-        {routes?.map((route) => (
+        {supplyRoutes.map((route) => (
           <Card key={route.id} className="p-4">
             <div className="flex items-center justify-between mb-2">
               <div>
@@ -744,9 +758,18 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
               <StatusBadge status={route.status} />
             </div>
             <div className="flex flex-wrap gap-1.5 mb-3">
-              {route.route_stops.map((stop) => (
-                <span key={stop.id} className="text-xs bg-slate-100 text-slate-600 rounded-full px-2 py-0.5">{stop.shops?.name || 'Shop'}</span>
-              ))}
+              {route.route_stops.filter(stop => stop.shops?.purchase_orders?.fulfillment_type === 'supply_only' && (!workOrderId || stop.shops.purchase_order_id === workOrderId)).map(stop => {
+                const receipt = Array.isArray(stop.supply_delivery_receipts) ? stop.supply_delivery_receipts[0] : stop.supply_delivery_receipts;
+                return <div key={stop.id} className="inline-flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs">
+                  <span className="font-medium text-slate-700">{stop.shops?.name || 'Destination'}</span>
+                  {receipt ? <span className="font-semibold text-emerald-700" title={`Received by ${receipt.received_by}`}>Received · {receipt.received_by}</span>
+                    : canRecordReceipt && stop.status === 'pending' ? <button type="button" onClick={() => {
+                        setReceiptTarget({ id:stop.id, name:stop.shops?.name || 'Destination' });
+                        setReceiptForm({ received_by:'',proof_reference:'',notes:'' });
+                      }} className="rounded-md bg-blue-600 px-2.5 py-1.5 font-semibold text-white hover:bg-blue-700">Mark received</button>
+                    : <span className="text-amber-800">Awaiting receipt</span>}
+                </div>;
+              })}
             </div>
             <div className="flex items-center justify-between pt-3 border-t border-slate-100">
               {route.owner_confirmed_at ? (
@@ -761,7 +784,7 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
                   className="text-xs font-medium text-blue-600 hover:text-blue-700 flex items-center gap-1.5 disabled:opacity-50"
                 >
                   <Square className="w-3.5 h-3.5" />
-                  {confirmDispatchMutation.isPending ? 'Confirming...' : 'Confirm Dispatch to Owner'}
+                  {confirmDispatchMutation.isPending ? 'Confirming...' : 'Acknowledge Dispatch'}
                 </button>
               ) : (
                 <p className="text-xs text-amber-600">Awaiting Owner/Admin confirmation</p>
@@ -769,8 +792,22 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
             </div>
           </Card>
         ))}
-        {routes?.length === 0 && <p className="text-sm text-slate-400">No dispatch routes yet.</p>}
+        {supplyRoutes.length === 0 && <p className="text-sm text-slate-400">No supply dispatch routes for this Work Order yet.</p>}
       </div>
+
+      <Modal open={!!receiptTarget} onClose={() => { if (!receiptMutation.isPending) setReceiptTarget(null); }} title="Confirm delivery received">
+        <div className="space-y-3">
+          <p className="text-sm text-slate-600">{receiptTarget?.name} · record the recipient, not only that material was dispatched.</p>
+          <Input label="Received by *" value={receiptForm.received_by} onChange={value => setReceiptForm(v => ({...v,received_by:value}))} placeholder="Recipient / store representative" />
+          <Input label="Proof / LR / acknowledgment reference" value={receiptForm.proof_reference} onChange={value => setReceiptForm(v => ({...v,proof_reference:value}))} placeholder="Optional reference" />
+          <Textarea label="Notes (optional)" value={receiptForm.notes} onChange={value => setReceiptForm(v => ({...v,notes:value}))} rows={2} />
+          {receiptMutation.isError && <p role="alert" className="text-xs text-red-700">{(receiptMutation.error as Error).message}</p>}
+          <button type="button" onClick={() => receiptMutation.mutate()} disabled={receiptMutation.isPending || receiptForm.received_by.trim().length < 2}
+            className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">
+            {receiptMutation.isPending ? 'Recording…' : 'Confirm received & update progress'}
+          </button>
+        </div>
+      </Modal>
 
       <Modal open={createOpen} onClose={() => setCreateOpen(false)} title="Create Dispatch Route">
         <div className="space-y-4">
@@ -803,7 +840,7 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
               label="Assigned To"
               value={routeForm.user_id}
               onChange={(v) => setRouteForm({ ...routeForm, user_id: v })}
-              options={(staff || []).map((s) => ({ value: s.id, label: `${s.full_name} (${s.role})` }))}
+              options={deliveryStaff.map((s) => ({ value: s.id, label: `${s.full_name} (${s.role})` }))}
               required
             />
           ) : (
@@ -828,7 +865,7 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
             disabled={createRouteMutation.isPending || (routeForm.dispatch_mode === 'staff' ? !routeForm.user_id : !routeForm.transport_mode.trim())}
             className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition disabled:opacity-50"
           >
-            {createRouteMutation.isPending ? 'Creating...' : 'Create & Mark Dispatched'}
+            {createRouteMutation.isPending ? 'Creating...' : 'Create Dispatch'}
           </button>
         </div>
       </Modal>

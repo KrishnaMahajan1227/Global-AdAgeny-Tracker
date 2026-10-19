@@ -1,3 +1,8 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Navigation remains keyboard/touch scrollable on short screens without
+   exposing the browser scrollbar in the agency sidebar. */
+.app-sidebar-scroll { scrollbar-width: none; -ms-overflow-style: none; }
+.app-sidebar-scroll::-webkit-scrollbar { display: none; }

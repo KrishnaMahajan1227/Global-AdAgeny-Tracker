@@ -60,9 +60,9 @@ export default function ClientAgenciesPage() {
   const { data: pos } = useQuery({
     queryKey: ['client-agencies-pos', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('purchase_orders').select('id, assigned_agency_id, status').eq('client_org_id', orgId);
+      const { data, error } = await supabase.from('purchase_orders').select('id, assigned_agency_id, status, fulfillment_type').eq('client_org_id', orgId);
       if (error) throw error;
-      return data as Pick<PurchaseOrder, 'id' | 'assigned_agency_id' | 'status'>[];
+      return data as Pick<PurchaseOrder, 'id' | 'assigned_agency_id' | 'status' | 'fulfillment_type'>[];
     },
     enabled: !!orgId,
   });
@@ -255,7 +255,7 @@ export default function ClientAgenciesPage() {
           for (const s of shops || []) {
             const po = s.purchase_order_id ? poById.get(s.purchase_order_id) : null;
             if (!po || po.assigned_agency_id !== link.agency_org_id) continue;
-            const bucket = siteBucket(s.status);
+            const bucket = siteBucket(s.status, po.fulfillment_type, po.delivery_receipt_required === true);
             if (bucket === 'cancelled') continue;
             total += 1;
             if (bucket === 'completed') completed += 1;

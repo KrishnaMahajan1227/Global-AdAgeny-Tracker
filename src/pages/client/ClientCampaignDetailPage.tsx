@@ -1,3 +1,4 @@
+import { FULFILLMENT_PRESETS } from '@/lib/fulfillment';
 import { useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -7,7 +8,7 @@ import { Card, EmptyState, Modal, Input, Select, Textarea, ProgressBar, FilterBu
 import { logAudit, notifyLinkedOrg } from '@/lib/helpers';
 import type { PurchaseOrder, ClientAgencyLink, ClientPOLineItemProgress, Campaign } from '@/lib/types';
 import {
-  stagePct, finalStage, clientPoWorkStatus, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS,
+  stagePct, finalStage, receiptCompletionPercent, clientPoWorkStatus, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS,
 } from '@/lib/clientPortal';
 import {
   ArrowLeft, Plus, Search, ShoppingCart, Loader2, Trash2, ArrowRight, Store, Building2,
@@ -15,14 +16,10 @@ import {
 } from 'lucide-react';
 
 type PoRow = PurchaseOrder & { agency_org: { name: string } | null };
-type ShopRow = { id: string; purchase_order_id: string | null };
+type ShopRow = { id: string; purchase_order_id: string | null; status: string };
 type LinkRow = ClientAgencyLink & { agency_org: { name: string } | null };
 
-const FULFILLMENT_OPTIONS = [
-  { value: 'survey_install', label: 'Survey + Install' },
-  { value: 'supply_only', label: 'Supply Only' },
-  { value: 'direct_install', label: 'Direct Installation (wall painting / on-ground, no shop list needed)' },
-];
+const FULFILLMENT_OPTIONS = FULFILLMENT_PRESETS;
 const UOM_OPTIONS = [
   { value: 'sqft', label: 'Sq.ft' },
   { value: 'piece', label: 'Piece' },
@@ -84,7 +81,7 @@ export default function ClientCampaignDetailPage() {
     queryFn: async () => {
       const ids = (pos || []).map((p) => p.id);
       if (ids.length === 0) return [];
-      const { data, error } = await supabase.from('shops').select('id, purchase_order_id').in('purchase_order_id', ids);
+      const { data, error } = await supabase.from('shops').select('id, purchase_order_id, status').in('purchase_order_id', ids);
       if (error) throw error;
       return data as ShopRow[];
     },
@@ -223,7 +220,9 @@ export default function ClientCampaignDetailPage() {
   }
   const rows = (pos || []).map((po) => {
     const poProgress = progressByPo.get(po.id) || [];
-    const completionPct = stagePct(poProgress, finalStage(po.fulfillment_type));
+    const completionPct = po.fulfillment_type === 'supply_only' && po.delivery_receipt_required
+      ? receiptCompletionPercent((shops || []).filter(shop => shop.purchase_order_id === po.id))
+      : stagePct(poProgress, finalStage(po.fulfillment_type));
     const workStatus = clientPoWorkStatus(po, completionPct);
     return { po, sites: siteCountByPo.get(po.id) || 0, completionPct, workStatus };
   });
@@ -440,6 +439,7 @@ export default function ClientCampaignDetailPage() {
           </div>
 
           <Select label="Fulfillment Type" value={form.fulfillment_type} onChange={(v) => setForm({ ...form, fulfillment_type: v })} options={FULFILLMENT_OPTIONS} required />
+          <p className="-mt-2 text-xs text-slate-500">{FULFILLMENT_OPTIONS.find(option => option.value === form.fulfillment_type)?.description}</p>
           <Input label="Payment Terms" value={form.payment_terms} onChange={(v) => setForm({ ...form, payment_terms: v })} placeholder="e.g. 50% advance, 50% on installation" />
           <Textarea label="Notes / Timeline" value={form.notes} onChange={(v) => setForm({ ...form, notes: v })} placeholder="Locations, timeline, or any special instructions for the agency" />
 

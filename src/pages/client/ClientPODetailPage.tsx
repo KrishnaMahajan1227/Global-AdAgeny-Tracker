@@ -15,7 +15,7 @@ import { logAudit, notifyLinkedOrg } from '@/lib/helpers';
 import type { PurchaseOrder, ClientPOLineItemProgress, SurveyPhoto, BoardMarking, WorkItem } from '@/lib/types';
 import { STATUS_LABELS } from '@/lib/types';
 import {
-  stagePct, finalStage, formatQty, clientPoWorkStatus, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS,
+  stagePct, finalStage, receiptCompletionPercent, formatQty, clientPoWorkStatus, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS,
 } from '@/lib/clientPortal';
 import { fulfillmentTypeLabel } from '@/lib/poUtilization';
 import {
@@ -626,7 +626,9 @@ export default function ClientPODetailPage() {
     );
   }
 
-  const completionPct = stagePct(progress || [], finalStage(po.fulfillment_type));
+  const completionPct = po.fulfillment_type === 'supply_only' && po.delivery_receipt_required
+    ? receiptCompletionPercent(shops || [])
+    : stagePct(progress || [], finalStage(po.fulfillment_type));
   const workStatus = clientPoWorkStatus(po, completionPct);
 
   return (
@@ -967,7 +969,7 @@ export default function ClientPODetailPage() {
       )}
 
       {tab === 'map' && (
-        <ClientPoSiteMap shops={shops || []} />
+        <ClientPoSiteMap shops={shops || []} fulfillmentType={po.fulfillment_type} receiptRequired={po.delivery_receipt_required === true} />
       )}
 
       <ConfirmDialog

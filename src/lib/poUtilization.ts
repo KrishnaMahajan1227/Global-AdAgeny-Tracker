@@ -13,12 +13,11 @@ import type { FulfillmentType, POLineItemUtilization } from './types';
  *  what type the PO is. */
 export function fulfillmentTypeLabel(type: FulfillmentType | string | null | undefined): string {
   switch (type) {
-    case 'supply_only': return 'Supply Only';
-    case 'direct_install': return 'Direct Installation';
-    case 'custom': return 'Custom';
-    case 'survey_install':
-    default:
-      return 'Survey + Install';
+    case 'production_install': return 'Production & Installation';
+    case 'supply_only': return 'Production & Delivery';
+    case 'direct_install': return 'On-site Execution';
+    case 'custom': return 'Legacy custom scope';
+    default: return 'Survey & Installation';
   }
 }
 
@@ -87,7 +86,9 @@ export function computeUtilization(row: POLineItemUtilization, stage: Utilizatio
   // Variance is measured against the surveyed stage specifically, per the
   // architecture doc ("Surveyed - Budgeted -> flag if non-zero").
   const surveyedPrimary = areaBased ? row.surveyed_area : row.surveyed_qty;
-  const variance = budgetedPrimary != null ? surveyedPrimary - budgetedPrimary : null;
+  // Zero can mean "not recorded", not a completed zero-quantity survey.
+  // Never label an unmeasured PO line as a scope variance.
+  const variance = budgetedPrimary != null && surveyedPrimary > 0 ? surveyedPrimary - budgetedPrimary : null;
   const hasVariance = variance != null && Math.abs(variance) > (budgetedPrimary ? budgetedPrimary * 0.01 : 0.01);
 
   return { budgetedPrimary, actualPrimary, budgetedAmount, invoicedAmount, remainingBalance, utilizationPct, variance, hasVariance };

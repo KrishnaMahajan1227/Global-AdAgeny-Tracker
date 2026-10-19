@@ -4,12 +4,12 @@ export const money2 = (value: number): number => Math.round((value + Number.EPSI
 export const qty4 = (value: number): number => Math.round((value + Number.EPSILON) * 10000) / 10000;
 
 /** Last stage is fulfillment-specific; a dispatch is NOT final for installation orders. */
-export function isFinalizedShop(type: string | null | undefined, status: string | null | undefined, requirements: StageRequirements[] = []): boolean {
-  return isShopFinished(type, status, requirements);
+export function isFinalizedShop(type: string | null | undefined, status: string | null | undefined, requirements: StageRequirements[] = [], receiptRequired = false): boolean {
+  return isShopFinished(type, status, requirements, receiptRequired);
 }
 
-export function billingStageLabel(type: string | null | undefined, requirements: StageRequirements[] = []): string {
-  if (type === 'supply_only') return 'Dispatched';
+export function billingStageLabel(type: string | null | undefined, requirements: StageRequirements[] = [], receiptRequired = false): string {
+  if (type === 'supply_only') return receiptRequired ? 'Delivery received' : 'Dispatched';
   if (type === 'custom' && requirements.length && requirements.every(r => r.requires_installation === false)) {
     if (requirements.some(r => r.requires_production !== false)) return 'Production complete';
     if (requirements.some(r => r.requires_design !== false)) return 'Design approved';
@@ -91,6 +91,7 @@ export function buildPendingAllocations(
   selectedShopIds: string[],
   fulfillmentType: string | null | undefined,
   requirements: StageRequirements[] = rateRows,
+  receiptRequired = false,
 ): { allocations: BillingAllocation[]; issues: string[] } {
   const selected = new Set(selectedShopIds);
   const byPo = new Map(rateRows.map((row) => [row.po_line_item_id, row]));
@@ -127,7 +128,7 @@ export function buildPendingAllocations(
   const seenIds = new Set<string>();
   for (const item of items) {
     if (!selected.has(item.shop_id) || item.excluded_from_calculations) continue;
-    if (item.shop_status && !isFinalizedShop(fulfillmentType, item.shop_status, requirements)) {
+    if ((receiptRequired && !item.shop_status) || (item.shop_status && !isFinalizedShop(fulfillmentType, item.shop_status, requirements, receiptRequired))) {
       issues.push('Shop has not reached the final fulfillment stage for this Work Order.');
       continue;
     }
@@ -159,7 +160,15 @@ export function buildPendingAllocations(
       : fulfillmentType !== 'custom' || po.requires_installation !== false ? 'installed'
       : po.requires_production !== false ? 'produced'
       : po.requires_design !== false ? 'approved' : 'surveyed';
-    const approvedInstalledFallback = finalStage === 'installed' && item.status === 'installed' && isFinalizedShop(fulfillmentType, item.shop_status, requirements);
+    // A shop may have multiple Work Items. Do not invoice an item that is
+    // explicitly still awaiting/redoing installation review just because a
+    // different item has already advanced the enclosing shop's status.
+    if (finalStage === 'installed' && item.status &&
+        ['installation_review','installation_pending','installing','redo'].includes(item.status)) {
+      issues.push('An installation Work Item still requires review or correction before billing.');
+      continue;
+    }
+    const approvedInstalledFallback = finalStage === 'installed' && item.status === 'installed' && isFinalizedShop(fulfillmentType, item.shop_status, requirements, receiptRequired);
     const installedArea = nonNegative(item.installed_area) || (approvedInstalledFallback ? nonNegative(item.approved_area) : 0);
     const installedQuantity = nonNegative(item.installed_quantity) || (approvedInstalledFallback ? nonNegative(item.approved_quantity) : 0);
     const producedArea = nonNegative(item.approved_quantity) && nonNegative(item.approved_area)
@@ -208,6 +217,37 @@ export function buildPendingAllocations(
     });
   }
   return { allocations, issues: Array.from(new Set(issues)) };
+}
+
+/**
+ * Final invoice-review validator shared by preview and last-moment server
+ * recheck. A user may bill a *part* of the available work-item quantity, but
+ * cannot change contract line/rate or bill beyond eligible measured units.
+ * Only one invoice line per work item is allowed within one new invoice.
+ * Amounts are ex-GST and monetary comparisons use the billing engine's
+ * two-decimal rounding; quantities are precise to four decimal places.
+ */
+export function validateInvoiceAllocationSelection(
+  items: Array<{work_item_id:string|null;po_line_item_id:string|null;shop_id:string|null;area:number|null;quantity:number;rate:number;amount:number}>,
+  allocations: BillingAllocation[],
+): {valid:boolean; reason:string} {
+  if (!items.length) return {valid:false,reason:'Select at least one measured work item.'};
+  const available = new Map(allocations.map(row => [row.workItemId, row]));
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (!item.work_item_id || !item.po_line_item_id || !item.shop_id) return {valid:false,reason:'Each invoice line needs its Work Order, site and work item.'};
+    if (seen.has(item.work_item_id)) return {valid:false,reason:'The same work item appears more than once on this invoice.'};
+    seen.add(item.work_item_id);
+    const allowed = available.get(item.work_item_id);
+    if (!allowed || allowed.poLineId !== item.po_line_item_id || allowed.shopId !== item.shop_id) return {valid:false,reason:'A Work Item no longer belongs to the selected billable Work Order scope.'};
+    const units = allowed.basis === 'area' ? Number(item.area) : Number(item.quantity);
+    if (!Number.isFinite(units) || units <= 0 || units - allowed.pending > 0.0001) return {valid:false,reason:'Invoice quantity/area exceeds the currently eligible unbilled work.'};
+    if (!Number.isFinite(item.rate) || Math.abs(item.rate - allowed.rate) > 0.0001 ||
+        !Number.isFinite(item.amount) || Math.abs(item.amount - money2(units * allowed.rate)) > 0.01) {
+      return {valid:false,reason:'Invoice rate or amount does not match the approved PO rate and quantity.'};
+    }
+  }
+  return {valid:true,reason:''};
 }
 
 /** Invoice visual grouping only; individual work-item links remain in DB for audit. */

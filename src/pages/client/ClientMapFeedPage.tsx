@@ -120,7 +120,7 @@ export default function ClientMapFeedPage() {
       if (cityFilter && s.city !== cityFilter) return false;
       const po = s.purchase_order_id ? poById.get(s.purchase_order_id) : null;
       if (agencyFilter && po?.assigned_agency_id !== agencyFilter) return false;
-      if (statusFilter && mapPinBucket(s.status) !== statusFilter) return false;
+      if (statusFilter && mapPinBucket(s.status, s.purchase_order_id ? poById.get(s.purchase_order_id)?.fulfillment_type : undefined, s.purchase_order_id ? poById.get(s.purchase_order_id)?.delivery_receipt_required === true : false) !== statusFilter) return false;
       return true;
     });
   }, [shops, search, cityFilter, agencyFilter, statusFilter, poById]);
@@ -151,7 +151,7 @@ export default function ClientMapFeedPage() {
     const newMarkers = filteredShops
       .filter((s) => s.latitude != null && s.longitude != null)
       .map((s) => {
-        const bucket = mapPinBucket(s.status);
+        const bucket = mapPinBucket(s.status, s.purchase_order_id ? poById.get(s.purchase_order_id)?.fulfillment_type : undefined, s.purchase_order_id ? poById.get(s.purchase_order_id)?.delivery_receipt_required === true : false);
         const position = { lat: s.latitude as number, lng: s.longitude as number };
         bounds.extend(position);
         const marker = new window.google.maps.Marker({
@@ -283,7 +283,7 @@ export default function ClientMapFeedPage() {
                   )}
                 </div>
 
-                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium mb-3`} style={{ backgroundColor: `${MAP_PIN_COLORS[mapPinBucket(selectedShop.status)]}1a`, color: MAP_PIN_COLORS[mapPinBucket(selectedShop.status)] }}>
+                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium mb-3`} style={{ backgroundColor: `${MAP_PIN_COLORS[mapPinBucket(selectedShop.status, selectedPo?.fulfillment_type, selectedPo?.delivery_receipt_required === true)]}1a`, color: MAP_PIN_COLORS[mapPinBucket(selectedShop.status, selectedPo?.fulfillment_type, selectedPo?.delivery_receipt_required === true)] }}>
                   {STATUS_LABELS[selectedShop.status] || selectedShop.status}
                 </span>
 

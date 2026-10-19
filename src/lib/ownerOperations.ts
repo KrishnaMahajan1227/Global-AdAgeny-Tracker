@@ -27,7 +27,7 @@ export function stageMatches(bucket: StageBucket, filter: OwnerStageFilter): boo
 export function statusesForStage(filter: OwnerStageFilter, fulfillment: string | null | undefined, requirements: StageRequirements[] = []): string[] {
   return shopStatusValues.filter(status => stageMatches(shopStage(fulfillment, status, requirements), filter));
 }
-export function describeOrderNextStep(stages: Record<StageBucket,number>, awaitingAcceptance = false): {label:string;stage:OwnerStageFilter;kind:'attention'|'progress'|'done'} {
+export function describeOrderNextStep(stages: Record<StageBucket,number>, awaitingAcceptance = false, fulfillmentType?: string | null, receiptRequired = false): {label:string;stage:OwnerStageFilter;kind:'attention'|'progress'|'done'} {
   if (awaitingAcceptance) return {label:'Accept / decline assignment',stage:'field',kind:'attention'};
   if (stages.review) return {label:`${stages.review} installation review pending`,stage:'review',kind:'attention'};
   if (stages.survey) return {label:`${stages.survey} survey / approval pending`,stage:'survey',kind:'attention'};
@@ -35,7 +35,7 @@ export function describeOrderNextStep(stages: Record<StageBucket,number>, awaiti
   if (stages.design) return {label:`${stages.design} in design`,stage:'design',kind:'progress'};
   if (stages.production) return {label:`${stages.production} in production`,stage:'production',kind:'progress'};
   if (stages.installation) return {label:`${stages.installation} installing`,stage:'installation',kind:'progress'};
-  if (stages.dispatch) return {label:`${stages.dispatch} dispatched / awaiting installation`,stage:'dispatch',kind:'progress'};
+  if (stages.dispatch) return {label: fulfillmentType === 'supply_only' ? `${stages.dispatch} dispatched${receiptRequired ? ' / awaiting delivery receipt' : ''}` : `${stages.dispatch} dispatched / awaiting installation`,stage:'dispatch',kind:receiptRequired && fulfillmentType === 'supply_only' ? 'attention' : 'progress'};
   if (stages.complete) return {label:'All recorded sites delivered',stage:'complete',kind:'done'};
   return {label:'No linked site stages — check scope',stage:'field',kind:'attention'};
 }

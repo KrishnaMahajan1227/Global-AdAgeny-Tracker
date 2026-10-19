@@ -5,6 +5,7 @@ import { useAuth } from '@/lib/auth';
 import { Card, StatusBadge, EmptyState, PageHeader, Modal, Textarea, Select } from '@/components/ui';
 import { logAudit, createNotification } from '@/lib/helpers';
 import { ItemLevelReviewPanel } from '@/components/ItemLevelReviewPanel';
+import { CompanyApprovalHandoff } from '@/components/CompanyApprovalHandoff';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { WorkItem, SurveyPhoto, BoardMarking, DesignVersion, DesignVersionItem, Shop, Organization } from '@/lib/types';
 import { numberMarkingsByPhoto } from '@/lib/markingUtils';
@@ -18,7 +19,8 @@ import {
   Presentation, Calendar, Hash, Clock, Eye, PackageCheck, LayoutList, Loader2, Filter, ArrowUpDown, AlertTriangle, Send, Camera,
   Folder, FolderTree,
 } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
+import { validWorkOrderId } from '@/lib/operationalNavigation';
 
 // Board (work_item) statuses that mean "the survey side of this board isn't
 // even approved yet" — nothing for a designer to do until it clears that gate.
@@ -236,38 +238,24 @@ async function exportShopDesignReport(row: DesignTaskRow, detailData: ShopDesign
 // same sequence whether it's done for one shop from the modal or for
 // several at once from the bulk toolbar.
 async function sendDesignTaskToProduction(row: DesignTaskRow, assignedTo: string) {
-  const { error: taskError } = await supabase.from('design_tasks').update({ status: 'ready_for_production' }).eq('id', row.design_task_id).select('id');
-  if (taskError) throw new Error(`Could not update design task: ${taskError.message}`);
-
-  const { data: existingOrder, error: existingOrderError } = await supabase
-    .from('production_orders')
-    .select('id')
-    .eq('shop_id', row.shop_id)
-    .maybeSingle();
-  if (existingOrderError) throw new Error(`Could not check for existing production order: ${existingOrderError.message}`);
-  if (!existingOrder) {
-    const { error: orderInsertError } = await supabase.from('production_orders').insert({
-      organization_id: row.organization_id,
-      shop_id: row.shop_id,
-      design_task_id: row.design_task_id,
-      status: 'pending',
-      assigned_to: assignedTo,
-    });
-    if (orderInsertError) throw new Error(`Could not create production order: ${orderInsertError.message}`);
-  } else {
-    const { error: orderUpdateError } = await supabase.from('production_orders').update({ assigned_to: assignedTo }).eq('id', existingOrder.id).select('id');
-    if (orderUpdateError) throw new Error(`Could not assign production order: ${orderUpdateError.message}`);
+  if (!assignedTo) throw new Error('Select a production team member first.');
+  // One atomic, audited operation; no partial design/order/shop state on network failure.
+  // Retry is safe: the database returns the existing production order.
+  const { error } = await supabase.rpc('phase3_send_to_production', {
+    p_design_task_id: row.design_task_id,
+    p_assignee_id: assignedTo,
+  });
+  if (error) {
+    if (/could not find the function|schema cache/i.test(error.message)) {
+      throw new Error('Phase 3 database migration (0099) is not applied. Ask the agency administrator to deploy it before sending production tasks.');
+    }
+    throw new Error(`Production handoff failed: ${error.message}`);
   }
-  await createNotification(assignedTo, 'New Production Order', `A production order for ${row.shop_name} has been assigned to you`, 'info', '/production');
-  const { error: shopError } = await supabase.from('shops').update({ status: 'production_pending' }).eq('id', row.shop_id).select('id');
-  if (shopError) throw new Error(`Could not update shop status: ${shopError.message}`);
-  const { error: workItemsError } = await supabase.from('work_items').update({ status: 'design_approved' }).eq('shop_id', row.shop_id).select('id');
-  if (workItemsError) throw new Error(`Could not update work items: ${workItemsError.message}`);
-
-  await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, 'ready_for_production', `Design task status changed to ready_for_production for ${row.shop_name}`);
 }
 
 export default function DesignerPage() {
+  const [routeParams, setRouteParams] = useSearchParams();
+  const linkedPoId = validWorkOrderId(routeParams.get('po'));
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
@@ -286,13 +274,13 @@ export default function DesignerPage() {
     enabled: !!orgId,
   });
 
-  const [activeTab, setActiveTab] = useState('all');
+  const [activeTab, setActiveTab] = useState(isDesigner ? 'pending' : 'all');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   // Order-type filter — owner/admin only. A designer must never see PO
   // context at all (not the badge, not this filter), so it stays gated
   // behind `!isDesigner` everywhere it's rendered below.
-  const [typeFilter, setTypeFilter] = useState<'all' | 'survey_install' | 'supply_only' | 'custom' | 'no_po'>('all');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'survey_install' | 'production_install' | 'supply_only' | 'custom' | 'no_po'>('all');
   // Board-progress filter — available to BOTH roles (unlike order type,
   // this has nothing to do with PO/financial context, so a designer gets
   // it too): how far along are a shop's boards, independent of the
@@ -307,9 +295,13 @@ export default function DesignerPage() {
   // billing-flavoured in a way a folder label isn't.)
   const [clientFilter, setClientFilter] = useState('');
   const [campaignFilter, setCampaignFilter] = useState('');
-  const [poFilter, setPoFilter] = useState('');
+  const [poFilter, setPoFilter] = useState(linkedPoId);
   const [zoneFilter, setZoneFilter] = useState('');
-  const [browsingList, setBrowsingList] = useState(false);
+  const [browsingList, setBrowsingList] = useState(!!linkedPoId || isDesigner);
+  useEffect(() => {
+    setPoFilter(linkedPoId);
+    if (linkedPoId) { setClientFilter(''); setCampaignFilter(''); setZoneFilter(''); setBrowsingList(true); }
+  }, [linkedPoId]);
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
   const [page, setPage] = useState(0);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
@@ -374,6 +366,11 @@ export default function DesignerPage() {
     },
     enabled: !!orgId && (!!productionTask || !!bulkProductionRows),
   });
+
+  // Zero-click default only when there is exactly one active printing user.
+  // With two or more, the owner must explicitly decide the assignee.
+  const effectiveProductionUserId = productionUserId || (productionPeople?.length === 1 ? productionPeople[0].id : '');
+  const effectiveBulkProductionUserId = bulkProductionUserId || (productionPeople?.length === 1 ? productionPeople[0].id : '');
 
   // The list itself — server-paginated, server-filtered (status tab +
   // search), sourced entirely from the pre-aggregated `v_design_task_list`
@@ -609,7 +606,7 @@ export default function DesignerPage() {
   });
 
   useRealtimeInvalidate(
-    ['design_tasks', 'design_versions', 'design_version_items', 'work_items', 'board_markings'],
+    ['design_tasks', 'design_versions', 'design_version_items', 'work_items', 'board_markings', 'production_orders', 'company_approval_handoffs'],
     orgId,
     [
       ['design-task-list', orgId],
@@ -1105,6 +1102,10 @@ export default function DesignerPage() {
 
   return (
     <div>
+      {linkedPoId && <div role="status" className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+        <span>Showing Design tasks for the selected Work Order</span>
+        <button type="button" className="font-semibold text-blue-700 underline" onClick={() => setRouteParams(previous => { const next = new URLSearchParams(previous); next.delete('po'); return next; }, { replace: true })}>Show all Design work</button>
+      </div>}
       <PageHeader
         title="Design Studio"
         subtitle={isDesigner ? "Your assigned shops — what to design, what's pending, what's done" : 'Manage design tasks for approved shops'}
@@ -1165,8 +1166,9 @@ export default function DesignerPage() {
                 className="pl-8 pr-7 py-1.5 border border-slate-200 rounded-lg text-sm text-slate-600 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none appearance-none"
               >
                 <option value="all">All types</option>
-                <option value="survey_install">Survey & Install</option>
-                <option value="supply_only">Supply Only</option>
+                <option value="survey_install">Survey & Installation</option>
+                <option value="production_install">Production & Installation</option>
+                <option value="supply_only">Production & Delivery</option>
                 <option value="custom">Custom PO</option>
                 <option value="no_po">No PO (direct)</option>
               </select>
@@ -1940,6 +1942,8 @@ export default function DesignerPage() {
               })()}
             </div>
 
+            {reviewTask.status === 'in_review' && <CompanyApprovalHandoff stage="design" refId={reviewTask.design_task_id} shopId={reviewTask.shop_id} />}
+
             {reviewTask.status === 'in_review' && (
               <ItemLevelReviewPanel stage="design" shopId={reviewTask.shop_id} refId={reviewTask.design_task_id} assignedTo={reviewTask.designer_id || undefined}
                 onDone={() => { setReviewTask(null); queryClient.invalidateQueries(); }} />
@@ -2100,7 +2104,7 @@ export default function DesignerPage() {
           )}
           <Select
             label="Assign Production Person"
-            value={productionUserId}
+            value={effectiveProductionUserId}
             onChange={setProductionUserId}
             options={[
               { value: '', label: 'Select a person...' },
@@ -2115,8 +2119,8 @@ export default function DesignerPage() {
             <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(updateStatusMutation.error as Error).message}</p>
           )}
           <button
-            onClick={() => productionTask && updateStatusMutation.mutate({ row: productionTask, status: 'ready_for_production', assignedTo: productionUserId })}
-            disabled={updateStatusMutation.isPending || !productionUserId}
+            onClick={() => productionTask && updateStatusMutation.mutate({ row: productionTask, status: 'ready_for_production', assignedTo: effectiveProductionUserId })}
+            disabled={updateStatusMutation.isPending || !effectiveProductionUserId}
             className="w-full bg-teal-600 hover:bg-teal-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
           >
             {updateStatusMutation.isPending ? 'Sending...' : 'Confirm & Send to Production'}
@@ -2138,7 +2142,7 @@ export default function DesignerPage() {
           </div>
           <Select
             label="Assign Production Person"
-            value={bulkProductionUserId}
+            value={effectiveBulkProductionUserId}
             onChange={setBulkProductionUserId}
             options={[
               { value: '', label: 'Select a person...' },
@@ -2153,8 +2157,8 @@ export default function DesignerPage() {
             <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(bulkSendToProductionMutation.error as Error).message}</p>
           )}
           <button
-            onClick={() => bulkProductionRows && bulkSendToProductionMutation.mutate({ selected: bulkProductionRows, assignedTo: bulkProductionUserId })}
-            disabled={bulkSendToProductionMutation.isPending || !bulkProductionUserId}
+            onClick={() => bulkProductionRows && bulkSendToProductionMutation.mutate({ selected: bulkProductionRows, assignedTo: effectiveBulkProductionUserId })}
+            disabled={bulkSendToProductionMutation.isPending || !effectiveBulkProductionUserId}
             className="w-full bg-teal-600 hover:bg-teal-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
           >
             {bulkSendToProductionMutation.isPending ? 'Sending...' : `Confirm & Send ${bulkProductionRows?.length || ''} to Production`}

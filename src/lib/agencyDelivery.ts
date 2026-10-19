@@ -47,7 +47,7 @@ export function deliveryPipeline(shops: DeliveryShop[], orders: DeliveryOrder[] 
   for (const shop of shops) {
     const order = byOrder.get(shop.purchase_order_id || '');
     const excludedOrder = order?.status === 'cancelled' || order?.assignment_status === 'rejected';
-    const stage = excludedOrder ? 'excluded' : shopStage(order?.fulfillment_type, shop.status, order?.po_line_items || []);
+    const stage = excludedOrder ? 'excluded' : shopStage(order?.fulfillment_type, shop.status, order?.po_line_items || [], order?.delivery_receipt_required === true);
     counts[stage]++;
   }
   return counts;

@@ -15,7 +15,8 @@ import {
   Factory, CheckCircle, LayoutList, PackageCheck, Send, Truck, LayoutGrid, PackageOpen,
   CircleDot, CircleCheck, Info, Users, CheckSquare, Square, Folder, FolderTree,
 } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
+import { validWorkOrderId } from '@/lib/operationalNavigation';
 
 // Work-item statuses relevant to the Production screen at all.
 const PRODUCTION_ELIGIBLE_STATUSES = ['approved', 'design_approved', 'in_production', 'produced', 'production_done'];
@@ -202,6 +203,8 @@ function enrichBoards(detail: ProductionOrderDetail): EnrichedBoard[] {
 }
 
 export default function ProductionPage() {
+  const [routeParams, setRouteParams] = useSearchParams();
+  const linkedPoId = validWorkOrderId(routeParams.get('po'));
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
@@ -216,12 +219,12 @@ export default function ProductionPage() {
   // per-board work list), and Vehicle Load (Production hands off finished
   // boards to an installer's vehicle). One click switches between them;
   // nothing here is a separate route, so there's no navigation dead-end.
-  const [mainView, setMainView] = useState<'overview' | 'production' | 'vehicle_load'>('overview');
+  const [mainView, setMainView] = useState<'overview' | 'production' | 'vehicle_load'>(linkedPoId || isProduction ? 'production' : 'overview');
   const [activeTab, setActiveTab] = useState('all');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [zoneFilter, setZoneFilter] = useState('');
-  const [poFilter, setPoFilter] = useState('');
+  const [poFilter, setPoFilter] = useState(linkedPoId);
   const [campaignFilter, setCampaignFilter] = useState('');
   const [clientFilter, setClientFilter] = useState('');
   const [workTypeFilter, setWorkTypeFilter] = useState('');
@@ -238,11 +241,15 @@ export default function ProductionPage() {
   // Campaign/Work Order/Zone has been chosen so far". Becomes true either
   // by picking all the way down to a Zone, or by tapping "View All Here"
   // at any level to skip the rest of the folder tree.
-  const [browsingList, setBrowsingList] = useState(false);
+  const [browsingList, setBrowsingList] = useState(!!linkedPoId || isProduction);
   // Mobile: the sidebar (View switcher + Status + Filters) collapses into
   // this panel below the lg breakpoint, opened via a "Filters" button
   // next to search — so a production floor tablet/phone isn't
   // permanently missing a third of its screen to a sidebar.
+  useEffect(() => {
+    setPoFilter(linkedPoId);
+    if (linkedPoId) { setClientFilter(''); setCampaignFilter(''); setZoneFilter(''); setBrowsingList(true); setMainView('production'); }
+  }, [linkedPoId]);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
   const [editOrder, setEditOrder] = useState<ProductionOrderRow | null>(null);
@@ -314,6 +321,11 @@ export default function ProductionPage() {
     },
     enabled: !!orgId && ((!!editOrder && isCompleting && !skipsInstaller) || !!bulkCompleteOrders),
   });
+
+  // Reuse the only available installer automatically, avoiding a redundant click.
+  // Multiple active installers still require an explicit choice.
+  const effectiveInstallerId = installerId || (orgInstallers?.length === 1 ? orgInstallers[0].id : '');
+  const effectiveBulkInstallerId = bulkInstallerId || (orgInstallers?.length === 1 ? orgInstallers[0].id : '');
 
   const tab = TABS.find((t) => t.key === activeTab)!;
   const {
@@ -745,66 +757,34 @@ export default function ProductionPage() {
   // work-item status flips, plus (unless Supply Only) assigning/notifying
   // the installer — shared by the single-row modal and bulk complete so
   // both paths can never drift apart.
-  async function completeProductionOrder(row: ProductionOrderRow, installer: string) {
-    const { error: orderError } = await supabase.from('production_orders').update({ status: 'completed', notes: form.notes || null }).eq('id', row.production_order_id).select('id');
-    if (orderError) throw new Error(`Could not update production order: ${orderError.message}`);
-    const { error: shopError } = await supabase.from('shops').update({ status: 'production_done' }).eq('id', row.shop_id).select('id');
-    if (shopError) throw new Error(`Could not update shop status: ${shopError.message}`);
-    const { error: itemsError } = await supabase
-      .from('work_items').update({ status: 'production_done' }).eq('shop_id', row.shop_id)
-      .in('status', ['approved', 'design_approved', 'in_production', 'produced']).select('id');
-    if (itemsError) throw new Error(`Could not update board status: ${itemsError.message}`);
-
-    await logAudit('production_orders', row.production_order_id, 'update', 'status', row.status, 'completed', `Production completed for ${row.shop_name}`);
-
-    if (row.fulfillment_type === 'supply_only') {
-      const { error: destSyncError } = await supabase.from('supply_destinations').update({ status: 'packed' }).eq('shop_id', row.shop_id);
-      if (destSyncError) console.error('[ProductionPage] could not sync supply_destinations on packing (non-fatal):', destSyncError.message);
-      return;
-    }
-
-    // §3.4 "custom" scope — this PO line item never asked for
-    // installation (design+production only, or re-servicing boards
-    // already on-site). Skip installer assignment entirely and mark the
-    // shop/boards straight through to 'installed' — the same terminal
-    // status a real install would reach, so Billing (which already
-    // treats 'installed' as billable) needs no separate handling.
-    if (row.requires_installation_all_false) {
-      const { error: shopInstalledError } = await supabase.from('shops').update({ status: 'installed' }).eq('id', row.shop_id).select('id');
-      if (shopInstalledError) throw new Error(`Could not finalize shop status: ${shopInstalledError.message}`);
-      const { error: itemsInstalledError } = await supabase
-        .from('work_items').update({ status: 'installed' }).eq('shop_id', row.shop_id)
-        .eq('status', 'production_done').select('id');
-      if (itemsInstalledError) throw new Error(`Could not finalize board status: ${itemsInstalledError.message}`);
-      await logAudit('shops', row.shop_id, 'update', 'status', 'production_done', 'installed', `Installation not required for ${row.shop_name} (PO line item scope) — auto-completed after production`);
-      return;
-    }
-
-    const { data: existingAssignments } = await supabase.from('shop_assignments').select('user_id, status').eq('shop_id', row.shop_id).eq('role', 'installer');
-    const alreadyAssigned = (existingAssignments || []).some((a) => a.user_id === installer && a.status !== 'declined');
-    if (!alreadyAssigned) {
-      const { error: assignError } = await supabase.from('shop_assignments').insert({
-        organization_id: row.organization_id, shop_id: row.shop_id, user_id: installer, role: 'installer', status: 'assigned',
-      });
-      if (assignError) throw new Error(`Could not assign installer: ${assignError.message}`);
-    }
-    const notifyIds = new Set([installer, ...(existingAssignments || []).filter((a) => a.status !== 'declined').map((a) => a.user_id)]);
-    for (const userId of notifyIds) {
-      await createNotification(userId, 'Ready for Installation', `Production completed for ${row.shop_name}`, 'info', '/installation');
+  async function completeProductionOrder(row: ProductionOrderRow, installer: string, notes = '', forceComplete = false) {
+    // Atomic production -> packing / installer handoff. The server enforces
+    // the team role, recorded quantities/materials, and idempotent assignment.
+    const { error } = await supabase.rpc('phase3_complete_production', {
+      p_production_order_id: row.production_order_id,
+      p_installer_id: installer || null,
+      p_notes: notes.trim() || null,
+      p_force_complete: forceComplete,
+    });
+    if (error) {
+      if (/could not find the function|schema cache/i.test(error.message)) {
+        throw new Error('Phase 3 database migration (0099) is not applied. Deploy it before completing production tasks.');
+      }
+      throw new Error(`Production completion failed: ${error.message}`);
     }
   }
 
   const updateMutation = useMutation({
     mutationFn: async () => {
       if (!editOrder) return;
-      if (form.status === 'completed' && !installerId && !skipsInstaller) {
+      if (form.status === 'completed' && !effectiveInstallerId && !skipsInstaller) {
         throw new Error('Pick an installer to assign before marking production completed.');
       }
       if (form.status === 'completed' && editOrder.pending_boards > 0 && !form.forceComplete) {
         throw new Error(`${editOrder.pending_boards} board(s) on this shop still have no production logged. Log them above, or tick "Mark completed anyway" to override.`);
       }
       if (form.status === 'completed') {
-        await completeProductionOrder(editOrder, installerId);
+        await completeProductionOrder(editOrder, effectiveInstallerId, form.notes || '', Boolean(form.forceComplete));
         return;
       }
       const { error: orderError } = await supabase.from('production_orders').update({ status: form.status, notes: form.notes || null }).eq('id', editOrder.production_order_id).select('id');
@@ -864,7 +844,7 @@ export default function ProductionPage() {
       const failures: string[] = [];
       for (const row of eligible) {
         try {
-          await completeProductionOrder(row, (row.fulfillment_type === 'supply_only' || row.requires_installation_all_false) ? '' : installer);
+          await completeProductionOrder(row, (row.fulfillment_type === 'supply_only' || row.requires_installation_all_false) ? '' : installer, '', false);
         } catch (err) {
           failures.push(`${row.shop_name}: ${(err as Error).message}`);
         }
@@ -905,6 +885,7 @@ export default function ProductionPage() {
 
   return (
     <div>
+      {linkedPoId && <div role="status" className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900"><span>Production tasks filtered to the selected Work Order</span><button type="button" className="font-semibold text-blue-700 underline" onClick={() => setRouteParams(previous => { const next = new URLSearchParams(previous); next.delete('po'); return next; }, { replace: true })}>Show all Production work</button></div>}
       <PageHeader title="Production Studio" subtitle="What's ready, what's in production, and what's gone out — per board, per shop" />
 
       {/* Three screens, one flow — horizontal tabs, not a second sidebar.
@@ -1007,8 +988,9 @@ export default function ProductionPage() {
           <div className="space-y-4">
             <LabeledSelect label="Fulfillment" value={fulfillmentFilter} onChange={setFulfillmentFilter}>
               <option value="">All types</option>
-              <option value="survey_install">Survey + Install</option>
-              <option value="supply_only">Supply Only</option>
+              <option value="survey_install">Survey & Installation</option>
+              <option value="production_install">Production & Installation</option>
+              <option value="supply_only">Production & Delivery</option>
             </LabeledSelect>
             <LabeledSelect label="Work Type" value={workTypeFilter} onChange={setWorkTypeFilter}>
               <option value="">All work types</option>
@@ -1590,7 +1572,7 @@ export default function ProductionPage() {
                 <>
                   <Select
                     label="Assign Installer"
-                    value={installerId}
+                    value={effectiveInstallerId}
                     onChange={setInstallerId}
                     options={[{ value: '', label: 'Select an installer...' }, ...(orgInstallers || []).map((i) => ({ value: i.id, label: i.full_name }))]}
                     required
@@ -1606,7 +1588,7 @@ export default function ProductionPage() {
           {updateMutation.isError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(updateMutation.error as Error).message}</p>}
           <button
             onClick={() => updateMutation.mutate()}
-            disabled={updateMutation.isPending || (isCompleting && !installerId && !skipsInstaller)}
+            disabled={updateMutation.isPending || (isCompleting && !effectiveInstallerId && !skipsInstaller)}
             className="w-full bg-blue-600 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
           >
             {updateMutation.isPending ? 'Updating...' : 'Update'}
@@ -1671,7 +1653,7 @@ export default function ProductionPage() {
                   <>
                     <Select
                       label="Assign Installer (applied to all)"
-                      value={bulkInstallerId}
+                      value={effectiveBulkInstallerId}
                       onChange={setBulkInstallerId}
                       options={[{ value: '', label: 'Select an installer...' }, ...(orgInstallers || []).map((i) => ({ value: i.id, label: i.full_name }))]}
                       required
@@ -1685,8 +1667,8 @@ export default function ProductionPage() {
                 )}
                 {bulkCompleteMutation.isError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(bulkCompleteMutation.error as Error).message}</p>}
                 <button
-                  onClick={() => bulkCompleteOrders && bulkCompleteMutation.mutate({ selected: bulkCompleteOrders, installer: bulkInstallerId })}
-                  disabled={bulkCompleteMutation.isPending || eligible.length === 0 || (anyNeedsInstaller && !bulkInstallerId)}
+                  onClick={() => bulkCompleteOrders && bulkCompleteMutation.mutate({ selected: bulkCompleteOrders, installer: effectiveBulkInstallerId })}
+                  disabled={bulkCompleteMutation.isPending || eligible.length === 0 || (anyNeedsInstaller && !effectiveBulkInstallerId)}
                   className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
                 >
                   {bulkCompleteMutation.isPending ? 'Completing...' : `Complete ${eligible.length} Order(s)`}

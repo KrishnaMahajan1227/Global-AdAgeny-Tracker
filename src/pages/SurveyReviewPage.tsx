@@ -10,9 +10,11 @@ import { SurveyReviewGallery } from '@/components/SurveyReviewGallery';
 
 
 import { CheckCircle2, FileText, ChevronRight, ChevronLeft, ChevronsLeft, ChevronsRight, SlidersHorizontal, Clock, Eye } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
+import { validWorkOrderId } from '@/lib/operationalNavigation';
 
 import { reviewApply, refreshReviewViews } from '@/lib/reviewApi';
+import { CompanyApprovalHandoff } from '@/components/CompanyApprovalHandoff';
 
 // Debounce a fast-changing value (typing in the search box) so we don't
 // fire a network request on every keystroke — same pattern Installation
@@ -54,6 +56,8 @@ async function approveSurvey(survey: any, designerId: string) {
 }
 
 export default function SurveyReviewPage() {
+  const [routeParams, setRouteParams] = useSearchParams();
+  const linkedPoId = validWorkOrderId(routeParams.get('po'));
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
@@ -63,7 +67,8 @@ export default function SurveyReviewPage() {
   const debouncedSearch = useDebouncedValue(search.trim(), 350);
   const [surveyorFilter, setSurveyorFilter] = useState('');
   const [clientFilter, setClientFilter] = useState('');
-  const [workOrderFilter, setWorkOrderFilter] = useState('');
+  const [workOrderFilter, setWorkOrderFilter] = useState(linkedPoId);
+  useEffect(() => { setWorkOrderFilter(linkedPoId); }, [linkedPoId]);
   const [cityFilter, setCityFilter] = useState('');
   const [stateFilter, setStateFilter] = useState('');
   const [moreFilters, setMoreFilters] = useState(false);
@@ -263,15 +268,18 @@ export default function SurveyReviewPage() {
     onSuccess: () => { invalidateAll(); closeDrawer(); },
   });
 
+  // One active designer is a deterministic default; multiple designers require an explicit selection.
+  const effectiveBulkDesignerId = bulkDesignerId || (designers?.length === 1 ? designers[0].id : '');
+
   const bulkMutation = useMutation({
     mutationFn: async () => {
       const targets = rows.filter(r => selectedIds.has(r.id));
       if (!targets.length) throw new Error('Select at least one survey.');
-      if (!bulkDesignerId) throw new Error('Choose a designer before approving selected surveys.');
+      if (!effectiveBulkDesignerId) throw new Error('Choose a designer before approving selected surveys.');
       const completed: string[] = [];
       for (const survey of targets) {
         try {
-          await approveSurvey(survey, bulkDesignerId);
+          await approveSurvey(survey, effectiveBulkDesignerId);
           completed.push(survey.id);
         } catch (error) {
           setSelectedIds(prev => new Set([...prev].filter(id => !completed.includes(id))));
@@ -302,12 +310,13 @@ export default function SurveyReviewPage() {
   // Confirm is locked until a decision is actually made, and — for
   // reject/correction — until there's a note, since "declined, no reason
   // given" leaves the surveyor with nothing to act on.
-  const canConfirmBulk = !!bulkDesignerId && selectedSurveys.length > 0;
+  const canConfirmBulk = !!effectiveBulkDesignerId && selectedSurveys.length > 0;
 
   return (
     <div>
       <div className="flex items-center justify-between gap-3 mb-2"><h1 className="text-lg font-semibold text-slate-900">Survey Review</h1><span className="text-xs text-slate-500">{statusCounts?.pending ?? '…'} pending</span></div>
 
+      {linkedPoId && <div role="status" className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900"><span>Survey review filtered to the selected Work Order</span><button type="button" className="font-semibold text-blue-700 underline" onClick={() => setRouteParams(previous => { const next = new URLSearchParams(previous); next.delete('po'); return next; }, { replace: true })}>Show all surveys</button></div>}
       {/* Status tabs */}
       <div className="flex items-center gap-1.5 mb-4 border-b border-slate-200">
         {TABS.map((t) => (
@@ -350,7 +359,7 @@ export default function SurveyReviewPage() {
             <select value={workOrderFilter} onChange={e => setWorkOrderFilter(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm"><option value="">All work orders</option>{availableFilters?.orders.filter(o => !clientFilter || o.client_id === clientFilter).map(o => <option key={o.id} value={o.id}>{o.name || o.po_number}</option>)}</select>
           </label>
           <button type="button" onClick={() => setMoreFilters(p => !p)} aria-expanded={moreFilters} className="mb-0.5 inline-flex items-center gap-1 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"><SlidersHorizontal className="h-3.5 w-3.5" />More filters{(cityFilter || stateFilter || surveyorFilter) ? ' •' : ''}</button>
-          {hasActiveFilters && <button type="button" onClick={() => { setSearch(''); setClientFilter(''); setWorkOrderFilter(''); setCityFilter(''); setStateFilter(''); setSurveyorFilter(''); }} className="mb-0.5 px-2 py-1.5 text-xs text-blue-700">Clear</button>}
+          {hasActiveFilters && <button type="button" onClick={() => { setSearch(''); setClientFilter(''); setWorkOrderFilter(''); setCityFilter(''); setStateFilter(''); setSurveyorFilter(''); if (linkedPoId) setRouteParams(previous => { const next = new URLSearchParams(previous); next.delete('po'); return next; }, { replace: true }); }} className="mb-0.5 px-2 py-1.5 text-xs text-blue-700">Clear</button>}
         </div>
         {moreFilters && <div className="mt-2 grid grid-cols-2 gap-2 border-t border-slate-100 pt-2 sm:grid-cols-4">
           <label className="text-[11px] text-slate-600">City<select value={cityFilter} onChange={e => setCityFilter(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="">All cities</option>{availableFilters?.cities.map(c => <option key={c} value={c}>{c}</option>)}</select></label>
@@ -491,6 +500,7 @@ export default function SurveyReviewPage() {
             {selectedSurvey.submitted_at && <span>· {new Date(selectedSurvey.submitted_at).toLocaleString('en-IN')}</span>}
           </div>
           {selectedSurvey.notes && <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">{selectedSurvey.notes}</p>}
+          <CompanyApprovalHandoff stage="survey" refId={selectedSurvey.id} shopId={selectedSurvey.shop_id} />
           <SurveyReviewGallery surveyId={selectedSurvey.id} shopId={selectedSurvey.shop_id} readOnly={!isPendingSurvey} onDone={() => { invalidateAll(); closeDrawer(); }} />
           {isPendingSurvey ? <details className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
             <summary className="cursor-pointer font-medium">Final rejection (entire survey)</summary>
@@ -516,7 +526,7 @@ export default function SurveyReviewPage() {
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
             <label className="min-w-0 flex-1 text-xs text-slate-700">Assign designer to selected shops
-              <select value={bulkDesignerId} onChange={e => setBulkDesignerId(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs"><option value="">Select designer</option>{(designers || []).map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}</select>
+              <select value={effectiveBulkDesignerId} onChange={e => setBulkDesignerId(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs"><option value="">Select designer</option>{(designers || []).map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}</select>
             </label>
             <button type="button" disabled={!canConfirmBulk || bulkMutation.isPending} onClick={() => bulkMutation.mutate()} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">{bulkMutation.isPending ? 'Approving…' : `Approve ${selectedSurveys.length} shops`}</button>
           </div>

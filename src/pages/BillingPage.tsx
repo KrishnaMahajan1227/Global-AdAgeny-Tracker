@@ -11,7 +11,7 @@ import { computeUtilization, formatRupees, UtilizationStage, defaultUtilizationS
 import { Plus, FileText, Download, Trash2, ChevronRight, ShoppingCart, AlertTriangle, Pencil, Info, Search, MoreHorizontal, RefreshCw } from 'lucide-react';
 import type { Organization, Client, Invoice, InvoiceItem, PurchaseOrder, POLineItemUtilization, Project } from '@/lib/types';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
-import { buildPendingAllocations, consolidateInvoiceLines, isFinalizedShop, billingStageLabel, type BilledRow, type CompletedWorkRow, type RateRow } from '@/lib/poBilling';
+import { buildPendingAllocations, consolidateInvoiceLines, isFinalizedShop, billingStageLabel, validateInvoiceAllocationSelection, type BilledRow, type CompletedWorkRow, type RateRow } from '@/lib/poBilling';
 import { getShopCompletion } from '@/lib/workCompletion';
 import { fetchOrderInvoiceHistory } from '@/lib/poBillingHistory';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
@@ -194,6 +194,7 @@ export default function BillingPage() {
       const mainShops = await fetchAllPages<any>((a,b) => supabase.from('shops')
         .select('id,name,status,client_id,purchase_order_id')
         .eq('organization_id', orgId!).eq('purchase_order_id', form.purchase_order_id)
+        .eq('client_id', selectedPO!.client_id)
         .order('id').range(a,b));
       // Some backfilled/imported work items were linked to the PO line but
       // the shop header was never assigned purchase_order_id. Find those
@@ -220,17 +221,11 @@ export default function BillingPage() {
     },
     enabled: !!orgId && !!form.purchase_order_id && !!selectedPO && !!poRateData && !editingInvoiceId,
   });
-  const workOrderCompletion = getShopCompletion(completionShopsData ?? EMPTY_SHOPS, selectedPO?.fulfillment_type, poRates);
+  const workOrderCompletion = getShopCompletion(completionShopsData ?? EMPTY_SHOPS, selectedPO?.fulfillment_type, poRates, selectedPO?.delivery_receipt_required === true);
   const completionShops = (completionShopsData ?? EMPTY_SHOPS).filter((shop: any) =>
-    isFinalizedShop(selectedPO?.fulfillment_type, shop.status, poRates));
+    isFinalizedShop(selectedPO?.fulfillment_type, shop.status, poRates, selectedPO?.delivery_receipt_required === true));
   // The shop is an eligibility filter, not a billing unit. Every completed
   // work-item is reconciled against its own historical invoice quantities.
-  const { data: billedWorkData, isLoading: billedWorkLoading, error: billedWorkError } = useQuery({
-    queryKey: ['billing-work-item-history', orgId, form.purchase_order_id, poRateData],
-    queryFn: () => fetchOrderInvoiceHistory(orgId!,form.purchase_order_id,poRates.map(row => row.po_line_item_id)),
-    enabled: !!orgId && !!form.purchase_order_id && !!poRateData && !editingInvoiceId,
-  });
-  const billedWork = billedWorkData ?? EMPTY_BILLED_WORK;
   const { data: completedWorkItemsData, isLoading: completedItemsLoading, error: completedItemsError } = useQuery({
     queryKey: ['billing-completed-work-items', orgId, form.purchase_order_id],
     queryFn: async () => {
@@ -244,7 +239,8 @@ export default function BillingPage() {
           .order('id').range(a,b));
         rows.push(...batch.filter(item => {
           const shop = completionShops.find((x:any)=>x.id === item.shop_id);
-          return !!shop?.purchase_order_id || !!poRates.find(r => r.po_line_item_id === item.po_line_item_id);
+          if (item.po_line_item_id) return poRates.some(rate => rate.po_line_item_id === item.po_line_item_id);
+          return shop?.purchase_order_id === form.purchase_order_id;
         }).map(item => ({ ...item, shop_status: statuses.get(item.shop_id) as string | undefined })));
       }
       return rows;
@@ -252,16 +248,26 @@ export default function BillingPage() {
     enabled: !!orgId && !!form.purchase_order_id && completionShops.length > 0 && !editingInvoiceId,
   });
   const completedWorkItems = completedWorkItemsData ?? EMPTY_COMPLETED_WORK;
+  // Invoice history must cover every work item selected in this Work Order,
+  // not only invoice headers or lines already pointing to its PO.
+  const { data: billedWorkData, isLoading: billedWorkLoading, error: billedWorkError } = useQuery({
+    queryKey: ['billing-work-item-history', orgId, form.purchase_order_id,
+      completedWorkItems.map(item => item.id).join(','), completionShops.map((shop:any) => shop.id).join(',')],
+    queryFn: () => fetchOrderInvoiceHistory(orgId!, form.purchase_order_id,
+      poRates.map(row => row.po_line_item_id), completedWorkItems.map(item => item.id), completionShops.map((shop:any) => shop.id)),
+    enabled: !!orgId && !!form.purchase_order_id && !!poRateData && !completedItemsLoading && !editingInvoiceId,
+  });
+  const billedWork = billedWorkData ?? EMPTY_BILLED_WORK;
   const canSelectShops = !completionShopsLoading && !completedItemsLoading && !billedWorkLoading && !poRatesLoading
     && !completionShopsError && !completedItemsError && !billedWorkError && !poRatesError;
   const calculatedBatch = useMemo(() => buildPendingAllocations(
     completedWorkItems, poRates, billedWork,
-    selectedShopIds, selectedPO?.fulfillment_type, poRates,
-  ), [completedWorkItems, poRateData, billedWork, selectedShopIds, selectedPO?.fulfillment_type]);
+    selectedShopIds, selectedPO?.fulfillment_type, poRates, selectedPO?.delivery_receipt_required === true,
+  ), [completedWorkItems, poRateData, billedWork, selectedShopIds, selectedPO?.fulfillment_type, selectedPO?.delivery_receipt_required]);
   const eligibleShopIds = useMemo(() => new Set(buildPendingAllocations(
     completedWorkItems, poRates, billedWork,
-    completionShops.map((shop: any) => shop.id), selectedPO?.fulfillment_type, poRates,
-  ).allocations.map((row) => row.shopId)), [completedWorkItems, poRateData, billedWork, completionShops, selectedPO?.fulfillment_type]);
+    completionShops.map((shop: any) => shop.id), selectedPO?.fulfillment_type, poRates, selectedPO?.delivery_receipt_required === true,
+  ).allocations.map((row) => row.shopId)), [completedWorkItems, poRateData, billedWork, completionShops, selectedPO?.fulfillment_type, selectedPO?.delivery_receipt_required]);
   const eligibleShops = completionShops.filter((shop: any) => eligibleShopIds.has(shop.id));
   // Final-stage shops with no usable work measurement are not silently billed.
   // Surface them separately so an admin can correct the underlying backfill.
@@ -371,20 +377,27 @@ export default function BillingPage() {
       if (items.some(item => !item.shop_id || !selectedShopIds.includes(item.shop_id))) throw new Error('Every invoice line must belong to a selected completed shop.');
       if (selectedShopIds.some(id => !items.some(item => item.shop_id === id))) throw new Error('Selected scope has no remaining billable work.');
       if (items.some(item => !(item.amount > 0) || !item.description.trim() || !item.po_line_item_id || !item.work_item_id)) throw new Error('A completed Work Order line has an invalid rate, amount or work-item link.');
-      if (items.length !== calculatedBatch.allocations.length || items.some(item => !calculatedBatch.allocations.some(a => a.workItemId === item.work_item_id && a.poLineId === item.po_line_item_id && Math.abs(a.amount - item.amount) < 0.01))) throw new Error('Billable scope changed. Refresh the preview.');
+      const previewCheck = validateInvoiceAllocationSelection(items, calculatedBatch.allocations);
+      if (!previewCheck.valid) throw new Error(previewCheck.reason);
+      // Never rely on an earlier cached PO receipt policy during final
+      // submission: refresh this immutable policy from the server.
+      const { data: freshPO, error: freshPOError } = await supabase.from('purchase_orders')
+        .select('id,client_id,fulfillment_type,delivery_receipt_required')
+        .eq('organization_id', orgId).eq('id', form.purchase_order_id).single();
+      if (freshPOError || !freshPO || freshPO.client_id !== form.client_id ||
+          freshPO.fulfillment_type !== selectedPO.fulfillment_type ||
+          freshPO.delivery_receipt_required !== selectedPO.delivery_receipt_required) {
+        throw new Error('Work Order eligibility has changed. Refresh before creating an invoice.');
+      }
       // Recheck under the authenticated user's organization before writing.
       const { data: latestShops, error: verifyShopsError } = await supabase.from('shops').select('id,status,purchase_order_id,client_id')
         .eq('organization_id', orgId).in('id', selectedShopIds);
       if (verifyShopsError) throw verifyShopsError;
       if ((latestShops || []).length !== selectedShopIds.length || (latestShops || []).some(shop =>
-        shop.client_id !== form.client_id || (shop.purchase_order_id && shop.purchase_order_id !== form.purchase_order_id) || !isFinalizedShop(selectedPO.fulfillment_type, shop.status))) {
+        shop.client_id !== form.client_id || (shop.purchase_order_id && shop.purchase_order_id !== form.purchase_order_id) || !isFinalizedShop(selectedPO.fulfillment_type, shop.status, poRates, selectedPO.delivery_receipt_required === true))) {
         throw new Error('Shop completion changed while preparing the invoice. Refresh the list. No invoice was created.');
       }
       // Revalidate completed quantity and prior invoice lines just before writing.
-      const freshBilled = await fetchAllPages<BilledRow>((a,b) => supabase.from('invoice_items')
-        .select('work_item_id,shop_id,po_line_item_id,quantity,area,rate,amount,invoices!inner(purchase_order_id)')
-        .eq('organization_id', orgId).eq('invoices.purchase_order_id', form.purchase_order_id)
-        .order('id').range(a,b));
       const statuses = new Map<string, string>((latestShops || []).map((shop: any) => [String(shop.id), String(shop.status)] as const));
       const freshWork: CompletedWorkRow[] = [];
       for (let start = 0; start < selectedShopIds.length; start += 100) {
@@ -394,17 +407,23 @@ export default function BillingPage() {
           .order('id').range(a,b));
         freshWork.push(...batch.filter(item => {
           const sh = (latestShops || []).find(shop => shop.id === item.shop_id);
-          return !!sh?.purchase_order_id || !!poRates.find(rate => rate.po_line_item_id === item.po_line_item_id);
+          if (item.po_line_item_id) return poRates.some(rate => rate.po_line_item_id === item.po_line_item_id);
+          return sh?.purchase_order_id === form.purchase_order_id;
         }).map(item => ({ ...item, shop_status: statuses.get(item.shop_id) }))); 
       }
+      // Recheck legacy header, PO-line, item-linked and shop-only invoice
+      // histories immediately before creating this invoice.
+      const freshBilled = await fetchOrderInvoiceHistory(orgId, form.purchase_order_id,
+        poRates.map(row => row.po_line_item_id), freshWork.map(row => row.id), selectedShopIds);
       const freshRateRows = await fetchAllPages<any>((a,b) => supabase.from('po_line_items')
         .select('id,description,uom,rate,hsn_code,work_type_id,budgeted_qty,budgeted_area,requires_survey,requires_design,requires_production,requires_installation')
         .eq('organization_id', orgId).eq('purchase_order_id', form.purchase_order_id)
         .order('id').range(a,b));
       const freshRates: RateRow[] = freshRateRows.map(row => ({ ...row, po_line_item_id: row.id }));
-      const latestBatch = buildPendingAllocations(freshWork, freshRates, freshBilled, selectedShopIds, selectedPO.fulfillment_type);
-      if (latestBatch.issues.length || latestBatch.allocations.length !== items.length || items.some(item => !latestBatch.allocations.some(a => a.workItemId === item.work_item_id && Math.abs(a.amount - item.amount) < 0.01))) {
-        throw new Error('Completed or invoiced Work Order quantities changed. Refresh before billing; no invoice was created.');
+      const latestBatch = buildPendingAllocations(freshWork, freshRates, freshBilled, selectedShopIds, selectedPO.fulfillment_type, freshRates, selectedPO.delivery_receipt_required === true);
+      const latestCheck = validateInvoiceAllocationSelection(items, latestBatch.allocations);
+      if (!latestCheck.valid || latestBatch.issues.length) {
+        throw new Error(latestCheck.reason || 'Work Order measurement or invoice history changed. Refresh before billing; no invoice was created.');
       }
       const { subtotal, taxRate, taxAmount, total, cgstRate, cgstAmount, sgstRate, sgstAmount, igstRate, igstAmount } = computeTotals(items);
 
@@ -478,6 +497,11 @@ export default function BillingPage() {
       queryClient.invalidateQueries({ queryKey: ['purchase-orders', orgId] });
       queryClient.invalidateQueries({ queryKey: ['work-progress'] });
       queryClient.invalidateQueries({ queryKey: ['billing-work-item-history', orgId] });
+      // Keep owner-private PO finance/readiness and the agency overview in
+      // sync immediately, even if Supabase Realtime delivery is delayed.
+      queryClient.invalidateQueries({ queryKey: ['po-billing-readiness', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['agency-finance', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['agency-operations-dashboard', orgId] });
     },
   });
 
@@ -966,7 +990,7 @@ export default function BillingPage() {
                     <span className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 border border-slate-200">{workOrderCompletion.completed}/{workOrderCompletion.total} shops completed · {selectedShopIds.length} billable selected</span>
                   </div>
                   {canSelectShops && completionShops.length === 0 &&
-                    <p className="mt-2 text-xs text-slate-600">No shops have reached the final {billingStageLabel(selectedPO.fulfillment_type, poRates).toLowerCase()} stage for this Work Order.</p>}
+                    <p className="mt-2 text-xs text-slate-600">No shops have reached the final {billingStageLabel(selectedPO.fulfillment_type, poRates, selectedPO.delivery_receipt_required === true).toLowerCase()} stage for this Work Order.</p>}
                   {canSelectShops && needsReconciliation.length > 0 && (
                     <div role="status" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                       <p className="font-semibold">{needsReconciliation.length} completed shop(s) require measurement / Work Order linkage verification.</p>

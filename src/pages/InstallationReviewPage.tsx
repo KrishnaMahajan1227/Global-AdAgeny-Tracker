@@ -7,6 +7,7 @@ import { Card, EmptyState, PageHeader, Modal, Textarea } from '@/components/ui';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { logAudit, createNotification } from '@/lib/helpers';
 import { reviewApply, refreshReviewViews, setAvailability, type ReviewEntity } from '@/lib/reviewApi';
+import { CompanyApprovalHandoff } from '@/components/CompanyApprovalHandoff';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import type { InstallationProof, SurveyPhoto, BoardMarking, WorkItem } from '@/lib/types';
 import {
@@ -14,7 +15,8 @@ import {
   SlidersHorizontal, X, Eye, Loader2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Images,
   Palette, Camera,
 } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
+import { validWorkOrderId } from '@/lib/operationalNavigation';
 
 // Debounce a fast-changing value (typing in the search box) so we don't
 // fire a network request on every keystroke — this list is meant to hold
@@ -44,6 +46,8 @@ const SORT_OPTIONS: Record<string, string> = {
 };
 
 export default function InstallationReviewPage() {
+  const [routeParams, setRouteParams] = useSearchParams();
+  const linkedPoId = validWorkOrderId(routeParams.get('po'));
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
@@ -78,7 +82,7 @@ export default function InstallationReviewPage() {
   // Any filter/tab change invalidates page + selection — stale selections
   // pointing at rows that may no longer be in the result set are worse
   // than an empty one.
-  useEffect(() => { setPage(0); }, [tab, debouncedSearch, installerFilter, flagFilter, sortBy, pageSize]);
+  useEffect(() => { setPage(0); }, [tab, debouncedSearch, installerFilter, flagFilter, linkedPoId, sortBy, pageSize]);
   useEffect(() => { setSelectMode(false); setSelectedIds(new Set()); }, [tab, debouncedSearch, installerFilter, flagFilter, sortBy, page, pageSize]);
 
   const { data: installers } = useQuery({
@@ -116,14 +120,14 @@ export default function InstallationReviewPage() {
   // Nothing here ever pulls the whole table: at 10,000+ shops that would
   // make the page unusable, so every control on screen (tab, search,
   // installer, flag, sort, page) narrows the query itself.
-  const jobsQueryKey = ['installation-review', orgId, { tab, q: debouncedSearch, installerFilter, flagFilter, sortBy, page, pageSize }];
+  const jobsQueryKey = ['installation-review', orgId, { tab, q: debouncedSearch, installerFilter, flagFilter, linkedPoId, sortBy, page, pageSize }];
   const { data: jobsPage, isFetching: jobsLoading } = useQuery({
     queryKey: jobsQueryKey,
     queryFn: async () => {
       let query = supabase
         .from('installation_jobs')
         .select(
-          '*, shops!inner(name, city, clients(name)), profiles:installer_id(id, full_name), confirmed_by_profile:material_check_confirmed_by(full_name), installation_proofs(id, photo_url, storage_path, photo_type, angle, duplicate_flag, work_item_id)',
+          '*, shops!inner(name, city, purchase_order_id, clients(name)), profiles:installer_id(id, full_name), confirmed_by_profile:material_check_confirmed_by(full_name), installation_proofs(id, photo_url, storage_path, photo_type, angle, duplicate_flag, work_item_id)',
           { count: 'exact' }
         )
         .eq('organization_id', orgId)
@@ -131,6 +135,7 @@ export default function InstallationReviewPage() {
       // A finished shop can never sit in Pending Review.
       if (tab === 'pending') query = query.not('shops.status', 'in', '(installed,billed,cancelled)');
 
+      if (linkedPoId) query = query.eq('shops.purchase_order_id', linkedPoId);
       if (installerFilter) query = query.eq('installer_id', installerFilter);
       if (flagFilter === 'gps') query = query.eq('gps_distance_flag', true);
       if (flagFilter === 'material') query = query.eq('material_check_confirmed', false);
@@ -160,7 +165,7 @@ export default function InstallationReviewPage() {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const rangeStart = total === 0 ? 0 : page * pageSize + 1;
   const rangeEnd = Math.min(total, page * pageSize + pageSize);
-  const hasActiveFilters = !!(search || installerFilter || flagFilter);
+  const hasActiveFilters = !!(search || installerFilter || flagFilter || linkedPoId);
 
   useRealtimeInvalidate(['installation_jobs'], orgId, [jobsQueryKey, countsQueryKey, ['dashboard-stats', orgId]]);
 
@@ -319,6 +324,7 @@ export default function InstallationReviewPage() {
         </div>
       )}
 
+      {linkedPoId && <div role="status" className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900"><span>Installation reviews filtered to the selected Work Order</span><button type="button" className="font-semibold text-blue-700 underline" onClick={() => setRouteParams(previous => { const next = new URLSearchParams(previous); next.delete('po'); return next; }, { replace: true })}>Show all installation reviews</button></div>}
       {/* Filters — same set works across all three tabs, so lookups stay
           fast even months later when there's a long history to sort through. */}
       <Card className="p-4 mb-4">
@@ -365,7 +371,7 @@ export default function InstallationReviewPage() {
             {jobsLoading && <Loader2 className="inline w-3 h-3 ml-1.5 animate-spin align-[-1px]" />}
           </p>
           {hasActiveFilters && (
-            <button onClick={() => { setSearch(''); setInstallerFilter(''); setFlagFilter(''); }} className="text-xs text-slate-500 hover:text-slate-700 flex items-center gap-1 font-medium">
+            <button onClick={() => { setSearch(''); setInstallerFilter(''); setFlagFilter(''); if (linkedPoId) setRouteParams(previous => { const next = new URLSearchParams(previous); next.delete('po'); return next; }, { replace: true }); }} className="text-xs text-slate-500 hover:text-slate-700 flex items-center gap-1 font-medium">
               <X className="w-3.5 h-3.5" /> Clear filters
             </button>
           )}
@@ -555,6 +561,7 @@ export default function InstallationReviewPage() {
       >
         <div className="space-y-4">
           <p className="text-sm text-slate-600">Shop: <span className="font-medium text-slate-900">{reviewModal?.shops?.name}</span></p>
+          {reviewModal && <CompanyApprovalHandoff stage="installation" refId={reviewModal.id} shopId={reviewModal.shop_id} />}
           {reviewModal && <MaterialLoadedSummary job={reviewModal} onOpenPhoto={setLightbox} />}
 
           {/* Design reference (what was approved) next to the installer's

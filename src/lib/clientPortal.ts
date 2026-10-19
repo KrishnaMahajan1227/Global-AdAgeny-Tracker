@@ -57,9 +57,21 @@ export function stagePct(rows: ClientPOLineItemProgress[], stage: ClientStage): 
   return weightBase > 0 ? weightedSum / weightBase : null;
 }
 
+/** Receipt-gated supply Work Orders are complete only when destinations have
+ * actually been acknowledged, not when production quantity reaches 100%.
+ * Return null when no site records exist, rather than falsely reporting 0%.
+ */
+export function receiptCompletionPercent(statuses: {status:string;count?:number}[]): number | null {
+  const active = statuses.filter(item => !['cancelled','rejected'].includes(item.status));
+  const total = active.reduce((sum,item) => sum + (item.count ?? 1),0);
+  const received = active.filter(item => ['delivered','billed'].includes(item.status))
+    .reduce((sum,item) => sum + (item.count ?? 1),0);
+  return total ? Math.round(received * 100 / total) : null;
+}
+
 /** Which stage counts as "work done" for a PO's overall completion % — supply_only POs never reach "installed", they dispatch/produce instead. */
 export function finalStage(fulfillmentType: FulfillmentType): ClientStage {
-  return fulfillmentType === 'supply_only' ? 'produced' : 'installed';
+  return fulfillmentType === 'supply_only' ? 'produced' : 'installed'; // production_install is installation-based
 }
 
 export function formatQty(n: number | null | undefined, uom: string) {
@@ -71,11 +83,13 @@ export function formatQty(n: number | null | undefined, uom: string) {
 // ---- Site (shop) status bucketing, for KPI cards and the site list ----
 export type SiteBucket = 'pending' | 'in_progress' | 'completed' | 'cancelled';
 
-const COMPLETED_SHOP_STATUSES = new Set(['installed', 'billed', 'dispatched']);
+const COMPLETED_SHOP_STATUSES = new Set(['installed', 'billed', 'dispatched', 'delivered']);
 
-export function siteBucket(status: string): SiteBucket {
+export function siteBucket(status: string, fulfillmentType?: FulfillmentType | string | null, receiptRequired = false): SiteBucket {
   if (status === 'cancelled') return 'cancelled';
   if (status === 'pending') return 'pending';
+  // Dispatch is the handoff, NOT installation complete for the new no-survey installation preset.
+  if ((status === 'dispatched' && (fulfillmentType === 'production_install' || (fulfillmentType === 'supply_only' && receiptRequired))) || (status === 'delivered' && fulfillmentType === 'production_install')) return 'in_progress';
   if (COMPLETED_SHOP_STATUSES.has(status)) return 'completed';
   return 'in_progress';
 }
@@ -102,12 +116,13 @@ export const SITE_BUCKET_DOT_COLORS: Record<SiteBucket, string> = {
 // stuck" for a site that's still otherwise active work.
 export type MapPinBucket = 'pending' | 'in_progress' | 'completed' | 'issue';
 
-const COMPLETED_STATUSES = new Set(['installed', 'billed', 'dispatched']);
+const COMPLETED_STATUSES = new Set(['installed', 'billed', 'dispatched', 'delivered']);
 const ISSUE_STATUSES = new Set(['production_hold', 'cancelled']);
 
-export function mapPinBucket(status: string): MapPinBucket {
+export function mapPinBucket(status: string, fulfillmentType?: FulfillmentType | string | null, receiptRequired = false): MapPinBucket {
   if (ISSUE_STATUSES.has(status)) return 'issue';
   if (status === 'pending') return 'pending';
+  if ((status === 'dispatched' && (fulfillmentType === 'production_install' || (fulfillmentType === 'supply_only' && receiptRequired))) || (status === 'delivered' && fulfillmentType === 'production_install')) return 'in_progress';
   if (COMPLETED_STATUSES.has(status)) return 'completed';
   return 'in_progress';
 }
@@ -175,8 +190,8 @@ export interface ClientCampaignRow {
 }
 
 export function buildClientCampaignRows(
-  pos: { id: string; po_number: string; name?: string | null; po_date: string; status: string; assignment_status: string; fulfillment_type: FulfillmentType; assigned_agency_id: string | null; agency_org?: { name: string } | null }[],
-  shops: { purchase_order_id: string | null }[],
+  pos: { id: string; po_number: string; name?: string | null; po_date: string; status: string; assignment_status: string; fulfillment_type: FulfillmentType; delivery_receipt_required?: boolean | null; assigned_agency_id: string | null; agency_org?: { name: string } | null }[],
+  shops: { purchase_order_id: string | null; status?: string }[],
   progress: ClientPOLineItemProgress[]
 ): ClientCampaignRow[] {
   const siteCountByPo = new Map<string, number>();
@@ -193,7 +208,9 @@ export function buildClientCampaignRows(
 
   return pos.map((po) => {
     const poProgress = progressByPo.get(po.id) || [];
-    const completionPct = stagePct(poProgress, finalStage(po.fulfillment_type));
+    const completionPct = po.fulfillment_type === 'supply_only' && po.delivery_receipt_required
+      ? receiptCompletionPercent(shops.filter(shop => shop.purchase_order_id === po.id && !!shop.status).map(shop => ({status:shop.status!})))
+      : stagePct(poProgress, finalStage(po.fulfillment_type));
     return {
       po_id: po.id,
       po_number: po.po_number,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
@@ -26,11 +26,14 @@ export default function AdminLayout() {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const openNavButtonRef = useRef<HTMLButtonElement>(null);
   // Restore the existing navigation history, scoped per agency user.
   const [recentPages, setRecentPages] = useState<{ path: string; label: string }[]>([]);
   const orgId = profile?.organization_id;
 
   const isOwner = profile?.role === 'agency_owner';
+  const isClientManager = profile?.role === 'client_manager';
   const isAdmin = profile?.role === 'admin' || isOwner || profile?.role === 'demo';
   const isAccounts = profile?.role === 'accounts';
   const isDesigner = profile?.role === 'designer';
@@ -89,17 +92,18 @@ export default function AdminLayout() {
   );
 
   const navItems = [
-    { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, show: isAdmin || isAccounts },
-    { to: '/clients', label: 'Clients', icon: Building2, show: isAdmin },
-    { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts, badge: pendingCounts?.clientRequests },
+    { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, show: isAdmin || isAccounts || isClientManager },
+    { to: '/clients', label: 'Clients', icon: Building2, show: isAdmin || isClientManager },
+    { to: '/campaigns', label: 'Campaigns', icon: ClipboardList, show: isAdmin || isClientManager },
+    { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts || isClientManager, badge: pendingCounts?.clientRequests },
     { to: '/survey-review', label: 'Survey Review', icon: FileCheck, show: isAdmin, badge: pendingCounts?.survey },
     { to: '/design', label: 'Design Queue', icon: Palette, show: isAdmin || isDesigner, badge: (isAdmin || isDesigner) ? pendingCounts?.design : undefined },
     { to: '/production', label: 'Production', icon: Printer, show: isAdmin || isProduction, badge: (isAdmin || isProduction) ? pendingCounts?.production : undefined },
     { to: '/installation-review', label: 'Installation Review', icon: ClipboardCheck, show: isAdmin, badge: pendingCounts?.installation },
     { to: '/field-map', label: 'Live Field Map', icon: MapIcon, show: isAdmin },
     { to: '/route-planning', label: 'Route Planning', icon: RouteIcon, show: isAdmin },
-    { to: '/reports', label: 'Reports', icon: FileText, show: isAdmin || isAccounts },
-    { to: '/billing', label: 'Billing', icon: IndianRupee, show: isAdmin || isAccounts },
+    { to: '/reports', label: 'Reports', icon: FileText, show: isAdmin || isAccounts || isClientManager },
+    { to: '/billing', label: 'Billing', icon: IndianRupee, show: isAdmin || isAccounts || isClientManager },
     { to: '/owner', label: 'Owner Console', icon: Settings, show: isOwner },
     { to: '/account', label: 'My Account', icon: User, show: true },
   ].filter((item) => item.show);
@@ -108,7 +112,7 @@ export default function AdminLayout() {
     if (!profile?.id || !profile.organization_id) return;
     const key = `adroute-admin-recent:${profile.organization_id}:${profile.id}`;
     const labels: Record<string, string> = {
-      '/dashboard': 'Dashboard', '/clients': 'Clients', '/purchase-orders': 'Work Orders',
+      '/dashboard': 'Dashboard', '/clients': 'Clients', '/campaigns': 'Campaigns', '/purchase-orders': 'Work Orders',
       '/supply-orders': 'Work Orders', '/survey-review': 'Survey Review', '/design': 'Design Queue',
       '/production': 'Production', '/installation-review': 'Installation Review',
       '/field-map': 'Field Map', '/route-planning': 'Route Planning', '/reports': 'Reports',
@@ -129,6 +133,32 @@ export default function AdminLayout() {
     try { sessionStorage.setItem(key, JSON.stringify(next)); } catch { /* Storage unavailable. */ }
   }, [location.pathname, location.search, profile?.id, profile?.organization_id]);
 
+  // Mobile drawer scroll/focus behavior: prevent the page beneath the
+  // navigation from scrolling; Escape closes it. Desktop nav is unchanged.
+  useEffect(() => {
+    if (!sidebarOpen || window.innerWidth >= 1024) return;
+    const previousOverflow = document.body.style.overflow;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    document.body.style.overflow = 'hidden';
+    sidebarRef.current?.querySelector<HTMLButtonElement>('[aria-label="Close navigation"]')?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setSidebarOpen(false); }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(sidebarRef.current?.querySelectorAll<HTMLElement>('a[href], button:not([disabled])') || [])
+        .filter(element => element.getClientRects().length > 0);
+      if (!focusable.length) return;
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKeyDown);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, [sidebarOpen]);
+
   async function handleSignOut() {
     await signOut();
     navigate('/login');
@@ -137,19 +167,19 @@ export default function AdminLayout() {
   return (
     <div className="min-h-screen bg-slate-50">
       {/* Sidebar - Desktop */}
-      <aside className={`fixed inset-y-0 left-0 ${sidebarCollapsed ? 'lg:w-[76px]' : 'lg:w-64'} w-64 bg-slate-900 text-white z-40 transform transition-all duration-200 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-        <div className="flex items-center justify-between gap-2 p-4 border-b border-slate-700">
+      <aside ref={sidebarRef} className={`fixed inset-y-0 left-0 z-40 flex h-[100dvh] w-64 flex-col overflow-hidden bg-slate-900 text-white transform transition-[width,transform] duration-200 lg:translate-x-0 ${sidebarCollapsed ? 'lg:w-[76px]' : 'lg:w-64'} ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-slate-700 px-3 py-3">
           <button type="button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="hidden lg:inline-flex rounded-lg p-2 hover:bg-slate-800" aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'} title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}>{sidebarCollapsed ? <PanelLeftOpen className="w-5 h-5" /> : <PanelLeftClose className="w-5 h-5" />}</button>
-          <div className={sidebarCollapsed ? 'lg:hidden' : ''}>
-            <h1 className="font-bold text-lg">Darshan Ad Agency</h1>
-            <p className="text-xs text-slate-400">Operations Platform</p>
+          <div className={`min-w-0 flex-1 ${sidebarCollapsed ? 'lg:hidden' : ''}`}>
+            <p className="truncate text-base font-semibold leading-6">Darshan Ad Agency</p>
+            <p className="truncate text-[11px] text-slate-400">Operations Platform</p>
           </div>
-          <button onClick={() => setSidebarOpen(false)} className="lg:hidden text-slate-400">
+          <button type="button" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} className="lg:hidden rounded-lg p-2 text-slate-400 hover:bg-slate-800">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <nav className="p-3 space-y-1 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 200px)' }}>
+        <nav id="agency-sidebar-navigation" className="app-sidebar-scroll min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain px-2 py-3" aria-label="Agency navigation">
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
@@ -161,7 +191,7 @@ export default function AdminLayout() {
                 title={item.label}
                 aria-label={item.label}
                 className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition ${
+                  `relative flex min-h-10 items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
                     isActive ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-800'
                   }`
                 }
@@ -169,7 +199,7 @@ export default function AdminLayout() {
                 <Icon className="w-5 h-5" />
                 <span className={`flex-1 ${sidebarCollapsed ? 'lg:hidden' : ''}`}>{item.label}</span>
                 {!!item.badge && (
-                  <span className={`${sidebarCollapsed ? 'lg:absolute lg:ml-8 lg:mt-[-20px]' : ''} min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 text-white text-[11px] font-bold flex items-center justify-center`}>
+                  <span className={`${sidebarCollapsed ? 'lg:absolute lg:right-0 lg:top-0 lg:translate-x-1/3 lg:-translate-y-1/3' : ''} min-w-[20px] h-5 px-1.5 rounded-full bg-red-500 text-white text-[11px] font-bold flex items-center justify-center`}>
                     {item.badge}
                   </span>
                 )}
@@ -178,9 +208,9 @@ export default function AdminLayout() {
           })}
         </nav>
 
-        <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-slate-700">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center text-white font-semibold">
+        <div className="shrink-0 border-t border-slate-700 bg-slate-900 px-3 py-3">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-700 font-semibold text-white">
               {profile?.full_name?.charAt(0)}
             </div>
             <div className={`flex-1 min-w-0 ${sidebarCollapsed ? 'lg:hidden' : ''}`}>
@@ -188,7 +218,7 @@ export default function AdminLayout() {
               <p className="text-xs text-slate-400">{ROLE_LABELS[profile?.role || ''] || profile?.role}</p>
             </div>
           </div>
-          <button onClick={handleSignOut} className="flex items-center gap-2 text-sm text-slate-400 hover:text-white transition">
+          <button onClick={handleSignOut} title="Sign out" aria-label="Sign out" className="flex min-h-9 w-full items-center gap-2 rounded-lg px-2 text-sm text-slate-400 transition-colors hover:bg-slate-800 hover:text-white">
             <LogOut className="w-4 h-4" /> <span className={sidebarCollapsed ? 'lg:hidden' : ''}>Sign Out</span>
           </button>
         </div>
@@ -202,7 +232,7 @@ export default function AdminLayout() {
         {/* Top bar */}
         <header className="bg-white border-b border-slate-200 sticky top-0 z-20">
           <div className="flex items-center justify-between px-4 py-3">
-            <button onClick={() => setSidebarOpen(true)} className="lg:hidden text-slate-600">
+            <button ref={openNavButtonRef} type="button" aria-label="Open navigation" aria-controls="agency-sidebar-navigation" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(true)} className="lg:hidden rounded-lg p-2 text-slate-600 hover:bg-slate-100">
               <Menu className="w-6 h-6" />
             </button>
             <nav aria-label="Recently visited pages" className="ml-3 flex min-w-0 flex-1 items-center gap-1 overflow-hidden text-xs sm:ml-0">

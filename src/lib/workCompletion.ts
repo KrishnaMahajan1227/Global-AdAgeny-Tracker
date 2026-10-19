@@ -4,16 +4,16 @@
  * Do NOT infer billable area or piece count from the number of shops.
  */
 export type ShopProgressRow = { purchase_order_id?: string | null; status?: string | null };
-export type OrderProgressRow = { id: string; fulfillment_type?: string | null; status?: string | null; assignment_status?: string | null; po_line_items?: StageRequirements[] | null };
+export type OrderProgressRow = { id: string; fulfillment_type?: string | null; status?: string | null; assignment_status?: string | null; po_line_items?: StageRequirements[] | null; delivery_receipt_required?: boolean | null };
 export type StageBucket = 'pending' | 'survey' | 'design' | 'production' | 'dispatch' | 'installation' | 'review' | 'complete' | 'excluded';
 const excluded = new Set(['cancelled', 'rejected']);
 const installedStatuses = new Set(['installed', 'billed']);
 const deliveredStatuses = new Set(['dispatched', 'delivered', 'billed']);
 
-export function isShopFinished(type: string | null | undefined, status: string | null | undefined, requirements: StageRequirements[] = []): boolean {
+export function isShopFinished(type: string | null | undefined, status: string | null | undefined, requirements: StageRequirements[] = [], receiptRequired = false): boolean {
   if (!status || excluded.has(status)) return false;
+  if (type === 'supply_only') return receiptRequired ? ['delivered','billed'].includes(status) : deliveredStatuses.has(status);
   if (installedStatuses.has(status)) return true;
-  if (type === 'supply_only') return deliveredStatuses.has(status);
   if (type !== 'custom' || !requirements.length) return false;
   const need = (flag: keyof StageRequirements) => requirements.some(row => row[flag] !== false);
   // Mixed custom POs use the latest required stage; do not claim a site is
@@ -25,10 +25,10 @@ export function isShopFinished(type: string | null | undefined, status: string |
   return false;
 }
 
-export function shopStage(type: string | null | undefined, status: string | null | undefined, requirements: StageRequirements[] = []): StageBucket {
+export function shopStage(type: string | null | undefined, status: string | null | undefined, requirements: StageRequirements[] = [], receiptRequired = false): StageBucket {
   if (!status || status === 'pending' || status === 'assigned') return 'pending';
   if (excluded.has(status)) return 'excluded';
-  if (isShopFinished(type, status, requirements)) return 'complete';
+  if (isShopFinished(type, status, requirements, receiptRequired)) return 'complete';
   if (status === 'installation_review') return 'review';
   if (status === 'installation_pending' || status === 'installing') return 'installation';
   if (status === 'dispatched' || status === 'delivered') return 'dispatch';
@@ -38,9 +38,9 @@ export function shopStage(type: string | null | undefined, status: string | null
   return 'pending';
 }
 
-export function getShopCompletion(shops: ShopProgressRow[], type: string | null | undefined, requirements: StageRequirements[] = []) {
+export function getShopCompletion(shops: ShopProgressRow[], type: string | null | undefined, requirements: StageRequirements[] = [], receiptRequired = false) {
   const counts: Record<StageBucket, number> = { pending: 0, survey: 0, design: 0, production: 0, dispatch: 0, installation: 0, review: 0, complete: 0, excluded: 0 };
-  for (const shop of shops) counts[shopStage(type, shop.status, requirements)]++;
+  for (const shop of shops) counts[shopStage(type, shop.status, requirements, receiptRequired)]++;
   const total = shops.length - counts.excluded;
   const completed = counts.complete;
   return { total, completed, pending: Math.max(0, total - completed), percentage: total ? Math.min(100, Math.max(0, Math.round(completed * 100 / total))) : 0, stages: counts };
@@ -54,7 +54,7 @@ export function groupShopCompletion(orders: OrderProgressRow[], shops: ShopProgr
     list.push(shop);
     byOrder.set(shop.purchase_order_id, list);
   }
-  return new Map(orders.map(order => [order.id, getShopCompletion(byOrder.get(order.id) || [], order.fulfillment_type, order.po_line_items || [])]));
+  return new Map(orders.map(order => [order.id, getShopCompletion(byOrder.get(order.id) || [], order.fulfillment_type, order.po_line_items || [], order.delivery_receipt_required === true)]));
 }
 
 /** An order with no linked shops is *unknown*, unless explicitly closed. */
@@ -85,7 +85,8 @@ const lifecycle: OperationalMilestone[] = ['survey', 'design', 'production', 'di
 
 export function applicableMilestones(type: string | null | undefined, requirements: StageRequirements[] = []): OperationalMilestone[] {
   if (type === 'direct_install') return ['installation'];
-  if (type === 'supply_only') return ['production', 'dispatch'];
+  if (type === 'supply_only') return ['production','dispatch'];
+  if (type === 'production_install') return ['design','production','dispatch','installation'];
   if (type !== 'custom' || !requirements.length) return lifecycle;
   const any = (key: keyof StageRequirements) => requirements.some(row => row[key] !== false);
   const survey = any('requires_survey');

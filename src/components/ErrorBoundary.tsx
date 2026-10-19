@@ -54,11 +54,11 @@ export class ErrorBoundary extends Component<Props, State> {
             </div>
             <h1 className="text-lg font-semibold text-slate-900 mb-1.5">Something went wrong</h1>
             <p className="text-sm text-slate-500 mb-4">
-              This page hit an unexpected error{this.props.boundaryName ? ` in ${this.props.boundaryName}` : ''}. Reloading almost always fixes it — your data is safe, nothing was lost.
+              This page hit an unexpected error{this.props.boundaryName ? ` in ${this.props.boundaryName}` : ''}. Try reloading or returning to your dashboard. If you were entering unsaved information, check that it was saved before repeating the action.
             </p>
-            <p className="text-xs text-left font-mono text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2 mb-4 break-words">
+            {import.meta.env.DEV && <p className="text-xs text-left font-mono text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2 mb-4 break-words">
               {this.state.error.message || String(this.state.error)}
-            </p>
+            </p>}
             <div className="flex gap-2">
               <button
                 onClick={() => window.location.reload()}

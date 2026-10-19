@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useAuth } from './auth';
 import { AlertCircle } from 'lucide-react';
 
 type DialogRequest = { id: number; message: string; title?: string; danger?: boolean; confirm?: boolean; resolve: (value: boolean) => void };
@@ -21,20 +22,35 @@ export function fieldConfirm(message: string, title = 'Confirm action'): Promise
 
 /** Mounted once per field role; accessible modal replaces browser-native dialogs. */
 export function FieldDialogHost() {
+  const { session } = useAuth();
+  const activeUserId = session?.user.id ?? null;
   const [queue, setQueue] = useState<DialogRequest[]>([]);
+  const pendingRef = useRef<DialogRequest[]>([]);
+  // Resolve every outstanding confirm as false on logout/account switch.
+  // The previous account's modal must not remain actionable as a new user.
   useEffect(() => {
-    const add = (request: DialogRequest) => setQueue((previous) => [...previous, request]);
+    pendingRef.current.forEach(request => request.resolve(false));
+    pendingRef.current = [];
+    setQueue([]);
+  }, [activeUserId]);
+  useEffect(() => {
+    const add = (request: DialogRequest) => {
+      pendingRef.current.push(request);
+      setQueue((previous) => [...previous, request]);
+    };
     listeners.add(add);
     return () => {
       listeners.delete(add);
-      // The app-wide host remains mounted through field route changes.
+      pendingRef.current.forEach(request => request.resolve(false));
+      pendingRef.current = [];
     };
   }, []);
   const current = queue[0];
   if (!current) return null;
   const finish = (accepted: boolean) => {
+    pendingRef.current = pendingRef.current.filter(request => request.id !== current.id);
     current.resolve(accepted);
-    setQueue((pending) => pending.slice(1));
+    setQueue((pending) => pending.filter(request => request.id !== current.id));
   };
   return (
     <div className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-950/60 p-4" role="presentation">

@@ -245,10 +245,32 @@ function ShopDetailPageWrapper() {
 }
 
 export default function App() {
+  useEffect(() => {
+    // One-time cleanup of private photo evidence cached by earlier PWA
+    // releases. Retain the offline app shell and the field upload queue.
+    // Workbox no longer caches Supabase Storage in the current release.
+    if (typeof window === 'undefined' || !('caches' in window)) return;
+    let live = true;
+    const clearLegacyStorageCache = async () => {
+      try {
+        const names = await window.caches.keys();
+        if (live) await Promise.all(names.filter(name => name === 'supabase-storage-cache')
+          .map(name => window.caches.delete(name)));
+      } catch (error) {
+        console.warn('Private evidence cache cleanup unavailable:', error);
+      }
+    };
+    void clearLegacyStorageCache();
+    navigator.serviceWorker?.addEventListener('controllerchange', clearLegacyStorageCache);
+    return () => {
+      live = false;
+      navigator.serviceWorker?.removeEventListener('controllerchange', clearLegacyStorageCache);
+    };
+  }, []);
   return (
     <QueryClientProvider client={queryClient}>
-      <FieldDialogHost />
       <AuthProvider>
+        <FieldDialogHost />
         <BrowserRouter>
           <AppRoutes />
         </BrowserRouter>

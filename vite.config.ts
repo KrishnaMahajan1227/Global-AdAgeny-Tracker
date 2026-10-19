@@ -59,18 +59,16 @@ export default defineConfig({
         // from offline support. Doesn't change anything about what's cached,
         // just stops the build from erroring out / skipping this file.
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
-        // Never let the service worker intercept Supabase API/auth/storage/realtime calls —
-        // those must always hit the network (or fail explicitly) so data stays consistent.
+        // Auth, API and realtime requests are not cached; storage proofs are
+        // explicitly network-only to avoid leaving private evidence behind.
         runtimeCaching: [
+          // Private survey, artwork and installation proofs MUST NOT be
+          // retained by Workbox. On another login, a signed image URL might
+          // still be in the browser cache. Field uploads use IndexedDB and
+          // a separate retry queue; this rule does not affect that flow.
           {
-            urlPattern: ({ url }) => url.origin.includes('supabase.co') && url.pathname.includes('/storage/'),
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'supabase-storage-cache',
-              networkTimeoutSeconds: 4,
-              expiration: { maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
+            urlPattern: ({ url }) => url.origin.endsWith('.supabase.co') && url.pathname.includes('/storage/'),
+            handler: 'NetworkOnly',
           },
           {
             urlPattern: ({ url }) => url.origin.includes('maps.googleapis.com'),

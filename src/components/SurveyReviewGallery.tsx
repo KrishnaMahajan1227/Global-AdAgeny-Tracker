@@ -10,7 +10,7 @@ import { surveyReviewSelectionModel, type SurveyCorrectionScope } from '@/lib/su
 import type { BoardMarking, SurveyPhoto, WorkItem } from '@/lib/types';
 
 type Evidence = { photos: SurveyPhoto[]; items: WorkItem[]; markings: BoardMarking[]; links: { survey_photo_id: string; work_item_id: string }[]; decisions: { entity_type: string; entity_id: string; decision: string; note: string | null }[] };
-type Props = { surveyId: string; shopId: string; readOnly?: boolean; onDone?: () => void };
+type Props = { surveyId: string; shopId: string; readOnly?: boolean; onDone?: () => void; onEvidenceReady?: () => void; onEvidenceChanged?: () => void };
 
 function MarkedTile({ photo, markings, items, wide }: { photo: SurveyPhoto; markings: BoardMarking[]; items: WorkItem[]; wide?: boolean }) {
   const [src, setSrc] = useState<string | null>(null);
@@ -47,7 +47,7 @@ function MarkedTile({ photo, markings, items, wide }: { photo: SurveyPhoto; mark
   </div>;
 }
 
-export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, onDone }: Props) {
+export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, onDone, onEvidenceReady, onEvidenceChanged }: Props) {
   const { profile } = useAuth();
   const qc = useQueryClient();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -81,6 +81,7 @@ export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, onDone
     },
     enabled: !!shopId && !!surveyId,
   });
+  useEffect(() => { if (evidence.isSuccess && !evidence.isFetching && evidence.data && evidence.data.photos.length > 0 && evidence.data.items.length > 0) onEvidenceReady?.(); }, [evidence.isSuccess, evidence.isFetching, evidence.dataUpdatedAt, onEvidenceReady]);
   const designers = useQuery({
     queryKey: ['org-designers', profile?.organization_id],
     queryFn: async () => {
@@ -89,6 +90,8 @@ export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, onDone
       return data || [];
     }, enabled: !!profile?.organization_id && !readOnly,
   });
+
+  useEffect(() => { if (designers.data?.length === 1) setDesignerId(current => current || designers.data![0].id); }, [designers.data, surveyId]);
 
   const groups = useMemo(() => {
     if (!evidence.data) return [];
@@ -127,6 +130,15 @@ export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, onDone
   const selectedCount = selectable.filter(choice => selected.has(choice.key)).length;
   const photoCount = evidence.data?.photos.length ?? 0;
 
+  // Pending units are ready for a normal approve/redo decision by default.
+  // Their checkboxes remain available only to narrow a partial correction.
+  // Refetching after a decision selects only the still-pending units.
+  useEffect(() => {
+    if (!readOnly && evidence.isSuccess && evidence.data) {
+      setSelected(new Set(selectionPlan.choices.map(choice => choice.key)));
+    }
+  }, [readOnly, evidence.isSuccess, evidence.dataUpdatedAt, selectionPlan]);
+
   async function submit(decision: 'approved' | 'redo') {
     if (!evidence.data || !profile || !selectedCount || busy) return;
     if (decision === 'approved' && !designerId) { setErrorMessage('Select a designer before approving.'); return; }
@@ -141,7 +153,7 @@ export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, onDone
       if (!targets.length) throw new Error('No pending review targets found. Refresh the review and try again.');
       const result = await reviewApply({ stage: 'survey', shopId, refId: surveyId, entities: targets, decision, note, designerId: designerId || null });
       await Promise.all([qc.invalidateQueries({ queryKey: ['survey-review-gallery', shopId, surveyId] }), refreshReviewViews(qc, shopId)]);
-      setSelected(new Set()); setNote(''); setConfirm(null);
+      setSelected(new Set()); setNote(''); setConfirm(null); onEvidenceChanged?.();
       if (result.finalized) { onDone?.(); return; }
       setSuccessMessage(decision === 'redo' ? 'Selected evidence returned for correction.' : `${result.pending} remaining to review${result.redo ? ` · ${result.redo} in correction` : ''}.`);
       if (result.needs_designer) setSuccessMessage('Select a designer to complete final approval.');
@@ -156,10 +168,10 @@ export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, onDone
 
   return <div className="space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-      {!readOnly ? <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-800">
-        <input type="checkbox" aria-label="Select all pending review items" className="h-4 w-4 accent-blue-600" checked={allChosen} disabled={!selectable.length} onChange={() => setSelected(allChosen ? new Set() : new Set(selectable.map(e => e.key)))} />
-        Select all pending <span className="font-normal text-slate-500">({selectable.length})</span>
-      </label> : <span className="text-xs font-medium text-slate-600">Survey evidence</span>}
+      {!readOnly ? <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-slate-800">
+        <span>{selectable.length} pending item{selectable.length === 1 ? '' : 's'} · {selectedCount} ready for action</span>
+        {!allChosen && selectable.length > 0 && <button type="button" onClick={() => setSelected(new Set(selectable.map(choice => choice.key)))} className="rounded px-2 py-1 font-semibold text-blue-700 hover:bg-blue-50">Select all pending</button>}
+      </div> : <span className="text-xs font-medium text-slate-600">Survey evidence</span>}
       <p className="text-xs text-slate-500">{photoCount} photo{photoCount === 1 ? '' : 's'} · {evidence.data?.items.length || 0} work item{evidence.data?.items.length === 1 ? '' : 's'}</p>
     </div>
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">

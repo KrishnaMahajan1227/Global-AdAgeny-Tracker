@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { supabase } from '@/lib/supabase';
@@ -15,6 +15,8 @@ import { validWorkOrderId } from '@/lib/operationalNavigation';
 
 import { reviewApply, refreshReviewViews } from '@/lib/reviewApi';
 import { CompanyApprovalHandoff } from '@/components/CompanyApprovalHandoff';
+import { ReviewBatchStepper } from '@/components/ReviewBatchStepper';
+import { allInspected, nextUnreviewedIndex } from '@/lib/reviewBatchSafety';
 
 // Debounce a fast-changing value (typing in the search box) so we don't
 // fire a network request on every keystroke — same pattern Installation
@@ -35,7 +37,7 @@ const TABS = [
 ] as const;
 type TabKey = (typeof TABS)[number]['key'];
 
-const PAGE_SIZE_OPTIONS = [10, 25, 50, 100];
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100, 250];
 
 const SORT_OPTIONS: Record<string, string> = {
   submitted_asc: 'Oldest submitted first',
@@ -72,7 +74,11 @@ export default function SurveyReviewPage() {
   const [cityFilter, setCityFilter] = useState('');
   const [stateFilter, setStateFilter] = useState('');
   const [moreFilters, setMoreFilters] = useState(false);
-  const [bulkPreviewId, setBulkPreviewId] = useState<string | null>(null);
+  const [batchIndex, setBatchIndex] = useState(0);
+  const batchTopRef = useRef<HTMLDivElement>(null);
+  const [inspectedIds, setInspectedIds] = useState<Set<string>>(new Set());
+  const [evidenceReadyIds, setEvidenceReadyIds] = useState<Set<string>>(new Set());
+  const [autoNext, setAutoNext] = useState(true);
   const [rejectConfirmation, setRejectConfirmation] = useState(false);
   const [sortBy, setSortBy] = useState<'submitted_asc' | 'submitted_desc' | 'shop_asc'>('submitted_asc');
   const [page, setPage] = useState(0);
@@ -91,10 +97,13 @@ export default function SurveyReviewPage() {
   // required — exceeding budget is allowed, just never silent).
 
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  useEffect(() => {
+    if (bulkModalOpen) batchTopRef.current?.scrollIntoView({ block: 'start', behavior: 'auto' });
+  }, [batchIndex, bulkModalOpen]);
   const [bulkDesignerId, setBulkDesignerId] = useState('');
 
   useEffect(() => { setPage(0); }, [tab, debouncedSearch, surveyorFilter, clientFilter, workOrderFilter, cityFilter, stateFilter, sortBy, pageSize]);
-  useEffect(() => { setSelectedIds(new Set()); }, [tab, debouncedSearch, surveyorFilter, clientFilter, workOrderFilter, cityFilter, stateFilter, sortBy, page, pageSize]);
+  useEffect(() => { setSelectedIds(new Set()); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBatchIndex(0); }, [tab, debouncedSearch, surveyorFilter, clientFilter, workOrderFilter, cityFilter, stateFilter, sortBy, page, pageSize]);
 
   const isPendingSurvey = selectedSurvey?.status === 'submitted';
 
@@ -274,6 +283,7 @@ export default function SurveyReviewPage() {
   const bulkMutation = useMutation({
     mutationFn: async () => {
       const targets = rows.filter(r => selectedIds.has(r.id));
+      if (!allInspected(targets, inspectedIds)) throw new Error('Inspect and confirm evidence for every selected shop before batch approval.');
       if (!targets.length) throw new Error('Select at least one survey.');
       if (!effectiveBulkDesignerId) throw new Error('Choose a designer before approving selected surveys.');
       const completed: string[] = [];
@@ -283,11 +293,12 @@ export default function SurveyReviewPage() {
           completed.push(survey.id);
         } catch (error) {
           setSelectedIds(prev => new Set([...prev].filter(id => !completed.includes(id))));
+          setInspectedIds(prev => new Set([...prev].filter(id => !completed.includes(id))));
           throw error;
         }
       }
     },
-    onSuccess: () => { invalidateAll(); setBulkModalOpen(false); setSelectedIds(new Set()); setBulkDesignerId(''); setBulkPreviewId(null); },
+    onSuccess: () => { invalidateAll(); setBulkModalOpen(false); setSelectedIds(new Set()); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBulkDesignerId(''); setBatchIndex(0); },
     onError: () => { invalidateAll(); },
   });
 
@@ -301,7 +312,9 @@ export default function SurveyReviewPage() {
 
   function openBulk() {
     setBulkDesignerId('');
-    setBulkPreviewId(null);
+    setBatchIndex(0);
+    setInspectedIds(new Set());
+    setEvidenceReadyIds(new Set());
     setBulkModalOpen(true);
   }
 
@@ -310,7 +323,15 @@ export default function SurveyReviewPage() {
   // Confirm is locked until a decision is actually made, and — for
   // reject/correction — until there's a note, since "declined, no reason
   // given" leaves the surveyor with nothing to act on.
-  const canConfirmBulk = !!effectiveBulkDesignerId && selectedSurveys.length > 0;
+  const canConfirmBulk = !!effectiveBulkDesignerId && allInspected(selectedSurveys, inspectedIds);
+  const activeBulkSurvey = selectedSurveys[Math.min(batchIndex, Math.max(0, selectedSurveys.length - 1))];
+  function afterSingleReview(id: string) {
+    invalidateAll();
+    if (!autoNext) { closeDrawer(); return; }
+    const current = rows.findIndex(row => row.id === id);
+    const following = rows.slice(current + 1).find(row => row.status === 'submitted');
+    if (following) openReview(following); else closeDrawer();
+  }
 
   return (
     <div>
@@ -500,8 +521,9 @@ export default function SurveyReviewPage() {
             {selectedSurvey.submitted_at && <span>· {new Date(selectedSurvey.submitted_at).toLocaleString('en-IN')}</span>}
           </div>
           {selectedSurvey.notes && <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">{selectedSurvey.notes}</p>}
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs"><span className="font-medium text-slate-700">Review photos and measurements together; select all pending items in one tap.</span><label className="flex items-center gap-2 text-blue-800"><input type="checkbox" checked={autoNext} onChange={e => setAutoNext(e.target.checked)} /> Open next shop after completion</label></div>
           <CompanyApprovalHandoff stage="survey" refId={selectedSurvey.id} shopId={selectedSurvey.shop_id} />
-          <SurveyReviewGallery surveyId={selectedSurvey.id} shopId={selectedSurvey.shop_id} readOnly={!isPendingSurvey} onDone={() => { invalidateAll(); closeDrawer(); }} />
+          <SurveyReviewGallery surveyId={selectedSurvey.id} shopId={selectedSurvey.shop_id} readOnly={!isPendingSurvey} onDone={() => afterSingleReview(selectedSurvey.id)} />
           {isPendingSurvey ? <details className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
             <summary className="cursor-pointer font-medium">Final rejection (entire survey)</summary>
             <div className="mt-2 space-y-2">
@@ -517,19 +539,33 @@ export default function SurveyReviewPage() {
 
       <Modal open={bulkModalOpen} onClose={() => { if (!bulkMutation.isPending) { setBulkModalOpen(false); setBulkPreviewId(null); } }} title={`Review ${selectedSurveys.length} selected shops`} size="xl">
         <div className="space-y-3">
-          <p className="text-xs text-slate-600">Check each shop's marked evidence before batch approval. Corrections must be assigned to exact items inside a single shop.</p>
-          <div className="max-h-[40vh] space-y-2 overflow-y-auto pr-1">
-            {selectedSurveys.map(s => <div key={s.id} className="rounded-lg border border-slate-200">
-              <button type="button" onClick={() => setBulkPreviewId(bulkPreviewId === s.id ? null : s.id)} className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs"><span><strong className="font-semibold text-slate-800">{s.shops?.name}</strong><span className="ml-2 text-slate-500">{s.shops?.clients?.name} · {s.profiles?.full_name}</span></span><span className="shrink-0 text-blue-700">{bulkPreviewId === s.id ? 'Close evidence' : 'Review evidence'}</span></button>
-              {bulkPreviewId === s.id && <div className="border-t border-slate-200 p-3"><SurveyReviewGallery surveyId={s.id} shopId={s.shop_id} readOnly /></div>}
-            </div>)}
-          </div>
+          <p className="text-xs text-slate-600">Review photos and measurements for each shop, then use Reviewed & next. Item corrections remain available; company approval is still required before progressing.</p>
+          <div ref={batchTopRef} />
+          <ReviewBatchStepper
+            items={selectedSurveys.map(s => ({ id: s.id, name: s.shops?.name || 'Shop', subtitle: `${s.shops?.clients?.name || 'Client'} · ${s.shops?.purchase_orders?.name || s.shops?.purchase_orders?.po_number || 'No PO'} · ${s.profiles?.full_name || 'Surveyor'}` }))}
+            index={batchIndex}
+            onIndexChange={setBatchIndex}
+            inspected={inspectedIds}
+          />
+          {activeBulkSurvey && <div key={activeBulkSurvey.id} className="space-y-3">
+            <CompanyApprovalHandoff stage="survey" refId={activeBulkSurvey.id} shopId={activeBulkSurvey.shop_id} />
+            <SurveyReviewGallery surveyId={activeBulkSurvey.id} shopId={activeBulkSurvey.shop_id} onEvidenceChanged={() => { setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); setEvidenceReadyIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); }} onDone={() => { setSelectedIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); setBatchIndex(0); invalidateAll(); if (selectedSurveys.length === 1) setBulkModalOpen(false); }} onEvidenceReady={() => setEvidenceReadyIds(prev => prev.has(activeBulkSurvey.id) ? prev : new Set(prev).add(activeBulkSurvey.id))} />
+          </div>}
+          {activeBulkSurvey && <div className="sticky bottom-0 z-20 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-blue-200 bg-white/95 p-2 shadow-sm backdrop-blur">
+            <p className="min-w-0 text-xs text-slate-600">{inspectedIds.has(activeBulkSurvey.id) ? 'Evidence reviewed' : evidenceReadyIds.has(activeBulkSurvey.id) ? 'Check photos & measurements, then continue' : 'Loading evidence — review unavailable'}</p>
+            <button type="button" disabled={!evidenceReadyIds.has(activeBulkSurvey.id) || inspectedIds.has(activeBulkSurvey.id) || bulkMutation.isPending} onClick={() => {
+              setInspectedIds(prev => new Set(prev).add(activeBulkSurvey.id));
+              const nextIndex = nextUnreviewedIndex(selectedSurveys, batchIndex, inspectedIds);
+              if (nextIndex !== -1) setBatchIndex(nextIndex);
+            }} className="rounded-lg bg-blue-700 px-4 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">{inspectedIds.has(activeBulkSurvey.id) ? 'Reviewed ✓' : selectedSurveys.length - inspectedIds.size === 1 ? 'Mark final shop reviewed' : 'Reviewed & next shop →'}</button>
+          </div>}
           <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
             <label className="min-w-0 flex-1 text-xs text-slate-700">Assign designer to selected shops
               <select value={effectiveBulkDesignerId} onChange={e => setBulkDesignerId(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs"><option value="">Select designer</option>{(designers || []).map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}</select>
             </label>
-            <button type="button" disabled={!canConfirmBulk || bulkMutation.isPending} onClick={() => bulkMutation.mutate()} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">{bulkMutation.isPending ? 'Approving…' : `Approve ${selectedSurveys.length} shops`}</button>
+            <button type="button" disabled={!canConfirmBulk || bulkMutation.isPending} onClick={() => bulkMutation.mutate()} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">{bulkMutation.isPending ? 'Approving…' : `Approve ${selectedSurveys.length} checked shops`}</button>
           </div>
+          {!allInspected(selectedSurveys, inspectedIds) && <p className="text-xs text-amber-800">Use Reviewed & next after inspecting each shop. {selectedSurveys.filter(s => inspectedIds.has(s.id)).length}/{selectedSurveys.length} checked.</p>}
           {bulkMutation.isError && <p role="alert" className="text-xs text-red-700">{(bulkMutation.error as Error).message}. Successfully approved shops were removed from selection; retry only remaining shops.</p>}
         </div>
       </Modal>

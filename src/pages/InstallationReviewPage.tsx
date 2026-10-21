@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { itemSizeLabel } from '@/lib/units';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
@@ -8,6 +8,8 @@ import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { logAudit, createNotification } from '@/lib/helpers';
 import { reviewApply, refreshReviewViews, setAvailability, type ReviewEntity } from '@/lib/reviewApi';
 import { CompanyApprovalHandoff } from '@/components/CompanyApprovalHandoff';
+import { ReviewBatchStepper } from '@/components/ReviewBatchStepper';
+import { allInspected, nextUnreviewedIndex } from '@/lib/reviewBatchSafety';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import type { InstallationProof, SurveyPhoto, BoardMarking, WorkItem } from '@/lib/types';
 import {
@@ -30,7 +32,7 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
   return debounced;
 }
 
-const PAGE_SIZE_OPTIONS = [20, 50, 100];
+const PAGE_SIZE_OPTIONS = [20, 50, 100, 250];
 
 const TABS = [
   { key: 'pending', label: 'Pending Review' },
@@ -61,7 +63,7 @@ export default function InstallationReviewPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
 
-  const [selectMode, setSelectMode] = useState(false);
+  const [selectMode, setSelectMode] = useState(true);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const [reviewModal, setReviewModal] = useState<any | null>(null);
@@ -71,6 +73,14 @@ export default function InstallationReviewPage() {
   const [correctionTargets, setCorrectionTargets] = useState<Record<string, { issue_type: 'work_item' | 'installation_photo'; work_item_id?: string; installation_proof_id?: string; note: string }>>({});
 
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [batchIndex, setBatchIndex] = useState(0);
+  const batchTopRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (bulkModalOpen) batchTopRef.current?.scrollIntoView({ block: 'start', behavior: 'auto' });
+  }, [batchIndex, bulkModalOpen]);
+  const [inspectedIds, setInspectedIds] = useState<Set<string>>(new Set());
+  const [evidenceReadyIds, setEvidenceReadyIds] = useState<Set<string>>(new Set());
+  const [autoNext, setAutoNext] = useState(true);
   const [bulkAction, setBulkAction] = useState<'approve' | 'reject'>('approve');
   const [bulkNote, setBulkNote] = useState('');
 
@@ -78,12 +88,18 @@ export default function InstallationReviewPage() {
   // installation proofs, and the material-check photo, so any photo
   // anywhere on this page opens the same way.
   const [lightbox, setLightbox] = useState<string | null>(null);
+  useEffect(() => {
+    if (!lightbox) return;
+    const onEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setLightbox(null); };
+    window.addEventListener('keydown', onEscape);
+    return () => window.removeEventListener('keydown', onEscape);
+  }, [lightbox]);
 
   // Any filter/tab change invalidates page + selection — stale selections
   // pointing at rows that may no longer be in the result set are worse
   // than an empty one.
   useEffect(() => { setPage(0); }, [tab, debouncedSearch, installerFilter, flagFilter, linkedPoId, sortBy, pageSize]);
-  useEffect(() => { setSelectMode(false); setSelectedIds(new Set()); }, [tab, debouncedSearch, installerFilter, flagFilter, sortBy, page, pageSize]);
+  useEffect(() => { setSelectMode(tab === 'pending'); setSelectedIds(new Set()); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBatchIndex(0); }, [tab, debouncedSearch, installerFilter, flagFilter, linkedPoId, sortBy, page, pageSize]);
 
   const { data: installers } = useQuery({
     queryKey: ['installation-review-installers', orgId],
@@ -127,7 +143,7 @@ export default function InstallationReviewPage() {
       let query = supabase
         .from('installation_jobs')
         .select(
-          '*, shops!inner(name, city, purchase_order_id, clients(name)), profiles:installer_id(id, full_name), confirmed_by_profile:material_check_confirmed_by(full_name), installation_proofs(id, photo_url, storage_path, photo_type, angle, duplicate_flag, work_item_id)',
+          '*, shops!inner(name, city, purchase_order_id, clients(name), purchase_orders(name,po_number)), profiles:installer_id(id, full_name), confirmed_by_profile:material_check_confirmed_by(full_name), installation_proofs(id, photo_url, storage_path, photo_type, angle, duplicate_flag, work_item_id)',
           { count: 'exact' }
         )
         .eq('organization_id', orgId)
@@ -208,7 +224,7 @@ export default function InstallationReviewPage() {
   const bulkMutation = useMutation({
     mutationFn: async () => {
       const targets = rows.filter((r) => selectedIds.has(r.id));
-      if (targets.length === 0) throw new Error('Select at least one installation first.');
+      if (!allInspected(targets, inspectedIds)) throw new Error('Inspect and confirm evidence for each selected shop first.');
       for (const job of targets) {
         await applyDecision(job, bulkAction, bulkNote);
       }
@@ -227,15 +243,22 @@ export default function InstallationReviewPage() {
   async function runBulkAll(decision: 'approve' | 'reject') {
     const targets = rows.filter((r) => selectedIds.has(r.id));
     if (!targets.length) return;
+    if (!allInspected(targets, inspectedIds)) { setBulkResult('Inspect and confirm the evidence for EVERY selected shop before applying a batch decision.'); return; }
     if (decision === 'reject' && !bulkNote.trim()) { setBulkResult('Redo/reject ke liye note likhiye.'); return; }
     setBulkBusy(true); setBulkResult('');
     const lines: string[] = [];
+    const successful: string[] = [];
     for (const job of targets) {
       try {
         const res = await reviewApply({ stage: 'installation', shopId: job.shop_id, refId: job.id, decision: decision === 'approve' ? 'approved' : 'redo', note: bulkNote });
+        if (res.finalized || res.left_review) successful.push(job.id);
         lines.push(`✅ ${job.shops?.name}: ${res.finalized ? 'approved — review se hat gaya' : res.left_review ? 'redo bhej diya — review se hat gaya' : 'kuch kaam abhi pending, review me hai'}`);
       } catch (e: any) { lines.push(`❌ ${job.shops?.name}: ${e.message}`); }
     }
+    setSelectedIds(prev => new Set([...prev].filter(id => !successful.includes(id))));
+    setInspectedIds(prev => new Set([...prev].filter(id => !successful.includes(id))));
+    setEvidenceReadyIds(prev => new Set([...prev].filter(id => !successful.includes(id))));
+    setBatchIndex(0);
     setBulkResult(lines.join('\n')); setBulkBusy(false); invalidateAll();
   }
 
@@ -256,12 +279,21 @@ export default function InstallationReviewPage() {
   }
 
   function openBulk(act: 'approve' | 'reject') {
+    setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBatchIndex(0);
     setBulkAction(act);
     setBulkNote('');
     setBulkModalOpen(true);
   }
 
   const selectedJobs = rows.filter((r) => selectedIds.has(r.id));
+  const activeBatchJob = selectedJobs[Math.min(batchIndex, Math.max(0, selectedJobs.length - 1))];
+  function nextSingleReview(completedId: string) {
+    invalidateAll();
+    if (!autoNext) { setReviewModal(null); return; }
+    const index = rows.findIndex(row => row.id === completedId);
+    const next = rows.slice(index + 1).find(row => row.review_status === 'pending');
+    if (next) openReview(next, 'approve'); else setReviewModal(null);
+  }
 
   return (
     <div>
@@ -290,18 +322,7 @@ export default function InstallationReviewPage() {
         ))}
       </div>
 
-      {tab === 'pending' && (
-        <div className="flex items-center justify-end mb-3">
-          <button
-            onClick={() => { setSelectMode((v) => !v); setSelectedIds(new Set()); }}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-lg font-medium text-sm transition border ${
-              selectMode ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
-            }`}
-          >
-            {selectMode ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />} Select Multiple
-          </button>
-        </div>
-      )}
+      {tab === 'pending' && <p className="mb-2 text-xs text-slate-500">Open any shop for item-wise review, or tick shops below for a focused batch review. No extra selection mode.</p>}
 
       {selectMode && (
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4 bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5">
@@ -314,7 +335,7 @@ export default function InstallationReviewPage() {
               Select all on this page
             </button>
             <button
-              onClick={() => { setBulkAction('approve'); setBulkModalOpen(true); }}
+              onClick={() => { setBulkAction('approve'); setBatchIndex(0); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBulkResult(''); setBulkModalOpen(true); }}
               disabled={selectedIds.size === 0}
               className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
             >
@@ -561,6 +582,7 @@ export default function InstallationReviewPage() {
       >
         <div className="space-y-4">
           <p className="text-sm text-slate-600">Shop: <span className="font-medium text-slate-900">{reviewModal?.shops?.name}</span></p>
+          {reviewModal && <div className="flex flex-wrap items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-xs"><span className="font-medium text-slate-700">Work Item measurements, design and installed proofs are reviewed together.</span><label className="flex items-center gap-2 text-blue-800"><input type="checkbox" checked={autoNext} onChange={e => setAutoNext(e.target.checked)} /> Open next after completion</label></div>}
           {reviewModal && <CompanyApprovalHandoff stage="installation" refId={reviewModal.id} shopId={reviewModal.shop_id} />}
           {reviewModal && <MaterialLoadedSummary job={reviewModal} onOpenPhoto={setLightbox} />}
 
@@ -570,7 +592,7 @@ export default function InstallationReviewPage() {
           {reviewModal && (
             <div>
               <p className="text-xs font-medium text-slate-700 flex items-center gap-1.5 mb-2"><Palette className="w-3.5 h-3.5" /> Work Item Evidence — Survey → Measurement → Design → Installation</p>
-              <WorkItemEvidenceReview shopId={reviewModal.shop_id} jobId={reviewModal.id} assignedTo={reviewModal.installer_id} readOnly={reviewModal.review_status !== 'pending' && !reopenForRedo} onOpenPhoto={setLightbox} onLeftReview={() => { setReviewModal(null); invalidateAll(); }} />
+              <WorkItemEvidenceReview shopId={reviewModal.shop_id} jobId={reviewModal.id} assignedTo={reviewModal.installer_id} readOnly={reviewModal.review_status !== 'pending' && !reopenForRedo} key={reviewModal.id} onOpenPhoto={setLightbox} onLeftReview={() => nextSingleReview(reviewModal.id)} />
             </div>
           )}
 
@@ -598,7 +620,7 @@ export default function InstallationReviewPage() {
           evidence can never be accidentally approved against the wrong shop. */}
       <Modal
         open={bulkModalOpen}
-        onClose={() => setBulkModalOpen(false)}
+        onClose={() => { if (!bulkBusy) setBulkModalOpen(false); }}
         title={`Review Selected Shops — ${selectedJobs.length}`}
         size="xl"
       >
@@ -607,41 +629,48 @@ export default function InstallationReviewPage() {
             <CheckSquare className="w-5 h-5 text-blue-600 mt-0.5 shrink-0" />
             <div><p className="text-sm font-semibold text-slate-900">Multi-shop quality review</p><p className="text-xs text-slate-600 mt-0.5">Each shop has its own Survey → Measurement → Design → Installation evidence. Select evidence inside that shop and approve or mark only that selection for redo. A shop stays in Pending Review until every required item is complete and approved.</p></div>
           </div>
-          <div className="space-y-3 max-h-[68vh] overflow-y-auto pr-1">
-            {selectedJobs.map((j, index) => {
-              const photos:any[] = j.installation_proofs || [];
-              return <details key={j.id} open={selectedJobs.length <= 3 || index === 0} className="group rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm">
-                <summary className="list-none cursor-pointer px-4 py-3 bg-slate-50/80 hover:bg-slate-50 flex items-center gap-3">
-                  <div className="w-7 h-7 rounded-lg bg-slate-900 text-white flex items-center justify-center text-xs font-bold shrink-0">{index+1}</div>
-                  <div className="min-w-0 flex-1"><p className="font-semibold text-slate-900 truncate">{j.shops?.name}</p><p className="text-xs text-slate-500 truncate">{j.shops?.city || 'Location not set'} · {j.profiles?.full_name || 'Installer'} · {photos.length} installation photo{photos.length===1?'':'s'}</p></div>
-                  {(j.gps_distance_flag || photos.some((p:any)=>p.duplicate_flag)) && <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-1"><AlertTriangle className="w-3 h-3"/> Check flag</span>}
-                  <ChevronRight className="w-4 h-4 text-slate-400 transition group-open:rotate-90"/>
-                </summary>
-                <div className="p-4 border-t border-slate-100">
-                  <WorkItemEvidenceReview shopId={j.shop_id} jobId={j.id} assignedTo={j.installer_id} onOpenPhoto={setLightbox} onLeftReview={invalidateAll}/>
-                </div>
-              </details>;
-            })}
-          </div>
+          <div ref={batchTopRef} />
+          <ReviewBatchStepper
+            items={selectedJobs.map(j => ({ id: j.id, name: j.shops?.name || 'Shop', subtitle: `${j.shops?.purchase_orders?.name || j.shops?.purchase_orders?.po_number || 'No PO'} · ${j.shops?.city || 'Location not set'} · ${j.profiles?.full_name || 'Installer'} · ${(j.installation_proofs || []).length} photos`, flagged: !!j.gps_distance_flag || (j.installation_proofs || []).some((p:any) => p.duplicate_flag) }))}
+            index={batchIndex} onIndexChange={setBatchIndex} inspected={inspectedIds}
+          />
+          {activeBatchJob && <div key={activeBatchJob.id} className="space-y-3">
+            <CompanyApprovalHandoff stage="installation" refId={activeBatchJob.id} shopId={activeBatchJob.shop_id}/>
+            <MaterialLoadedSummary job={activeBatchJob} onOpenPhoto={setLightbox} />
+            <WorkItemEvidenceReview shopId={activeBatchJob.shop_id} jobId={activeBatchJob.id} assignedTo={activeBatchJob.installer_id} onOpenPhoto={setLightbox}
+              onEvidenceReady={() => setEvidenceReadyIds(prev => prev.has(activeBatchJob.id) ? prev : new Set(prev).add(activeBatchJob.id))}
+              onEvidenceChanged={() => { setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); setEvidenceReadyIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); }}
+              onLeftReview={() => { setSelectedIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); setBatchIndex(0); invalidateAll(); }}/>
+          </div>}
+          {activeBatchJob && <div className="sticky bottom-0 z-20 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-blue-200 bg-white/95 p-2 shadow-sm backdrop-blur">
+            <p className="min-w-0 text-xs text-slate-600">{inspectedIds.has(activeBatchJob.id) ? 'Evidence reviewed' : evidenceReadyIds.has(activeBatchJob.id) ? 'Check installed photos & measurements, then continue' : 'Evidence missing or loading — use item redo if needed'}</p>
+            <button type="button" disabled={!evidenceReadyIds.has(activeBatchJob.id) || inspectedIds.has(activeBatchJob.id) || bulkBusy} onClick={() => {
+              setInspectedIds(prev => new Set(prev).add(activeBatchJob.id));
+              const nextIndex = nextUnreviewedIndex(selectedJobs, batchIndex, inspectedIds);
+              if (nextIndex !== -1) setBatchIndex(nextIndex);
+            }} className="rounded-lg bg-blue-700 px-4 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">{inspectedIds.has(activeBatchJob.id) ? 'Reviewed ✓' : selectedJobs.length - inspectedIds.size === 1 ? 'Mark final shop reviewed' : 'Reviewed & next shop →'}</button>
+          </div>}
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
-            <p className="text-xs font-semibold text-slate-800">Sabhi selected shops ek saath ({selectedJobs.length})</p>
+            <p className="text-xs font-semibold text-slate-800">Batch action · {selectedJobs.filter(j => inspectedIds.has(j.id)).length}/{selectedJobs.length} shops inspected</p>
             <input value={bulkNote} onChange={(e) => setBulkNote(e.target.value)} placeholder="Note (redo/reject ke liye zaroori)" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs bg-white" />
             <div className="grid grid-cols-2 gap-2">
-              <button disabled={bulkBusy} onClick={() => void runBulkAll('approve')} className="rounded-lg bg-emerald-600 text-white py-2 text-sm font-semibold disabled:opacity-40">{bulkBusy ? 'Working…' : 'Approve all remaining (sab shops)'}</button>
-              <button disabled={bulkBusy} onClick={() => void runBulkAll('reject')} className="rounded-lg bg-red-600 text-white py-2 text-sm font-semibold disabled:opacity-40">Reject / redo all (sab shops)</button>
+              <button disabled={bulkBusy || !allInspected(selectedJobs, inspectedIds)} onClick={() => void runBulkAll('approve')} className="rounded-lg bg-emerald-600 text-white py-2 text-sm font-semibold disabled:opacity-40">{bulkBusy ? 'Working…' : 'Approve all remaining (sab shops)'}</button>
+              <button disabled={bulkBusy || !allInspected(selectedJobs, inspectedIds) || !bulkNote.trim()} onClick={() => void runBulkAll('reject')} className="rounded-lg bg-red-600 text-white py-2 text-sm font-semibold disabled:opacity-40">Reject / redo all (sab shops)</button>
             </div>
+            {!allInspected(selectedJobs, inspectedIds) && <p className="text-xs text-amber-800">Use Reviewed & next after inspecting each shop; unreviewed shops stay blocked.</p>}
             {bulkResult && <p className="text-xs whitespace-pre-line text-slate-700">{bulkResult}</p>}
           </div>
           <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
             <p className="text-xs text-slate-500">Decisions are saved per shop and per selected evidence — never across the wrong shop.</p>
-            <button onClick={() => setBulkModalOpen(false)} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800">Done Reviewing</button>
+            <button disabled={bulkBusy} onClick={() => setBulkModalOpen(false)} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-50">Done Reviewing</button>
           </div>
         </div>
       </Modal>
 
       {lightbox && (
-        <div onClick={() => setLightbox(null)} className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4 cursor-zoom-out">
-          <img src={lightbox} alt="Full size" className="max-w-full max-h-full rounded-lg" />
+        <div onClick={() => setLightbox(null)} role="dialog" aria-modal="true" aria-label="Full size installation evidence" className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4 cursor-zoom-out">
+          <button type="button" onClick={() => setLightbox(null)} className="absolute right-4 top-4 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-900">Close (Esc)</button>
+          <img src={lightbox} alt="Full size installation evidence" onClick={event => event.stopPropagation()} className="max-w-full max-h-full rounded-lg" />
         </div>
       )}
     </div>
@@ -738,55 +767,71 @@ function MaterialLoadedSummary({ job, onOpenPhoto }: { job: any; onOpenPhoto: (u
 // Shows before/after/installed proof photos plus GPS, so Admin/Owner can
 // actually see the completed work before approving it. Click any photo to
 // open it full-size.
-function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, onOpenPhoto, onLeftReview }: { shopId: string; jobId: string; assignedTo?: string; readOnly?: boolean; onOpenPhoto: (url: string) => void; onLeftReview?: () => void }) {
+function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, onOpenPhoto, onLeftReview, onEvidenceReady, onEvidenceChanged }: { shopId: string; jobId: string; assignedTo?: string; readOnly?: boolean; onOpenPhoto: (url: string) => void; onLeftReview?: () => void; onEvidenceReady?: () => void; onEvidenceChanged?: () => void }) {
   const { profile } = useAuth();
   const qc = useQueryClient();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [reviewNote, setReviewNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [reviewError, setReviewError] = useState('');
-  const { data: workItems } = useQuery({
+  const { data: workItems, isSuccess: workItemsReady, isError: workItemsFailed, isFetching: workItemsFetching } = useQuery({
     queryKey: ['review-evidence-work-items', shopId],
     queryFn: async () => { const { data, error } = await supabase.from('work_items').select('*').eq('shop_id', shopId).order('created_at'); if (error) throw new Error(error.message); return (data || []) as WorkItem[]; }, enabled: !!shopId,
   });
-  const { data: surveyPhotos } = useQuery({
+  const { data: surveyPhotos, isSuccess: surveyPhotosReady, isError: surveyPhotosFailed, isFetching: surveyPhotosFetching } = useQuery({
     queryKey: ['review-evidence-survey-photos', shopId],
     queryFn: async () => { const { data, error } = await supabase.from('survey_photos').select('*').eq('shop_id', shopId).order('created_at'); if (error) throw new Error(error.message); return (data || []) as SurveyPhoto[]; }, enabled: !!shopId,
   });
-  const { data: markings } = useQuery({
+  const { data: markings, isSuccess: markingsReady, isError: markingsFailed, isFetching: markingsFetching } = useQuery({
     queryKey: ['review-evidence-markings', shopId, surveyPhotos?.length],
     queryFn: async () => { const ids=(surveyPhotos||[]).map(p=>p.id); if(!ids.length)return [] as BoardMarking[]; const {data,error}=await supabase.from('board_markings').select('*').in('survey_photo_id',ids); if(error)throw new Error(error.message); return (data||[]) as BoardMarking[]; }, enabled: !!surveyPhotos,
   });
-  const { data: photoLinks } = useQuery({
+  const { data: photoLinks, isSuccess: photoLinksReady, isError: photoLinksFailed, isFetching: photoLinksFetching } = useQuery({
     queryKey: ['review-evidence-photo-links', shopId, surveyPhotos?.length],
     queryFn: async () => { const ids=(surveyPhotos||[]).map(p=>p.id); if(!ids.length)return [] as any[]; const {data,error}=await supabase.from('survey_photo_items').select('survey_photo_id, work_item_id').in('survey_photo_id',ids); if(error&&/survey_photo_items|schema cache|could not find the table/i.test(error.message||''))return []; if(error)throw new Error(error.message); return data||[]; }, enabled: !!surveyPhotos,
   });
-  const { data: designTasks } = useQuery({
+  const { data: designTasks, isSuccess: designTasksReady, isError: designTasksFailed, isFetching: designTasksFetching } = useQuery({
     queryKey: ['review-evidence-designs', shopId],
     queryFn: async () => { const {data,error}=await supabase.from('design_tasks').select('id, design_versions(*, design_version_items(work_item_id))').eq('shop_id',shopId); if(error)throw new Error(error.message); return data||[]; }, enabled: !!shopId,
   });
-  const { data: proofs } = useQuery({
+  const { data: proofs, isSuccess: proofsReady, isError: proofsFailed, isFetching: proofsFetching } = useQuery({
     queryKey: ['review-evidence-proofs', jobId],
     queryFn: async () => { const {data,error}=await supabase.from('installation_proofs').select('*').eq('installation_job_id',jobId).order('captured_at'); if(error)throw new Error(error.message); return (data||[]) as any[]; }, enabled: !!jobId,
   });
-  const { data: decisions=[] } = useQuery({
+  const { data: decisions=[], isSuccess: decisionsReady, isError: decisionsFailed, isFetching: decisionsFetching } = useQuery({
     queryKey: ['inline-install-review-decisions', jobId],
     queryFn: async () => { const {data,error}=await supabase.from('field_review_decisions').select('*').eq('stage','installation').eq('installation_job_id',jobId); if(error&&/field_review_decisions|schema cache/i.test(error.message||''))return []; if(error)throw new Error(error.message); return data||[]; }, enabled: !!jobId,
   });
+  const allEvidenceReady = workItemsReady && surveyPhotosReady && markingsReady && photoLinksReady && designTasksReady && proofsReady && decisionsReady;
+  const hasReviewableEvidence = (workItems?.length || 0) > 0 && (workItems || []).filter(item => !item.excluded_from_calculations).some(item => (proofs || []).some(p => p.work_item_id === item.id)) && (workItems || []).filter(item => !item.excluded_from_calculations).every(item => (proofs || []).some(p => p.work_item_id === item.id));
+  const evidenceFetching = workItemsFetching || surveyPhotosFetching || markingsFetching || photoLinksFetching || designTasksFetching || proofsFetching || decisionsFetching;
+  const evidenceFailed = workItemsFailed || surveyPhotosFailed || markingsFailed || photoLinksFailed || designTasksFailed || proofsFailed || decisionsFailed;
+  useEffect(() => { if (allEvidenceReady && !evidenceFetching && hasReviewableEvidence) onEvidenceReady?.(); }, [allEvidenceReady, evidenceFetching, hasReviewableEvidence, onEvidenceReady]);
   const dmap = useMemo(() => new Map((decisions as any[]).map((d:any)=>[`${d.entity_type}:${d.entity_id}`,d])), [decisions]);
   const items=workItems||[];
-  if(!items.length)return <p className="text-xs text-slate-400">No approved work items found for this shop.</p>;
+  const pendingReviewKeys = useMemo(() => items
+    .filter((item:any) => !item.excluded_from_calculations && !(decisions || []).some((d:any) => d.entity_type === 'work_item' && d.entity_id === item.id && (d.decision === 'approved' || d.decision === 'redo')))
+    .map((item:any) => `work_item:${item.id}`), [workItems, decisions]);
+  // One shop may have many items. Preselect the pending ones; reviewer
+  // narrows selection only when sending a particular item for redo.
+  useEffect(() => {
+    if (!readOnly && allEvidenceReady) setSelected(new Set(pendingReviewKeys));
+  }, [readOnly, jobId, allEvidenceReady, pendingReviewKeys]);
+  if (evidenceFailed) return <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">Could not load all evidence. Reopen this review or retry after reconnecting; approval is unavailable.</p>;
+  if (!allEvidenceReady) return <p role="status" className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">Loading all work items, survey photos, designs and installation proofs…</p>;
+  if (!items.length) return <p role="alert" className="text-xs text-amber-700">No work items found; review needs item reconciliation.</p>;
   const dim=(it:any)=>{const w=it.approved_width??it.survey_width,h=it.approved_height??it.survey_height,u=it.approved_unit??it.survey_unit??'ft',q=it.approved_quantity??it.survey_quantity??1,a=it.approved_area??it.survey_area;return `${itemSizeLabel(it)} · Qty ${q}${a!=null?` · ${Number(a).toFixed(2)} sq.ft`:''}`};
   const toggle=(key:string)=>setSelected(prev=>{const n=new Set(prev);n.has(key)?n.delete(key):n.add(key);return n});
   const Photo=({url,label,reviewKey,decision}:{url?:string|null;label:string;reviewKey?:string;decision?:any})=>url?(<div className={`relative rounded-xl border-2 overflow-hidden ${reviewKey&&selected.has(reviewKey)?'border-blue-500 ring-2 ring-blue-100':decision?.decision==='redo'?'border-amber-300':'border-slate-200'}`}><button onClick={()=>onOpenPhoto(url)} className="block w-full bg-slate-50"><img src={url} alt={label} className="w-full aspect-[4/3] object-contain bg-slate-100"/></button>{reviewKey&&!readOnly&&<button onClick={()=>toggle(reviewKey)} className="absolute top-2 left-2 rounded-md bg-white/95 shadow px-2 py-1 text-[10px] font-semibold flex items-center gap-1">{selected.has(reviewKey)?<CheckSquare className="w-3.5 h-3.5 text-blue-600"/>:<Square className="w-3.5 h-3.5 text-slate-500"/>} Select</button>}<div className="absolute left-2 bottom-2 flex gap-1"><span className="rounded-md bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-white">{label}</span>{decision&&<span className={`rounded-md px-2 py-1 text-[10px] font-bold ${decision.decision==='approved'?'bg-emerald-600 text-white':'bg-amber-500 text-white'}`}>{decision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div>):<div className="aspect-[4/3] rounded-xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center text-[11px] text-slate-400">No {label.toLowerCase()}</div>;
   async function applyInline(decision:'approved'|'redo'){
     if(!selected.size||!profile)return; setBusy(true);setReviewError('');
     try{
+      if(decision==='approved' && [...selected].some(key => { const id = key.split(':')[1]; return key.startsWith('work_item:') && !(proofs || []).some(p => p.work_item_id === id); })) throw new Error('One or more selected Work Items have no linked installation photos. Request missing proof or reconcile the legacy photos before approval.');
       if(decision==='redo' && !reviewNote.trim()) throw new Error('Redo ke liye note likhiye — installer ko batana zaroori hai kya theek karna hai.');
       const entities:ReviewEntity[]=[...selected].map(key=>{const [kind,id]=key.split(':');return {type:kind==='work_item'?'work_item':'installation_photo',id} as ReviewEntity;});
       const res=await reviewApply({stage:'installation',shopId,refId:jobId,entities,decision,note:reviewNote});
       setSelected(new Set());setReviewNote('');
-      await refreshReviewViews(qc,shopId);
+      await refreshReviewViews(qc,shopId); onEvidenceChanged?.();
       if(res.finalized||res.left_review){ setReviewError(''); onLeftReview?.(); }
       else if(decision==='approved'){ setReviewError(res.redo>0?`${res.redo} item abhi Redo me hai — pehle wo theek hona chahiye ya use approve kijiye.`:res.undecided&&res.undecided>0?`${res.undecided} work item ka decision pending hai — unhe bhi approve/redo kijiye.`:'Approve ho gaya.'); }
       else { setReviewError(`Redo bhej diya. ${res.undecided||0} item ka decision pending hai, isliye shop abhi review me hai.`); }
@@ -799,13 +844,14 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
         const reason=window.prompt('Yeh kaam installation ke liye available kyun nahi hai? (Renovation / site blocked / permission / removed)','Site renovation')?.trim(); if(!reason)return;
         const n=window.prompt('Optional comment','')?.trim()||null; await setAvailability(item.id,true,reason,n);
       }
-      await refreshReviewViews(qc,shopId);
+      await refreshReviewViews(qc,shopId); onEvidenceChanged?.();
     }catch(e:any){setReviewError(e.message||String(e));}
   }
-  const reviewableKeys=items.map((item:any)=>`work_item:${item.id}`);
+  const reviewableKeys=pendingReviewKeys;
   const allSelected=reviewableKeys.length>0&&reviewableKeys.every(k=>selected.has(k));
   return <div className="space-y-3">
-    {!readOnly&&<div className="flex items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-3 py-2"><p className="text-xs text-slate-600"><b className="text-slate-900">One shop, one review workspace.</b> Select the Work Item that needs a decision. Its Survey → Measurement → Design → Installation evidence stays together; photo thumbnails remain clean and are not separate checkboxes.</p><button onClick={()=>setSelected(allSelected?new Set():new Set(reviewableKeys))} className="shrink-0 text-xs font-semibold text-blue-700 flex items-center gap-1">{allSelected?<CheckSquare className="w-4 h-4"/>:<Square className="w-4 h-4"/>}{allSelected?'Clear all':'Select all'}</button></div>}
+    {!readOnly && !hasReviewableEvidence && <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">Some work items do not have linked installation photos. Batch approval is disabled; you can still request targeted redo here.</p>}
+    {!readOnly&&<div className="flex items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-3 py-2"><p className="text-xs text-slate-600"><b className="text-slate-900">One shop, one review workspace.</b> Pending items are preselected. To request a targeted redo, keep only affected items checked. Photos, designs and measurements stay together.</p><button type="button" onClick={()=>setSelected(allSelected?new Set():new Set(reviewableKeys))} className="shrink-0 text-xs font-semibold text-blue-700 flex items-center gap-1">{allSelected?<CheckSquare className="w-4 h-4"/>:<Square className="w-4 h-4"/>}{allSelected?'Clear':'Select all'}</button></div>}
     {items.map((item:any,index:number)=>{
       const linkedSurvey=(surveyPhotos||[]).filter(p=>(photoLinks||[]).some((x:any)=>x.work_item_id===item.id&&x.survey_photo_id===p.id)||(markings||[]).some(m=>m.work_item_id===item.id&&m.survey_photo_id===p.id));
       const designs=(designTasks||[]).flatMap((t:any)=>t.design_versions||[]).filter((v:any)=>(v.design_version_items||[]).some((x:any)=>x.work_item_id===item.id)).sort((a:any,b:any)=>(b.version_number||0)-(a.version_number||0));
@@ -813,7 +859,7 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
       return <div key={item.id} className={`rounded-2xl border bg-white overflow-hidden shadow-sm ${selected.has(itemKey)?'border-blue-400 ring-2 ring-blue-100':'border-slate-200'}`}>
         <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 bg-slate-50 border-b border-slate-200"><div className="flex gap-2.5 items-start">{!readOnly&&<button onClick={()=>toggle(itemKey)} className="mt-0.5">{selected.has(itemKey)?<CheckSquare className="w-5 h-5 text-blue-600"/>:<Square className="w-5 h-5 text-slate-400"/>}</button>}<div><p className="text-[10px] font-bold tracking-[.16em] text-slate-400 uppercase">Work Item {index+1}</p><h4 className="text-sm font-semibold text-slate-900 mt-0.5">{item.work_type_name||'Work item'}</h4><p className="text-xs text-slate-500 mt-1">{dim(item)}</p></div></div><div className="flex flex-wrap items-center gap-2">{item.excluded_from_calculations&&<span className="rounded-full px-2.5 py-1 text-[10px] font-bold bg-slate-200 text-slate-700">NOT AVAILABLE · EXCLUDED</span>}{!readOnly&&<button type="button" onClick={()=>void toggleAvailability(item)} className="rounded-full border border-slate-300 px-2.5 py-1 text-[10px] font-semibold text-slate-600 hover:bg-slate-100">{item.excluded_from_calculations?'Make installable':'Mark not available'}</button>}{itemDecision&&<span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${itemDecision.decision==='approved'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'}`}>{itemDecision.decision==='approved'?'APPROVED':'REDO'}</span>}<span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${itemProofs.length?'bg-emerald-50 text-emerald-700 border border-emerald-200':'bg-amber-50 text-amber-700 border border-amber-200'}`}>{itemProofs.length} installation photo{itemProofs.length===1?'':'s'}</span></div></div>
         {item.excluded_from_calculations&&<div className="px-4 py-2 bg-slate-100 border-b text-xs text-slate-700">Site unavailable: <b>{item.execution_reason||'reason not given'}</b>{item.execution_note?` — ${item.execution_note}`:''}. Yeh kaam installed sq.ft / qty / billing mein excluded from totals.</div>}
-        <div className="p-4"><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><div><p className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-1.5">1 · Survey / Measurement</p><Photo url={linkedSurvey[0]?.photo_url} label="Survey"/>{linkedSurvey.length>1&&<p className="text-[10px] text-slate-400 mt-1">+{linkedSurvey.length-1} more survey photo(s)</p>}</div><div><p className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1.5">2 · Approved Design</p><Photo url={designs[0]?.file_url} label={designs[0]?`Design v${designs[0].version_number}`:'Design'}/></div><div><p className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 mb-1.5">3 · Installed Proof</p>{itemProofs.length?<div className="grid grid-cols-2 gap-2">{itemProofs.map((p:any)=><Photo key={p.id} url={p.photo_url} label={p.angle||'Installed'} decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div>:<Photo label="Installation proof"/>}</div></div></div>
+        <div className="p-4"><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><div><p className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-1.5">1 · Survey / Measurement</p>{linkedSurvey.length ? <div className="grid grid-cols-2 gap-2">{linkedSurvey.map((p:any) => <Photo key={p.id} url={p.photo_url} label="Survey"/>)}</div> : <Photo label="Survey"/>}</div><div><p className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1.5">2 · Approved Design</p><Photo url={designs[0]?.file_url} label={designs[0]?`Design v${designs[0].version_number}`:'Design'}/></div><div><p className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 mb-1.5">3 · Installed Proof</p>{itemProofs.length?<div className="grid grid-cols-2 gap-2">{itemProofs.map((p:any)=><Photo key={p.id} url={p.photo_url} label={p.angle||'Installed'} decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div>:<Photo label="Installation proof"/>}</div></div></div>
       </div>;
     })}
     {!readOnly&&<div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><div className="flex items-start gap-3"><div className="mt-0.5 rounded-full bg-blue-100 p-1.5"><CheckCircle2 className="w-4 h-4 text-blue-700"/></div><div><p className="text-xs font-semibold text-slate-900">Shop tab tak review me rahega jab tak har Work Item ka decision na ho</p><p className="text-[11px] text-slate-500 mt-0.5">Jab tak koi Work Item undecided hai, shop Pending Review me rahega. Sab approved = Installed ho jata hai. Sab decide ho jayein aur kuch redo ho = shop review se hatkar installer ke paas Redo me chala jata hai.</p></div></div></div>}

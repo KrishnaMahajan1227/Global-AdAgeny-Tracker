@@ -10,7 +10,7 @@ import { surveyReviewSelectionModel, type SurveyCorrectionScope } from '@/lib/su
 import type { BoardMarking, SurveyPhoto, WorkItem } from '@/lib/types';
 
 type Evidence = { photos: SurveyPhoto[]; items: WorkItem[]; markings: BoardMarking[]; links: { survey_photo_id: string; work_item_id: string }[]; decisions: { entity_type: string; entity_id: string; decision: string; note: string | null }[] };
-type Props = { surveyId: string; shopId: string; readOnly?: boolean; onDone?: () => void; onEvidenceReady?: () => void; onEvidenceChanged?: () => void };
+type Props = { surveyId: string; shopId: string; readOnly?: boolean; batchMode?: boolean; onDone?: () => void; onEvidenceReady?: () => void; onEvidenceChanged?: () => void };
 
 function MarkedTile({ photo, markings, items, wide }: { photo: SurveyPhoto; markings: BoardMarking[]; items: WorkItem[]; wide?: boolean }) {
   const [src, setSrc] = useState<string | null>(null);
@@ -47,7 +47,7 @@ function MarkedTile({ photo, markings, items, wide }: { photo: SurveyPhoto; mark
   </div>;
 }
 
-export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, onDone, onEvidenceReady, onEvidenceChanged }: Props) {
+export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, batchMode = false, onDone, onEvidenceReady, onEvidenceChanged }: Props) {
   const { profile } = useAuth();
   const qc = useQueryClient();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -188,7 +188,7 @@ export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, onDone
                 Photo evidence
               </label>
             ) : photoDecision && (
-              <p className="text-[11px] font-medium text-slate-600">Photo evidence · {photoDecision.decision === 'approved' ? 'Approved' : 'Correction requested'}</p>
+              <p className="text-[11px] font-medium text-slate-600">Photo evidence · {photoDecision.decision === 'approved' ? 'Approved' : 'Correction requested'}{photoDecision.note ? ` · ${photoDecision.note}` : ''}</p>
             )}
             {items.map(item => {
               const itemDecision = decisions.get(`measurement:${item.id}`);
@@ -211,15 +211,15 @@ export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, onDone
         return <label key={item.id} className="flex cursor-pointer items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3">
           {!readOnly && <input type="checkbox" className="mt-0.5 h-4 w-4 accent-blue-600" checked={isSelected(`measurement:${item.id}`)} disabled={!!itemDecision} onChange={() => toggle(`measurement:${item.id}`)} />}
           <ImageOff className="h-4 w-4 text-amber-600" />
-          <span className="text-xs"><strong className="block text-slate-900">{item.work_type_name || 'Work item'}</strong><span className="text-slate-600">{itemSizeLabel(item, 'survey')} · Qty {item.survey_quantity ?? 1}</span><span className="block text-amber-800">No linked photo; verify before approving.</span>{itemDecision && <span className="block text-slate-500">{itemDecision.decision === 'approved' ? 'Approved' : 'Correction requested'}</span>}</span>
+          <span className="text-xs"><strong className="block text-slate-900">{item.work_type_name || 'Work item'}</strong><span className="text-slate-600">{itemSizeLabel(item, 'survey')} · Qty {item.survey_quantity ?? 1}</span><span className="block text-amber-800">No linked photo; verify before approving.</span>{itemDecision && <span className="block text-slate-500">{itemDecision.decision === 'approved' ? 'Approved' : 'Correction requested'}{itemDecision.note ? ` · ${itemDecision.note}` : ''}</span>}</span>
         </label>;
       })}
     </div>
     {!photoCount && !safeGroups.unlinked.length && <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-500">No survey evidence found.</p>}
 
-    {!readOnly && <div className="sticky bottom-0 z-10 -mx-1 rounded-xl border border-slate-200 bg-white/95 px-3 py-2.5 shadow-md backdrop-blur space-y-2">
+    {!readOnly && <div className={`${batchMode ? 'relative' : 'sticky bottom-0 z-10'} -mx-1 rounded-xl border border-slate-200 bg-white/95 px-3 py-2.5 shadow-md backdrop-blur space-y-2`}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="mr-auto text-xs font-semibold text-slate-700">{selectedCount} selected</span>
+        <span className="mr-auto text-xs font-semibold text-slate-700">{batchMode ? `Individual measurement / photo · ${selectedCount} selected` : `${selectedCount} selected`}</span>
         <label className="sr-only" htmlFor="survey-review-designer">Assign designer</label>
         <select id="survey-review-designer" value={designerId} onChange={e => setDesignerId(e.target.value)} className="min-w-[160px] max-w-[250px] flex-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="">Select designer</option>{(designers.data || []).map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}</select>
         <button type="button" onClick={() => setConfirm('approve')} disabled={!selectedCount || busy || !designerId || designers.isPending || designers.isError} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40"><Check className="w-3.5 h-3.5" />Approve</button>

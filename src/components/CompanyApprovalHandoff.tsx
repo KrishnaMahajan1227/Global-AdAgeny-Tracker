@@ -20,7 +20,7 @@ export function CompanyApprovalHandoff({stage,refId,shopId}:Props) {
   if (!permitted) return null;
   if (isPending) return <p role="status" className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">Checking company-approval requirements…</p>;
   if (isError) return <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800">Company approval could not be verified. Do not finalise this work until approval data loads. {(error as Error).message} <button onClick={()=>void refetch()} className="font-semibold underline">Retry</button></div>;
-  if (!data?.required) return <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">Historical Work Order: the new company-approval gate is not applied retroactively. Existing review rules remain in effect.</p>;
+  if (!data?.required) return <p className="rounded-md bg-slate-50 px-3 py-1.5 text-[11px] text-slate-500">Historical PO · original review/approval rules apply.</p>;
   const confirmed=data.valid;
   const checked=data.status==='internal_checked';
   const stale=data.status==='evidence_changed';

@@ -16,7 +16,9 @@ import { validWorkOrderId } from '@/lib/operationalNavigation';
 import { reviewApply, refreshReviewViews } from '@/lib/reviewApi';
 import { CompanyApprovalHandoff } from '@/components/CompanyApprovalHandoff';
 import { ReviewBatchStepper } from '@/components/ReviewBatchStepper';
-import { allInspected, nextUnreviewedIndex } from '@/lib/reviewBatchSafety';
+import { ReviewDecisionBar } from '@/components/ReviewDecisionBar';
+import { decisionCounts, decisionTargets, nextUnqueued, validateShopDecision, type ShopDecisionMap, type ShopReviewDecision } from '@/lib/reviewDecisionQueue';
+import { nextUnreviewedIndex, reviewedTargets, processReviewedBatch } from '@/lib/reviewBatchSafety';
 
 // Debounce a fast-changing value (typing in the search box) so we don't
 // fire a network request on every keystroke — same pattern Installation
@@ -78,6 +80,8 @@ export default function SurveyReviewPage() {
   const batchTopRef = useRef<HTMLDivElement>(null);
   const [inspectedIds, setInspectedIds] = useState<Set<string>>(new Set());
   const [evidenceReadyIds, setEvidenceReadyIds] = useState<Set<string>>(new Set());
+  const [batchDecisions, setBatchDecisions] = useState<ShopDecisionMap>({});
+  const [batchErrors, setBatchErrors] = useState<Record<string, string>>({});
   const [autoNext, setAutoNext] = useState(true);
   const [rejectConfirmation, setRejectConfirmation] = useState(false);
   const [sortBy, setSortBy] = useState<'submitted_asc' | 'submitted_desc' | 'shop_asc'>('submitted_asc');
@@ -101,9 +105,11 @@ export default function SurveyReviewPage() {
     if (bulkModalOpen) batchTopRef.current?.scrollIntoView({ block: 'start', behavior: 'auto' });
   }, [batchIndex, bulkModalOpen]);
   const [bulkDesignerId, setBulkDesignerId] = useState('');
+  const [batchProgress, setBatchProgress] = useState<{done:number;total:number}|null>(null);
+  const [batchNotice, setBatchNotice] = useState('');
 
   useEffect(() => { setPage(0); }, [tab, debouncedSearch, surveyorFilter, clientFilter, workOrderFilter, cityFilter, stateFilter, sortBy, pageSize]);
-  useEffect(() => { setSelectedIds(new Set()); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBatchIndex(0); }, [tab, debouncedSearch, surveyorFilter, clientFilter, workOrderFilter, cityFilter, stateFilter, sortBy, page, pageSize]);
+  useEffect(() => { setSelectedIds(new Set()); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBatchDecisions({}); setBatchIndex(0); }, [tab, debouncedSearch, surveyorFilter, clientFilter, workOrderFilter, cityFilter, stateFilter, sortBy, page, pageSize]);
 
   const isPendingSurvey = selectedSurvey?.status === 'submitted';
 
@@ -252,7 +258,7 @@ export default function SurveyReviewPage() {
   // A survey submitted from a surveyor's phone should appear here live,
   // without the Admin/Owner needing to already have this tab closed and
   // reopened.
-  useRealtimeInvalidate(['surveys'], orgId, [surveysQueryKey, countsQueryKey, ['dashboard-stats', orgId]]);
+  useRealtimeInvalidate(['surveys', 'field_review_decisions'], orgId, [surveysQueryKey, countsQueryKey, ['dashboard-stats', orgId]]);
 
   function invalidateAll() {
     void refreshReviewViews(queryClient);
@@ -280,27 +286,64 @@ export default function SurveyReviewPage() {
   // One active designer is a deterministic default; multiple designers require an explicit selection.
   const effectiveBulkDesignerId = bulkDesignerId || (designers?.length === 1 ? designers[0].id : '');
 
+  // Only explicitly queued decisions are submitted. Each shop remains an independent atomic
+  // server RPC, so a failed/unauthorized/stale shop cannot halt the rest of the batch.
   const bulkMutation = useMutation({
     mutationFn: async () => {
-      const targets = rows.filter(r => selectedIds.has(r.id));
-      if (!allInspected(targets, inspectedIds)) throw new Error('Inspect and confirm evidence for every selected shop before batch approval.');
-      if (!targets.length) throw new Error('Select at least one survey.');
-      if (!effectiveBulkDesignerId) throw new Error('Choose a designer before approving selected surveys.');
-      const completed: string[] = [];
+      const targets = decisionTargets(rows.filter(r => selectedIds.has(r.id)), batchDecisions);
+      if (!targets.length) throw new Error('Inspect a shop and queue Approve, Redo or Final reject.');
       for (const survey of targets) {
-        try {
-          await approveSurvey(survey, effectiveBulkDesignerId);
-          completed.push(survey.id);
-        } catch (error) {
-          setSelectedIds(prev => new Set([...prev].filter(id => !completed.includes(id))));
-          setInspectedIds(prev => new Set([...prev].filter(id => !completed.includes(id))));
-          throw error;
-        }
+        const decision = batchDecisions[survey.id];
+        const invalid = validateShopDecision(decision, 'survey', evidenceReadyIds.has(survey.id));
+        if (invalid) throw new Error(`${survey.shops?.name || 'Shop'}: ${invalid}`);
       }
+      if (targets.some(row => batchDecisions[row.id].action === 'approve') && !effectiveBulkDesignerId) {
+        throw new Error('Choose a designer for the shops queued for approval.');
+      }
+      if (targets.some(row => batchDecisions[row.id].action === 'reject') &&
+          !window.confirm(`Permanently reject ${targets.filter(row => batchDecisions[row.id].action === 'reject').length} survey(s)? This is NOT a redo request.`)) {
+        throw new Error('Final rejection cancelled. Your queued decisions are unchanged.');
+      }
+      setBatchProgress({ done: 0, total: targets.length });
+      return processReviewedBatch(targets, async survey => {
+        const choice = batchDecisions[survey.id];
+        if (choice.action === 'approve') return approveSurvey(survey, effectiveBulkDesignerId);
+        if (choice.action === 'reject') {
+          const { error } = await supabase.rpc('reject_survey_shop_final', { p_survey_id: survey.id, p_reason: choice.note });
+          if (error) throw error;
+          return;
+        }
+        const res = await reviewApply({ stage: 'survey', shopId: survey.shop_id, refId: survey.id, decision: 'redo', note: choice.note });
+        if (!res.left_review && !res.redo) throw new Error('Redo could not be applied; check pending item decisions.');
+      }, (done, total) => setBatchProgress({ done, total }), 3);
     },
-    onSuccess: () => { invalidateAll(); setBulkModalOpen(false); setSelectedIds(new Set()); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBulkDesignerId(''); setBatchIndex(0); },
-    onError: () => { invalidateAll(); },
+    onSuccess: ({ succeeded, failed }) => {
+      const completed = new Set(succeeded.map(row => row.id));
+      const errors = Object.fromEntries(failed.map(({item,message}) => [item.id, message]));
+      setBatchErrors(errors);
+      setSelectedIds(prev => new Set([...prev].filter(id => !completed.has(id))));
+      setInspectedIds(prev => new Set([...prev].filter(id => !completed.has(id))));
+      setEvidenceReadyIds(prev => new Set([...prev].filter(id => !completed.has(id))));
+      setBatchDecisions(prev => Object.fromEntries(Object.entries(prev).filter(([id]) => !completed.has(id))));
+      setBatchIndex(0);
+      setBatchProgress(null);
+      setBatchNotice(`${succeeded.length} saved (${succeeded.filter(row => batchDecisions[row.id]?.action === 'approve').length} approved, ${succeeded.filter(row => batchDecisions[row.id]?.action === 'redo').length} redo, ${succeeded.filter(row => batchDecisions[row.id]?.action === 'reject').length} rejected). ${failed.length ? `${failed.length} failed and retained for retry: ${failed.slice(0, 3).map(({item,message}) => `${item.shops?.name || 'Shop'}: ${message}`).join(' | ')}` : 'Other shops remain pending.'}`);
+      invalidateAll();
+      if (!failed.length && succeeded.length && selectedSurveys.length === succeeded.length) setBulkModalOpen(false);
+    },
+    onError: () => { setBatchProgress(null); invalidateAll(); },
   });
+
+  function queueSurveyDecision(id: string, choice: ShopReviewDecision) {
+    const invalid = validateShopDecision(choice, 'survey', evidenceReadyIds.has(id));
+    if (invalid) { setBatchNotice(invalid); return; }
+    setBatchNotice('');
+    setBatchErrors(prev => { const copy = {...prev}; delete copy[id]; return copy; });
+    const updated = { ...batchDecisions, [id]: choice };
+    setBatchDecisions(updated);
+    const next = nextUnqueued(selectedSurveys, batchIndex, updated);
+    if (next >= 0) setBatchIndex(next);
+  }
 
   function toggleSelected(id: string) {
     setSelectedIds((prev) => {
@@ -310,11 +353,21 @@ export default function SurveyReviewPage() {
     });
   }
 
+  function closeBatch() {
+    if (bulkMutation.isPending) return;
+    if (Object.keys(batchDecisions).length && !window.confirm('Close review? Queued decisions that were not submitted will be lost.')) return;
+    setBulkModalOpen(false);
+  }
+
   function openBulk() {
     setBulkDesignerId('');
+    setBatchNotice('');
+    setBatchProgress(null);
     setBatchIndex(0);
     setInspectedIds(new Set());
     setEvidenceReadyIds(new Set());
+    setBatchDecisions({});
+    setBatchErrors({});
     setBulkModalOpen(true);
   }
 
@@ -323,7 +376,8 @@ export default function SurveyReviewPage() {
   // Confirm is locked until a decision is actually made, and — for
   // reject/correction — until there's a note, since "declined, no reason
   // given" leaves the surveyor with nothing to act on.
-  const canConfirmBulk = !!effectiveBulkDesignerId && allInspected(selectedSurveys, inspectedIds);
+  const queuedSurveys = decisionTargets(selectedSurveys, batchDecisions);
+  const queuedCounts = decisionCounts(selectedSurveys.map(row => row.id), batchDecisions);
   const activeBulkSurvey = selectedSurveys[Math.min(batchIndex, Math.max(0, selectedSurveys.length - 1))];
   function afterSingleReview(id: string) {
     invalidateAll();
@@ -358,13 +412,15 @@ export default function SurveyReviewPage() {
         ))}
       </div>
 
-      {tab === 'pending' && selectedIds.size > 0 && (
-        <div className="mb-2 flex flex-wrap items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
-          <p className="mr-auto text-xs font-semibold text-blue-900">{selectedIds.size} selected on this page</p>
-          <button type="button" onClick={() => setSelectedIds(new Set())} className="text-xs text-blue-800 hover:underline">Clear</button>
-          <button type="button" onClick={openBulk} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white"><CheckCircle2 className="h-3.5 w-3.5" /> Review & approve selected</button>
+      {tab === 'pending' && rows.length > 0 && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2">
+          <span className="mr-auto text-xs font-medium text-blue-900">{selectedIds.size ? `${selectedIds.size} shops selected` : `${rows.length} shops on this page`} · Review evidence before any approval</span>
+          {selectedIds.size > 0 && <button type="button" onClick={() => setSelectedIds(new Set())} className="text-xs font-semibold text-blue-700 hover:underline">Clear</button>}
+          <button type="button" onClick={() => { if (!selectedIds.size) setSelectedIds(new Set(rows.map(row => row.id))); setBulkDesignerId(''); setBatchNotice(''); setBatchProgress(null); setBatchIndex(0); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBatchDecisions({}); setBatchErrors({}); setBulkModalOpen(true); }} className="inline-flex items-center gap-1 rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800"><Eye className="h-3.5 w-3.5" />{selectedIds.size ? `Review ${selectedIds.size} selected` : `Review page (${rows.length})`}</button>
         </div>
       )}
+
+      {batchNotice && !bulkModalOpen && <p role="status" className="mb-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900">{batchNotice}</p>}
 
       {/* Filters — same set works across all three tabs, so lookups stay
           fast even months later when there's a long history to sort through. */}
@@ -537,36 +593,40 @@ export default function SurveyReviewPage() {
         </div>}
       </Modal>
 
-      <Modal open={bulkModalOpen} onClose={() => { if (!bulkMutation.isPending) { setBulkModalOpen(false); setBulkPreviewId(null); } }} title={`Review ${selectedSurveys.length} selected shops`} size="xl">
+      <Modal open={bulkModalOpen} onClose={closeBatch} title={`Review ${selectedSurveys.length} selected shops`} size="xl">
         <div className="space-y-3">
-          <p className="text-xs text-slate-600">Review photos and measurements for each shop, then use Reviewed & next. Item corrections remain available; company approval is still required before progressing.</p>
+          <p className="text-xs text-slate-600">Inspect shops in sequence. Review completed shops together at any point; unchecked shops stay safely pending. Individual corrections and company approval remain mandatory.</p>
           <div ref={batchTopRef} />
           <ReviewBatchStepper
             items={selectedSurveys.map(s => ({ id: s.id, name: s.shops?.name || 'Shop', subtitle: `${s.shops?.clients?.name || 'Client'} · ${s.shops?.purchase_orders?.name || s.shops?.purchase_orders?.po_number || 'No PO'} · ${s.profiles?.full_name || 'Surveyor'}` }))}
             index={batchIndex}
             onIndexChange={setBatchIndex}
-            inspected={inspectedIds}
+            inspected={new Set(Object.keys(batchDecisions))}
+            decisionLabels={Object.fromEntries(Object.entries(batchDecisions).map(([id,d]) => [id, d.action === 'approve' ? 'Approve' : d.action === 'redo' ? 'Redo' : 'Final reject']))}
+            disabled={bulkMutation.isPending}
           />
           {activeBulkSurvey && <div key={activeBulkSurvey.id} className="space-y-3">
             <CompanyApprovalHandoff stage="survey" refId={activeBulkSurvey.id} shopId={activeBulkSurvey.shop_id} />
-            <SurveyReviewGallery surveyId={activeBulkSurvey.id} shopId={activeBulkSurvey.shop_id} onEvidenceChanged={() => { setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); setEvidenceReadyIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); }} onDone={() => { setSelectedIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); setBatchIndex(0); invalidateAll(); if (selectedSurveys.length === 1) setBulkModalOpen(false); }} onEvidenceReady={() => setEvidenceReadyIds(prev => prev.has(activeBulkSurvey.id) ? prev : new Set(prev).add(activeBulkSurvey.id))} />
+            <SurveyReviewGallery batchMode surveyId={activeBulkSurvey.id} shopId={activeBulkSurvey.shop_id} readOnly={bulkMutation.isPending} onEvidenceChanged={() => { setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); setEvidenceReadyIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); setBatchDecisions(prev => { const copy = { ...prev }; delete copy[activeBulkSurvey.id]; return copy; }); }} onDone={() => { setSelectedIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBulkSurvey.id); return next; }); setBatchDecisions(prev => { const copy = { ...prev }; delete copy[activeBulkSurvey.id]; return copy; }); setBatchIndex(0); invalidateAll(); if (selectedSurveys.length === 1) setBulkModalOpen(false); }} onEvidenceReady={() => setEvidenceReadyIds(prev => prev.has(activeBulkSurvey.id) ? prev : new Set(prev).add(activeBulkSurvey.id))} />
           </div>}
-          {activeBulkSurvey && <div className="sticky bottom-0 z-20 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-blue-200 bg-white/95 p-2 shadow-sm backdrop-blur">
-            <p className="min-w-0 text-xs text-slate-600">{inspectedIds.has(activeBulkSurvey.id) ? 'Evidence reviewed' : evidenceReadyIds.has(activeBulkSurvey.id) ? 'Check photos & measurements, then continue' : 'Loading evidence — review unavailable'}</p>
-            <button type="button" disabled={!evidenceReadyIds.has(activeBulkSurvey.id) || inspectedIds.has(activeBulkSurvey.id) || bulkMutation.isPending} onClick={() => {
-              setInspectedIds(prev => new Set(prev).add(activeBulkSurvey.id));
-              const nextIndex = nextUnreviewedIndex(selectedSurveys, batchIndex, inspectedIds);
-              if (nextIndex !== -1) setBatchIndex(nextIndex);
-            }} className="rounded-lg bg-blue-700 px-4 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">{inspectedIds.has(activeBulkSurvey.id) ? 'Reviewed ✓' : selectedSurveys.length - inspectedIds.size === 1 ? 'Mark final shop reviewed' : 'Reviewed & next shop →'}</button>
-          </div>}
-          <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
-            <label className="min-w-0 flex-1 text-xs text-slate-700">Assign designer to selected shops
-              <select value={effectiveBulkDesignerId} onChange={e => setBulkDesignerId(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs"><option value="">Select designer</option>{(designers || []).map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}</select>
-            </label>
-            <button type="button" disabled={!canConfirmBulk || bulkMutation.isPending} onClick={() => bulkMutation.mutate()} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">{bulkMutation.isPending ? 'Approving…' : `Approve ${selectedSurveys.length} checked shops`}</button>
+          {activeBulkSurvey && <ReviewDecisionBar shopId={activeBulkSurvey.id} stage="survey" evidenceReady={evidenceReadyIds.has(activeBulkSurvey.id)} decision={batchDecisions[activeBulkSurvey.id]} disabled={bulkMutation.isPending}
+            onDecide={choice => queueSurveyDecision(activeBulkSurvey.id, choice)}
+            onClear={() => setBatchDecisions(prev => { const copy = {...prev}; delete copy[activeBulkSurvey.id]; return copy; })} />}
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-slate-900">Ready to submit: {queuedSurveys.length}/{selectedSurveys.length} shops</p>
+              <span className="text-xs text-slate-600">{queuedCounts.approve} approve · {queuedCounts.redo} redo · {queuedCounts.reject} final reject</span>
+            </div>
+            {queuedCounts.approve > 0 && <label className="block text-xs text-slate-700">Assign designer for approved shops
+              <select value={effectiveBulkDesignerId} onChange={e => setBulkDesignerId(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs"><option value="">Select designer</option>{(designers || []).map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}</select>
+            </label>}
+            <button type="button" disabled={!queuedSurveys.length || (queuedCounts.approve > 0 && !effectiveBulkDesignerId) || bulkMutation.isPending} onClick={() => bulkMutation.mutate()}
+              className="w-full rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40">{bulkMutation.isPending ? `Saving ${batchProgress?.done || 0}/${batchProgress?.total || queuedSurveys.length}…` : `Submit ${queuedSurveys.length} decisions`}</button>
+            <p className="text-[11px] text-slate-600">Only queued shops are processed. Unvisited shops stay pending. For one measurement/photo only, use the item controls above.</p>
           </div>
-          {!allInspected(selectedSurveys, inspectedIds) && <p className="text-xs text-amber-800">Use Reviewed & next after inspecting each shop. {selectedSurveys.filter(s => inspectedIds.has(s.id)).length}/{selectedSurveys.length} checked.</p>}
-          {bulkMutation.isError && <p role="alert" className="text-xs text-red-700">{(bulkMutation.error as Error).message}. Successfully approved shops were removed from selection; retry only remaining shops.</p>}
+          {Object.entries(batchErrors).length > 0 && <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900"><strong>Needs retry:</strong>{Object.entries(batchErrors).map(([id,msg]) => <p key={id}>{selectedSurveys.find(s => s.id === id)?.shops?.name || 'Shop'}: {msg}</p>)}</div>}
+          {batchNotice && <p role="status" className="text-xs text-blue-800">{batchNotice}</p>}
+          {bulkMutation.isError && <p role="alert" className="text-xs text-red-700">{(bulkMutation.error as Error).message}</p>}
         </div>
       </Modal>
 

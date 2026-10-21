@@ -1,0 +1,24 @@
+Adroute Review V4 source validation results (local container)
+============================================================
+Review V4 mixed-decision/edge-case checks: 43 passed
+Review V3 regression tests: 30 passed
+Review V2 regression tests: 30 passed
+Focused review/individual-item regression tests: 35 passed
+Phase 1 fulfillment: 16 passed
+Phase 2 approvals: 21 passed
+Phase 3 handoffs: 21 passed (+ three TSX syntax parses)
+Phase 4 field/dispatch: 19 passed (+ seven syntax checks)
+Phase 5 billing reconciliation: 18 passed
+Phase 6 role-based UX: 17 passed
+Phase 7 security/source: 16 passed
+Owner billing readiness: 23 passed
+Runtime JSX symbols: 64 TSX source files parsed
+ZIP: integrity checked after packaging
+
+These are source and logic tests; they do NOT replace a successful npm build,
+authenticated browser QA, actual RLS/security policies run against deployed
+Supabase, simultaneous reviewer tests, or field/mobile tests.
+
+Full dependency installation and Vite build blocked in this environment:
+`npm ci --offline --ignore-scripts` -> ENOTCACHED zip-stream-4.1.1.
+No Supabase migration was added for Review V4.

@@ -1,0 +1,21 @@
+Adroute V3 SOURCE-LEVEL regression results (not live browser/staging verification)
+
+PASS verify-review-workspace-v3.cjs ALL 30 REVIEW V3 CHECKS PASSED
+PASS verify-review-workspace-v2.cjs ALL 30 REVIEW V2 CHECKS PASSED
+PASS verify-fast-review-workspace.cjs ALL 35 FOCUSED REVIEW WORKSPACE CHECKS PASSED
+PASS verify-survey-review.mjs ALL CURRENT SURVEY REVIEW CHECKS PASSED
+PASS verify-survey-review-gallery.mjs PASS Recently visited links next to notification
+PASS verify-survey-selection.mjs PASS gallery wiring checks
+PASS verify-phase1-fulfillment.cjs ALL 16 PHASE 1 FULFILLMENT CHECKS PASSED
+PASS verify-phase2-approvals.cjs ALL 21 PHASE 2 SOURCE VALIDATIONS PASSED
+PASS verify-phase3-handoffs.cjs ALL 21 PHASE 3 SOURCE CHECKS + 3 TSX PARSES PASSED
+PASS verify-phase4-fulfillment.cjs ALL 19 PHASE 4 REGRESSIONS + 7 SYNTAX CHECKS PASSED
+PASS verify-phase5-billing-reconciliation.cjs ALL 18 PHASE 5 RECONCILIATION REGRESSIONS PASSED
+PASS verify-phase6-role-ux.cjs ALL 17 PHASE 6 ROLE & NAVIGATION TESTS PASSED
+PASS verify-phase7-security.cjs ALL 16 PHASE 7 SECURITY/SOURCE CHECKS PASSED
+PASS verify-owner-ux-stage-routing.cjs ALL 15 OWNER UX / NAVIGATION CHECKS PASSED
+PASS verify-owner-dashboard-compact.cjs ALL 8 OWNER DASHBOARD & NAVIGATION TESTS PASSED
+PASS verify-owner-billing-readiness.cjs ALL 23 OWNER READINESS REGRESSIONS PASSED
+PASS verify-runtime-jsx-symbols.cjs PASS: 63 TSX files parse; all JSX component/ icon names resolve to local declarations/imports.
+
+Full npm build and Supabase browser E2E: NOT RUN (dependencies/staging unavailable).

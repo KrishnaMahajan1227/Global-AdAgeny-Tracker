@@ -16,7 +16,7 @@ const checks = [
   ['Multiple markings reuse renderer', gallery.includes('renderMarkedImage(photo.photo_url, valid.map(m => m.points)')],
   ['Full audit and approval data kept in RPC', gallery.includes('await reviewApply({ stage: \'survey\'' )],
   ['Modal approvals and redo ask for confirmation', gallery.includes('setConfirm(\'approve\')') && gallery.includes('setConfirm(\'redo\')')],
-  ['No native browser confirmation for review', !survey.includes('window.confirm') && !gallery.includes('window.confirm')],
+  ['Review decisions use inline confirmation; only unsaved-batch close is guarded', !gallery.includes('window.confirm') && survey.includes("window.confirm('Close review?")],
   ['Sidebar scroll flexible / footer fixed', layout.includes('min-h-0 flex-1') && layout.includes('shrink-0 border-t')],
   ['Recently visited links next to notification', layout.includes('recentPages.map') && layout.includes('<NotificationBell />')],
 ];

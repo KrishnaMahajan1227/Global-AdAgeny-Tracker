@@ -23,11 +23,11 @@ check('No next when every other shop reviewed',nextUnreviewedIndex(many,249,new 
 check('Empty next index is safe',nextUnreviewedIndex([],0,new Set())===-1);
 const survey=source('src/pages/SurveyReviewPage.tsx');const install=source('src/pages/InstallationReviewPage.tsx');const gallery=source('src/components/SurveyReviewGallery.tsx');const stepper=source('src/components/ReviewBatchStepper.tsx');
 check('No duplicate evidence-confirm checkbox in shared navigator',!stepper.includes('<input type="checkbox"') && stepper.includes('Jump to selected shop'));
-check('Exactly one batch evidence review action per shop in Survey',survey.includes('Reviewed & next shop') && survey.includes('setInspectedIds(prev => new Set(prev).add(activeBulkSurvey.id))'));
-check('Exactly one batch evidence review action per shop in Installation',install.includes('Reviewed & next shop') && install.includes('setInspectedIds(prev => new Set(prev).add(activeBatchJob.id))'));
-check('Survey batch requires all explicitly reviewed',survey.includes('if (!allInspected(targets, inspectedIds)) throw') && survey.includes('allInspected(selectedSurveys, inspectedIds)'));
-check('Installation batch requires all explicitly reviewed',install.includes('if (!allInspected(targets, inspectedIds)) throw') && install.includes('!allInspected(selectedJobs, inspectedIds)'));
-check('Both Reviewed and next actions require loaded evidence',survey.includes('!evidenceReadyIds.has(activeBulkSurvey.id)') && install.includes('!evidenceReadyIds.has(activeBatchJob.id)'));
+check('Survey batch has one decision action per shop',survey.includes('ReviewDecisionBar shopId={activeBulkSurvey.id}') && survey.includes('queueSurveyDecision'));
+check('Installation batch has one decision action per shop',install.includes('ReviewDecisionBar shopId={activeBatchJob.id}') && install.includes('queueInstallDecision'));
+check('Survey V4 batch only submits queued decisions',survey.includes('const targets = decisionTargets(rows.filter') && survey.includes('const queuedSurveys = decisionTargets('));
+check('Installation V4 batch only submits queued decisions',install.includes('const targets = decisionTargets(rows.filter') && install.includes('Submit ${decisionTargets(selectedJobs,batchDecisions).length} decisions'));
+check('Both Approval actions require loaded evidence',survey.includes('evidenceReady={evidenceReadyIds.has(activeBulkSurvey.id)}') && install.includes('evidenceReady={evidenceReadyIds.has(activeBatchJob.id)}'));
 check('Survey change invalidates batch review and ready states',survey.includes('next.delete(activeBulkSurvey.id)'));
 check('Installation change invalidates batch review and ready states',install.includes('next.delete(activeBatchJob.id)'));
 check('Pending Survey items preselected, partial corrections supported',gallery.includes('setSelected(new Set(selectionPlan.choices.map(choice => choice.key)))') && gallery.includes('onChange={() => toggle(`measurement:${item.id}`)}'));
@@ -35,7 +35,7 @@ check('Pending Installation work items preselected, targeted redo supported',ins
 check('Single modal scrollbar on both review screens',!survey.includes('max-h-[55vh]') && !install.includes('max-h-[58vh]'));
 check('250 selected shops supported per page on both screens',survey.includes('10, 25, 50, 100, 250') && install.includes('20, 50, 100, 250'));
 check('Auto-scroll to next shops without scrolling unrelated page',survey.includes('batchTopRef.current?.scrollIntoView') && install.includes('batchTopRef.current?.scrollIntoView'));
-check('Batch modal cannot close during Installation write',install.includes('onClose={() => { if (!bulkBusy) setBulkModalOpen(false); }}'));
+check('Batch modal cannot close during Installation write',install.includes('onClose={closeBatch}') && install.includes('if (bulkBusy) return;'));
 check('Company approval handoff still available in both batch review screens',survey.includes('<CompanyApprovalHandoff stage="survey" refId={activeBulkSurvey.id}') && install.includes('<CompanyApprovalHandoff stage="installation" refId={activeBatchJob.id}'));
 for(const file of ['src/lib/reviewBatchSafety.ts','src/components/ReviewBatchStepper.tsx','src/components/SurveyReviewGallery.tsx','src/pages/SurveyReviewPage.tsx','src/pages/InstallationReviewPage.tsx']) {
  const sf=ts.createSourceFile(file,source(file),ts.ScriptTarget.Latest,true,file.endsWith('.tsx')?ts.ScriptKind.TSX:ts.ScriptKind.TS);

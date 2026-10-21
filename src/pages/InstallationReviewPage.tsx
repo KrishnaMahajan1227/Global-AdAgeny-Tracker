@@ -9,7 +9,9 @@ import { logAudit, createNotification } from '@/lib/helpers';
 import { reviewApply, refreshReviewViews, setAvailability, type ReviewEntity } from '@/lib/reviewApi';
 import { CompanyApprovalHandoff } from '@/components/CompanyApprovalHandoff';
 import { ReviewBatchStepper } from '@/components/ReviewBatchStepper';
-import { allInspected, nextUnreviewedIndex } from '@/lib/reviewBatchSafety';
+import { ReviewDecisionBar } from '@/components/ReviewDecisionBar';
+import { decisionCounts, decisionTargets, nextUnqueued, validateShopDecision, type ShopDecisionMap, type ShopReviewDecision } from '@/lib/reviewDecisionQueue';
+import { nextUnreviewedIndex, reviewedTargets, processReviewedBatch } from '@/lib/reviewBatchSafety';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import type { InstallationProof, SurveyPhoto, BoardMarking, WorkItem } from '@/lib/types';
 import {
@@ -80,8 +82,9 @@ export default function InstallationReviewPage() {
   }, [batchIndex, bulkModalOpen]);
   const [inspectedIds, setInspectedIds] = useState<Set<string>>(new Set());
   const [evidenceReadyIds, setEvidenceReadyIds] = useState<Set<string>>(new Set());
+  const [batchDecisions, setBatchDecisions] = useState<ShopDecisionMap>({});
+  const [batchErrors, setBatchErrors] = useState<Record<string, string>>({});
   const [autoNext, setAutoNext] = useState(true);
-  const [bulkAction, setBulkAction] = useState<'approve' | 'reject'>('approve');
   const [bulkNote, setBulkNote] = useState('');
 
   // Full-size photo preview — shared by row thumbnails, the review modal's
@@ -99,7 +102,7 @@ export default function InstallationReviewPage() {
   // pointing at rows that may no longer be in the result set are worse
   // than an empty one.
   useEffect(() => { setPage(0); }, [tab, debouncedSearch, installerFilter, flagFilter, linkedPoId, sortBy, pageSize]);
-  useEffect(() => { setSelectMode(tab === 'pending'); setSelectedIds(new Set()); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBatchIndex(0); }, [tab, debouncedSearch, installerFilter, flagFilter, linkedPoId, sortBy, page, pageSize]);
+  useEffect(() => { setSelectMode(tab === 'pending'); setSelectedIds(new Set()); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBatchDecisions({}); setBatchIndex(0); }, [tab, debouncedSearch, installerFilter, flagFilter, linkedPoId, sortBy, page, pageSize]);
 
   const { data: installers } = useQuery({
     queryKey: ['installation-review-installers', orgId],
@@ -183,7 +186,7 @@ export default function InstallationReviewPage() {
   const rangeEnd = Math.min(total, page * pageSize + pageSize);
   const hasActiveFilters = !!(search || installerFilter || flagFilter || linkedPoId);
 
-  useRealtimeInvalidate(['installation_jobs'], orgId, [jobsQueryKey, countsQueryKey, ['dashboard-stats', orgId]]);
+  useRealtimeInvalidate(['installation_jobs', 'field_review_decisions'], orgId, [jobsQueryKey, countsQueryKey, ['dashboard-stats', orgId]]);
 
   function invalidateAll() {
     void refreshReviewViews(queryClient);
@@ -221,45 +224,51 @@ export default function InstallationReviewPage() {
     },
   });
 
-  const bulkMutation = useMutation({
-    mutationFn: async () => {
-      const targets = rows.filter((r) => selectedIds.has(r.id));
-      if (!allInspected(targets, inspectedIds)) throw new Error('Inspect and confirm evidence for each selected shop first.');
-      for (const job of targets) {
-        await applyDecision(job, bulkAction, bulkNote);
-      }
-    },
-    onSuccess: () => {
-      invalidateAll();
-      setBulkModalOpen(false);
-      setSelectMode(false);
-      setSelectedIds(new Set());
-      setBulkNote('');
-    },
-  });
-
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkResult, setBulkResult] = useState('');
-  async function runBulkAll(decision: 'approve' | 'reject') {
-    const targets = rows.filter((r) => selectedIds.has(r.id));
-    if (!targets.length) return;
-    if (!allInspected(targets, inspectedIds)) { setBulkResult('Inspect and confirm the evidence for EVERY selected shop before applying a batch decision.'); return; }
-    if (decision === 'reject' && !bulkNote.trim()) { setBulkResult('Redo/reject ke liye note likhiye.'); return; }
-    setBulkBusy(true); setBulkResult('');
-    const lines: string[] = [];
-    const successful: string[] = [];
+  const [batchProgress, setBatchProgress] = useState<{done:number;total:number}|null>(null);
+  async function submitBatchDecisions() {
+    if (bulkBusy) return;
+    const targets = decisionTargets(rows.filter(row => selectedIds.has(row.id)), batchDecisions);
+    if (!targets.length) { setBulkResult('Review evidence and queue Approve or Redo for at least one shop.'); return; }
     for (const job of targets) {
-      try {
-        const res = await reviewApply({ stage: 'installation', shopId: job.shop_id, refId: job.id, decision: decision === 'approve' ? 'approved' : 'redo', note: bulkNote });
-        if (res.finalized || res.left_review) successful.push(job.id);
-        lines.push(`✅ ${job.shops?.name}: ${res.finalized ? 'approved — review se hat gaya' : res.left_review ? 'redo bhej diya — review se hat gaya' : 'kuch kaam abhi pending, review me hai'}`);
-      } catch (e: any) { lines.push(`❌ ${job.shops?.name}: ${e.message}`); }
+      const invalid = validateShopDecision(batchDecisions[job.id], 'installation', evidenceReadyIds.has(job.id));
+      if (invalid) { setBulkResult(`${job.shops?.name || 'Shop'}: ${invalid}`); return; }
     }
-    setSelectedIds(prev => new Set([...prev].filter(id => !successful.includes(id))));
-    setInspectedIds(prev => new Set([...prev].filter(id => !successful.includes(id))));
-    setEvidenceReadyIds(prev => new Set([...prev].filter(id => !successful.includes(id))));
-    setBatchIndex(0);
-    setBulkResult(lines.join('\n')); setBulkBusy(false); invalidateAll();
+    setBulkBusy(true); setBulkResult(''); setBatchProgress({ done: 0, total: targets.length });
+    try {
+      const result = await processReviewedBatch(targets, async job => {
+        const choice = batchDecisions[job.id];
+        const res = await reviewApply({ stage: 'installation', shopId: job.shop_id, refId: job.id, decision: choice.action === 'approve' ? 'approved' : 'redo', note: choice.note });
+        if (choice.action === 'approve' && !res.finalized) throw new Error(`${res.pending} pending item(s), ${res.redo} redo item(s) — review individually.`);
+        if (choice.action === 'redo' && !res.redo && !res.left_review) throw new Error('No items were returned for redo. Check item decisions.');
+      }, (done,total) => setBatchProgress({done,total}), 3);
+      const successful = new Set(result.succeeded.map(job => job.id));
+      setSelectedIds(prev => new Set([...prev].filter(id => !successful.has(id))));
+      setInspectedIds(prev => new Set([...prev].filter(id => !successful.has(id))));
+      setEvidenceReadyIds(prev => new Set([...prev].filter(id => !successful.has(id))));
+      setBatchDecisions(prev => Object.fromEntries(Object.entries(prev).filter(([id]) => !successful.has(id))));
+      setBatchErrors(Object.fromEntries(result.failed.map(({item,message}) => [item.id, message])));
+      setBatchIndex(0);
+      setBulkResult(`${result.succeeded.length} saved (${result.succeeded.filter(job => batchDecisions[job.id]?.action === 'approve').length} approved, ${result.succeeded.filter(job => batchDecisions[job.id]?.action === 'redo').length} sent for redo). ${result.failed.length ? `${result.failed.length} failed and retained for retry.` : 'Other shops remain pending.'}`);
+      invalidateAll();
+      if (!result.failed.length && selectedJobs.length === successful.size) setBulkModalOpen(false);
+    } catch (error) {
+      setBulkResult(error instanceof Error ? error.message : 'Batch failed; retry unprocessed shops.');
+    } finally {
+      setBatchProgress(null); setBulkBusy(false);
+    }
+  }
+
+  function queueInstallDecision(id: string, choice: ShopReviewDecision) {
+    const invalid = validateShopDecision(choice, 'installation', evidenceReadyIds.has(id));
+    if (invalid) { setBulkResult(invalid); return; }
+    setBulkResult('');
+    setBatchErrors(prev => { const copy = {...prev}; delete copy[id]; return copy; });
+    const updated = { ...batchDecisions, [id]: choice };
+    setBatchDecisions(updated);
+    const next = nextUnqueued(selectedJobs, batchIndex, updated);
+    if (next >= 0) setBatchIndex(next);
   }
 
   function toggleSelected(id: string) {
@@ -278,11 +287,10 @@ export default function InstallationReviewPage() {
     setCorrectionTargets({});
   }
 
-  function openBulk(act: 'approve' | 'reject') {
-    setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBatchIndex(0);
-    setBulkAction(act);
-    setBulkNote('');
-    setBulkModalOpen(true);
+  function closeBatch() {
+    if (bulkBusy) return;
+    if (Object.keys(batchDecisions).length && !window.confirm('Close review? Unsubmitted shop decisions will be lost.')) return;
+    setBulkModalOpen(false);
   }
 
   const selectedJobs = rows.filter((r) => selectedIds.has(r.id));
@@ -327,7 +335,7 @@ export default function InstallationReviewPage() {
       {selectMode && (
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4 bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5">
           <p className="text-sm text-blue-800 font-medium">
-            {selectedIds.size} selected
+            {selectedIds.size ? `${selectedIds.size} selected` : `${rows.length} on this page`}
             {total > pageSize && <span className="font-normal text-blue-600"> (this page only)</span>}
           </p>
           <div className="flex items-center gap-2">
@@ -335,11 +343,11 @@ export default function InstallationReviewPage() {
               Select all on this page
             </button>
             <button
-              onClick={() => { setBulkAction('approve'); setBatchIndex(0); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBulkResult(''); setBulkModalOpen(true); }}
-              disabled={selectedIds.size === 0}
+              onClick={() => { if (!selectedIds.size) setSelectedIds(new Set(rows.map(row => row.id))); setBatchIndex(0); setInspectedIds(new Set()); setEvidenceReadyIds(new Set()); setBatchDecisions({}); setBatchErrors({}); setBulkResult(''); setBatchProgress(null); setBulkModalOpen(true); }}
+              disabled={!rows.length}
               className="flex items-center gap-1.5 bg-slate-900 hover:bg-slate-800 text-white px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
             >
-              <Eye className="w-3.5 h-3.5" /> Review Selected ({selectedIds.size})
+              <Eye className="w-3.5 h-3.5" /> {selectedIds.size ? `Review ${selectedIds.size} selected` : `Review page (${rows.length})`}
             </button>
           </div>
         </div>
@@ -489,7 +497,8 @@ export default function InstallationReviewPage() {
                             <img
                               key={p.id}
                               src={p.photo_url}
-                              alt=""
+                              alt="Installation evidence preview"
+                              loading="lazy" decoding="async"
                               onClick={(e) => { e.stopPropagation(); setLightbox(p.photo_url); }}
                               className="w-8 h-8 rounded-md object-cover border-2 border-white shadow-sm cursor-zoom-in hover:scale-105 transition"
                               style={{ zIndex: 3 - idx }}
@@ -620,7 +629,7 @@ export default function InstallationReviewPage() {
           evidence can never be accidentally approved against the wrong shop. */}
       <Modal
         open={bulkModalOpen}
-        onClose={() => { if (!bulkBusy) setBulkModalOpen(false); }}
+        onClose={closeBatch}
         title={`Review Selected Shops — ${selectedJobs.length}`}
         size="xl"
       >
@@ -632,37 +641,33 @@ export default function InstallationReviewPage() {
           <div ref={batchTopRef} />
           <ReviewBatchStepper
             items={selectedJobs.map(j => ({ id: j.id, name: j.shops?.name || 'Shop', subtitle: `${j.shops?.purchase_orders?.name || j.shops?.purchase_orders?.po_number || 'No PO'} · ${j.shops?.city || 'Location not set'} · ${j.profiles?.full_name || 'Installer'} · ${(j.installation_proofs || []).length} photos`, flagged: !!j.gps_distance_flag || (j.installation_proofs || []).some((p:any) => p.duplicate_flag) }))}
-            index={batchIndex} onIndexChange={setBatchIndex} inspected={inspectedIds}
+            index={batchIndex} onIndexChange={setBatchIndex} inspected={new Set(Object.keys(batchDecisions))} disabled={bulkBusy}
+            decisionLabels={Object.fromEntries(Object.entries(batchDecisions).map(([id,d]) => [id,d.action === 'approve' ? 'Approve' : 'Redo']))}
           />
           {activeBatchJob && <div key={activeBatchJob.id} className="space-y-3">
             <CompanyApprovalHandoff stage="installation" refId={activeBatchJob.id} shopId={activeBatchJob.shop_id}/>
             <MaterialLoadedSummary job={activeBatchJob} onOpenPhoto={setLightbox} />
-            <WorkItemEvidenceReview shopId={activeBatchJob.shop_id} jobId={activeBatchJob.id} assignedTo={activeBatchJob.installer_id} onOpenPhoto={setLightbox}
+            <WorkItemEvidenceReview shopId={activeBatchJob.shop_id} jobId={activeBatchJob.id} assignedTo={activeBatchJob.installer_id} readOnly={bulkBusy} onOpenPhoto={setLightbox}
               onEvidenceReady={() => setEvidenceReadyIds(prev => prev.has(activeBatchJob.id) ? prev : new Set(prev).add(activeBatchJob.id))}
-              onEvidenceChanged={() => { setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); setEvidenceReadyIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); }}
-              onLeftReview={() => { setSelectedIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); setBatchIndex(0); invalidateAll(); }}/>
+              batchMode onEvidenceChanged={() => { setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); setEvidenceReadyIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); setBatchDecisions(prev => { const copy = { ...prev }; delete copy[activeBatchJob.id]; return copy; }); }}
+              onLeftReview={() => { setSelectedIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); setInspectedIds(prev => { const next = new Set(prev); next.delete(activeBatchJob.id); return next; }); setBatchDecisions(prev => { const copy = { ...prev }; delete copy[activeBatchJob.id]; return copy; }); setBatchIndex(0); invalidateAll(); }}/>
           </div>}
-          {activeBatchJob && <div className="sticky bottom-0 z-20 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-blue-200 bg-white/95 p-2 shadow-sm backdrop-blur">
-            <p className="min-w-0 text-xs text-slate-600">{inspectedIds.has(activeBatchJob.id) ? 'Evidence reviewed' : evidenceReadyIds.has(activeBatchJob.id) ? 'Check installed photos & measurements, then continue' : 'Evidence missing or loading — use item redo if needed'}</p>
-            <button type="button" disabled={!evidenceReadyIds.has(activeBatchJob.id) || inspectedIds.has(activeBatchJob.id) || bulkBusy} onClick={() => {
-              setInspectedIds(prev => new Set(prev).add(activeBatchJob.id));
-              const nextIndex = nextUnreviewedIndex(selectedJobs, batchIndex, inspectedIds);
-              if (nextIndex !== -1) setBatchIndex(nextIndex);
-            }} className="rounded-lg bg-blue-700 px-4 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50">{inspectedIds.has(activeBatchJob.id) ? 'Reviewed ✓' : selectedJobs.length - inspectedIds.size === 1 ? 'Mark final shop reviewed' : 'Reviewed & next shop →'}</button>
-          </div>}
+          {activeBatchJob && <ReviewDecisionBar shopId={activeBatchJob.id} stage="installation" evidenceReady={evidenceReadyIds.has(activeBatchJob.id)} decision={batchDecisions[activeBatchJob.id]} disabled={bulkBusy}
+            onDecide={choice => queueInstallDecision(activeBatchJob.id, choice)}
+            onClear={() => setBatchDecisions(prev => { const copy = {...prev}; delete copy[activeBatchJob.id]; return copy; })} />}
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
-            <p className="text-xs font-semibold text-slate-800">Batch action · {selectedJobs.filter(j => inspectedIds.has(j.id)).length}/{selectedJobs.length} shops inspected</p>
-            <input value={bulkNote} onChange={(e) => setBulkNote(e.target.value)} placeholder="Note (redo/reject ke liye zaroori)" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs bg-white" />
-            <div className="grid grid-cols-2 gap-2">
-              <button disabled={bulkBusy || !allInspected(selectedJobs, inspectedIds)} onClick={() => void runBulkAll('approve')} className="rounded-lg bg-emerald-600 text-white py-2 text-sm font-semibold disabled:opacity-40">{bulkBusy ? 'Working…' : 'Approve all remaining (sab shops)'}</button>
-              <button disabled={bulkBusy || !allInspected(selectedJobs, inspectedIds) || !bulkNote.trim()} onClick={() => void runBulkAll('reject')} className="rounded-lg bg-red-600 text-white py-2 text-sm font-semibold disabled:opacity-40">Reject / redo all (sab shops)</button>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-slate-900">Ready to submit: {decisionTargets(selectedJobs, batchDecisions).length}/{selectedJobs.length} shops</p>
+              <span className="text-xs text-slate-600">{decisionCounts(selectedJobs.map(j=>j.id),batchDecisions).approve} approve · {decisionCounts(selectedJobs.map(j=>j.id),batchDecisions).redo} redo</span>
             </div>
-            {!allInspected(selectedJobs, inspectedIds) && <p className="text-xs text-amber-800">Use Reviewed & next after inspecting each shop; unreviewed shops stay blocked.</p>}
-            {bulkResult && <p className="text-xs whitespace-pre-line text-slate-700">{bulkResult}</p>}
+            <button type="button" disabled={bulkBusy || decisionTargets(selectedJobs,batchDecisions).length === 0} onClick={() => void submitBatchDecisions()} className="w-full rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40">{bulkBusy ? `Saving ${batchProgress?.done || 0}/${batchProgress?.total || 0}…` : `Submit ${decisionTargets(selectedJobs,batchDecisions).length} decisions`}</button>
+            <p className="text-[11px] text-slate-600">Only queued shops are processed. For one Work Item/photo only, use its correction controls above. Redo is not a permanent rejection.</p>
+            {bulkResult && <p role="status" className="text-xs text-slate-700">{bulkResult}</p>}
+            {Object.keys(batchErrors).length > 0 && <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900"><strong>Needs retry:</strong>{Object.entries(batchErrors).map(([id,msg]) => <p key={id}>{selectedJobs.find(j=>j.id===id)?.shops?.name || 'Shop'}: {msg}</p>)}</div>}
           </div>
           <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
             <p className="text-xs text-slate-500">Decisions are saved per shop and per selected evidence — never across the wrong shop.</p>
-            <button disabled={bulkBusy} onClick={() => setBulkModalOpen(false)} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-50">Done Reviewing</button>
+            <button disabled={bulkBusy} onClick={closeBatch} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 disabled:opacity-50">Done Reviewing</button>
           </div>
         </div>
       </Modal>
@@ -767,7 +772,7 @@ function MaterialLoadedSummary({ job, onOpenPhoto }: { job: any; onOpenPhoto: (u
 // Shows before/after/installed proof photos plus GPS, so Admin/Owner can
 // actually see the completed work before approving it. Click any photo to
 // open it full-size.
-function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, onOpenPhoto, onLeftReview, onEvidenceReady, onEvidenceChanged }: { shopId: string; jobId: string; assignedTo?: string; readOnly?: boolean; onOpenPhoto: (url: string) => void; onLeftReview?: () => void; onEvidenceReady?: () => void; onEvidenceChanged?: () => void }) {
+function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, onOpenPhoto, onLeftReview, onEvidenceReady, onEvidenceChanged, batchMode = false }: { shopId: string; jobId: string; assignedTo?: string; readOnly?: boolean; onOpenPhoto: (url: string) => void; onLeftReview?: () => void; onEvidenceReady?: () => void; onEvidenceChanged?: () => void; batchMode?: boolean }) {
   const { profile } = useAuth();
   const qc = useQueryClient();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -822,7 +827,7 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
   if (!items.length) return <p role="alert" className="text-xs text-amber-700">No work items found; review needs item reconciliation.</p>;
   const dim=(it:any)=>{const w=it.approved_width??it.survey_width,h=it.approved_height??it.survey_height,u=it.approved_unit??it.survey_unit??'ft',q=it.approved_quantity??it.survey_quantity??1,a=it.approved_area??it.survey_area;return `${itemSizeLabel(it)} · Qty ${q}${a!=null?` · ${Number(a).toFixed(2)} sq.ft`:''}`};
   const toggle=(key:string)=>setSelected(prev=>{const n=new Set(prev);n.has(key)?n.delete(key):n.add(key);return n});
-  const Photo=({url,label,reviewKey,decision}:{url?:string|null;label:string;reviewKey?:string;decision?:any})=>url?(<div className={`relative rounded-xl border-2 overflow-hidden ${reviewKey&&selected.has(reviewKey)?'border-blue-500 ring-2 ring-blue-100':decision?.decision==='redo'?'border-amber-300':'border-slate-200'}`}><button onClick={()=>onOpenPhoto(url)} className="block w-full bg-slate-50"><img src={url} alt={label} className="w-full aspect-[4/3] object-contain bg-slate-100"/></button>{reviewKey&&!readOnly&&<button onClick={()=>toggle(reviewKey)} className="absolute top-2 left-2 rounded-md bg-white/95 shadow px-2 py-1 text-[10px] font-semibold flex items-center gap-1">{selected.has(reviewKey)?<CheckSquare className="w-3.5 h-3.5 text-blue-600"/>:<Square className="w-3.5 h-3.5 text-slate-500"/>} Select</button>}<div className="absolute left-2 bottom-2 flex gap-1"><span className="rounded-md bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-white">{label}</span>{decision&&<span className={`rounded-md px-2 py-1 text-[10px] font-bold ${decision.decision==='approved'?'bg-emerald-600 text-white':'bg-amber-500 text-white'}`}>{decision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div>):<div className="aspect-[4/3] rounded-xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center text-[11px] text-slate-400">No {label.toLowerCase()}</div>;
+  const Photo=({url,label,reviewKey,decision}:{url?:string|null;label:string;reviewKey?:string;decision?:any})=>url?(<div className={`relative rounded-xl border-2 overflow-hidden ${reviewKey&&selected.has(reviewKey)?'border-blue-500 ring-2 ring-blue-100':decision?.decision==='redo'?'border-amber-300':'border-slate-200'}`}><button onClick={()=>onOpenPhoto(url)} className="block w-full bg-slate-50"><img src={url} alt={label} className="w-full aspect-[4/3] object-contain bg-slate-100"/></button>{reviewKey&&!readOnly&&<button onClick={()=>setSelected(prev => prev.has(reviewKey) ? new Set([...prev].filter(key => key !== reviewKey)) : new Set([reviewKey]))} className="absolute top-2 left-2 rounded-md bg-white/95 shadow px-2 py-1 text-[10px] font-semibold flex items-center gap-1">{selected.has(reviewKey)?<CheckSquare className="w-3.5 h-3.5 text-blue-600"/>:<Square className="w-3.5 h-3.5 text-slate-500"/>} {selected.has(reviewKey) ? 'Photo selected' : 'Select photo'}</button>}{decision?.note && <p title={decision.note} className="absolute bottom-9 inset-x-2 max-h-12 overflow-auto rounded-md bg-amber-50 px-2 py-1 text-[10px] text-amber-900"><strong>Redo:</strong> {decision.note}</p>}<div className="absolute left-2 bottom-2 flex gap-1"><span className="rounded-md bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-white">{label}</span>{decision&&<span className={`rounded-md px-2 py-1 text-[10px] font-bold ${decision.decision==='approved'?'bg-emerald-600 text-white':'bg-amber-500 text-white'}`}>{decision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div>):<div className="aspect-[4/3] rounded-xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center text-[11px] text-slate-400">No {label.toLowerCase()}</div>;
   async function applyInline(decision:'approved'|'redo'){
     if(!selected.size||!profile)return; setBusy(true);setReviewError('');
     try{
@@ -858,13 +863,14 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
       const itemProofs=(proofs||[]).filter((p:any)=>p.work_item_id===item.id); const itemKey=`work_item:${item.id}`; const itemDecision:any=dmap.get(itemKey);
       return <div key={item.id} className={`rounded-2xl border bg-white overflow-hidden shadow-sm ${selected.has(itemKey)?'border-blue-400 ring-2 ring-blue-100':'border-slate-200'}`}>
         <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 bg-slate-50 border-b border-slate-200"><div className="flex gap-2.5 items-start">{!readOnly&&<button onClick={()=>toggle(itemKey)} className="mt-0.5">{selected.has(itemKey)?<CheckSquare className="w-5 h-5 text-blue-600"/>:<Square className="w-5 h-5 text-slate-400"/>}</button>}<div><p className="text-[10px] font-bold tracking-[.16em] text-slate-400 uppercase">Work Item {index+1}</p><h4 className="text-sm font-semibold text-slate-900 mt-0.5">{item.work_type_name||'Work item'}</h4><p className="text-xs text-slate-500 mt-1">{dim(item)}</p></div></div><div className="flex flex-wrap items-center gap-2">{item.excluded_from_calculations&&<span className="rounded-full px-2.5 py-1 text-[10px] font-bold bg-slate-200 text-slate-700">NOT AVAILABLE · EXCLUDED</span>}{!readOnly&&<button type="button" onClick={()=>void toggleAvailability(item)} className="rounded-full border border-slate-300 px-2.5 py-1 text-[10px] font-semibold text-slate-600 hover:bg-slate-100">{item.excluded_from_calculations?'Make installable':'Mark not available'}</button>}{itemDecision&&<span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${itemDecision.decision==='approved'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'}`}>{itemDecision.decision==='approved'?'APPROVED':'REDO'}</span>}<span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${itemProofs.length?'bg-emerald-50 text-emerald-700 border border-emerald-200':'bg-amber-50 text-amber-700 border border-amber-200'}`}>{itemProofs.length} installation photo{itemProofs.length===1?'':'s'}</span></div></div>
+        {itemDecision?.note && <p className="border-b border-amber-100 bg-amber-50 px-4 py-2 text-xs text-amber-900"><strong>{itemDecision.decision==='redo'?'Work Item redo reason:':'Review note:'}</strong> {itemDecision.note}</p>}
         {item.excluded_from_calculations&&<div className="px-4 py-2 bg-slate-100 border-b text-xs text-slate-700">Site unavailable: <b>{item.execution_reason||'reason not given'}</b>{item.execution_note?` — ${item.execution_note}`:''}. Yeh kaam installed sq.ft / qty / billing mein excluded from totals.</div>}
-        <div className="p-4"><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><div><p className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-1.5">1 · Survey / Measurement</p>{linkedSurvey.length ? <div className="grid grid-cols-2 gap-2">{linkedSurvey.map((p:any) => <Photo key={p.id} url={p.photo_url} label="Survey"/>)}</div> : <Photo label="Survey"/>}</div><div><p className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1.5">2 · Approved Design</p><Photo url={designs[0]?.file_url} label={designs[0]?`Design v${designs[0].version_number}`:'Design'}/></div><div><p className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 mb-1.5">3 · Installed Proof</p>{itemProofs.length?<div className="grid grid-cols-2 gap-2">{itemProofs.map((p:any)=><Photo key={p.id} url={p.photo_url} label={p.angle||'Installed'} decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div>:<Photo label="Installation proof"/>}</div></div></div>
+        <div className="p-4"><div className="grid grid-cols-1 md:grid-cols-3 gap-3"><div><p className="text-[10px] font-bold uppercase tracking-wider text-blue-600 mb-1.5">1 · Survey / Measurement</p>{linkedSurvey.length ? <div className="grid grid-cols-2 gap-2">{linkedSurvey.map((p:any) => <Photo key={p.id} url={p.photo_url} label="Survey"/>)}</div> : <Photo label="Survey"/>}</div><div><p className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1.5">2 · Approved Design</p><Photo url={designs[0]?.file_url} label={designs[0]?`Design v${designs[0].version_number}`:'Design'}/></div><div><p className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 mb-1.5">3 · Installed Proof</p>{itemProofs.length?<div className="grid grid-cols-2 gap-2">{itemProofs.map((p:any)=><Photo key={p.id} url={p.photo_url} label={p.angle||'Installed'} reviewKey={`installation_photo:${p.id}`} decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div>:<Photo label="Installation proof"/>}</div></div></div>
       </div>;
     })}
     {!readOnly&&<div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"><div className="flex items-start gap-3"><div className="mt-0.5 rounded-full bg-blue-100 p-1.5"><CheckCircle2 className="w-4 h-4 text-blue-700"/></div><div><p className="text-xs font-semibold text-slate-900">Shop tab tak review me rahega jab tak har Work Item ka decision na ho</p><p className="text-[11px] text-slate-500 mt-0.5">Jab tak koi Work Item undecided hai, shop Pending Review me rahega. Sab approved = Installed ho jata hai. Sab decide ho jayein aur kuch redo ho = shop review se hatkar installer ke paas Redo me chala jata hai.</p></div></div></div>}
-    {!readOnly&&<div className="sticky bottom-0 z-10 rounded-2xl border border-slate-200 bg-white/95 backdrop-blur shadow-lg p-3"><div className="mb-2 flex items-center justify-between gap-2"><div><p className="text-xs font-semibold text-slate-900">{selected.size ? `${selected.size} selected` : 'Select evidence above'}</p><p className="text-[10px] text-slate-500">Action applies only to the selected Work Item(s) in this shop.</p></div>{selected.size>0&&<button onClick={()=>setSelected(new Set())} className="text-[11px] font-semibold text-slate-500 hover:text-slate-800">Clear selection</button>}</div><div className="flex flex-col md:flex-row gap-2"><input value={reviewNote} onChange={e=>setReviewNote(e.target.value)} placeholder="Note only if needed — especially for redo" className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-xs"/><button disabled={!selected.size||busy} onClick={()=>applyInline('approved')} className="rounded-lg bg-emerald-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><CheckCircle2 className="w-4 h-4"/>Approve ({selected.size})</button><button disabled={!selected.size||busy} onClick={()=>applyInline('redo')} className="rounded-lg bg-amber-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><Wrench className="w-4 h-4"/>Reject / Redo ({selected.size})</button></div>{reviewError&&<p className="text-xs text-red-600 mt-2">{reviewError}</p>}</div>}
-    {(proofs||[]).some((p:any)=>!p.work_item_id)&&<div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold text-amber-800">Legacy/unmapped installation photos</p><p className="text-[11px] text-amber-700 mt-0.5">These older proofs are not automatically assigned to a measurement.</p><div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">{(proofs||[]).filter((p:any)=>!p.work_item_id).map((p:any)=><Photo key={p.id} url={p.photo_url} label="Unmapped proof" decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div></div>}
+    {!readOnly&&<div className={`${batchMode ? 'relative' : 'sticky bottom-0 z-10'} rounded-2xl border border-slate-200 bg-white/95 backdrop-blur shadow-lg p-3`}><div className="mb-2 flex items-center justify-between gap-2"><div><p className="text-xs font-semibold text-slate-900">{batchMode ? 'Individual item / photo correction' : selected.size ? `${selected.size} selected` : 'Select evidence above'}</p><p className="text-[10px] text-slate-500">Action applies only to selected Work Items or proof photos in this shop. Selecting a photo clears other selections.</p></div>{selected.size>0&&<button onClick={()=>setSelected(new Set())} className="text-[11px] font-semibold text-slate-500 hover:text-slate-800">Clear selection</button>}</div><div className="flex flex-col md:flex-row gap-2"><input value={reviewNote} onChange={e=>setReviewNote(e.target.value)} placeholder="Note only if needed — especially for redo" className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-xs"/><button disabled={!selected.size||busy} onClick={()=>applyInline('approved')} className="rounded-lg bg-emerald-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><CheckCircle2 className="w-4 h-4"/>Approve ({selected.size})</button><button disabled={!selected.size||busy} onClick={()=>applyInline('redo')} className="rounded-lg bg-amber-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-40 flex justify-center items-center gap-1"><Wrench className="w-4 h-4"/>Reject / Redo ({selected.size})</button></div>{reviewError&&<p className="text-xs text-red-600 mt-2">{reviewError}</p>}</div>}
+    {(proofs||[]).some((p:any)=>!p.work_item_id)&&<div className="rounded-xl border border-amber-200 bg-amber-50 p-3"><p className="text-xs font-semibold text-amber-800">Legacy/unmapped installation photos</p><p className="text-[11px] text-amber-700 mt-0.5">These older proofs are not automatically assigned to a measurement.</p><div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2">{(proofs||[]).filter((p:any)=>!p.work_item_id).map((p:any)=><Photo key={p.id} url={p.photo_url} label="Unmapped proof" reviewKey={`installation_photo:${p.id}`} decision={dmap.get(`installation_photo:${p.id}`)}/>)}</div></div>}
   </div>;
 }
 

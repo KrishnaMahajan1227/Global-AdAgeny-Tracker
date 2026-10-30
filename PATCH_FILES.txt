@@ -1,9 +1,0 @@
-src/pages/SurveyorPage.tsx
-src/pages/InstallerPage.tsx
-src/components/SurveyCorrectionFixer.tsx
-src/components/CameraCapture.tsx
-src/lib/units.ts
-src/lib/markingUtils.ts
-src/lib/offlineDb.ts
-supabase/migrations/20261025100000_0092_field_redo_mixed_dimension_units.sql
-scripts/verify-field-units.mjs

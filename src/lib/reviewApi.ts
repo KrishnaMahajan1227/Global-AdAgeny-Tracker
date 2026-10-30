@@ -17,6 +17,11 @@ export async function reviewApply(args: {
   stage: ReviewStage; shopId: string; refId: string; entities?: ReviewEntity[];
   decision: 'approved' | 'redo'; note?: string; designerId?: string | null; variance?: Record<string, string>;
 }): Promise<ReviewResult> {
+  // Catch stale/incorrect UI action aliases before they reach the privileged RPC.
+  // The database accepts `approved`, never `approve`; `redo` is the correction action.
+  if (!['survey', 'installation', 'design'].includes(args.stage) || !['approved', 'redo'].includes(args.decision)) {
+    throw new Error('Unsupported review decision. Refresh Adroute and try again; no review was saved.');
+  }
   const { data, error } = await supabase.rpc('review_apply', {
     p_stage: args.stage, p_shop_id: args.shopId, p_ref_id: args.refId,
     p_entities: args.entities && args.entities.length ? args.entities : null,

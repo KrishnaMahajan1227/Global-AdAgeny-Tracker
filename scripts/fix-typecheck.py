@@ -15,7 +15,11 @@ def exact(s,a,b,name):
   raise RuntimeError(f'{name}: expected source not found; refusing unsafe edit')
  return s.replace(a,b,1)
 def gallery(s):
- return exact(s,'void submit(confirm)','void submit(confirm === \'approve\' ? \'approved\' : \'redo\')','gallery review action')
+ # The confirmation state already uses the server's exact approved/redo values.
+ # Do not introduce a legacy approve alias in this call path.
+ if "useState<'approved' | 'redo' | null>(null)" in s:
+  return s
+ return exact(s,'void submit(confirm)',"void submit(confirm === 'approve' ? 'approved' : 'redo')",'gallery review action')
 def dash(s):
  return exact(s,'((batch || []) as Record<string, unknown>[])','((batch || []) as unknown as Record<string, unknown>[])','Supabase inferred error typing')
 def installer(s):

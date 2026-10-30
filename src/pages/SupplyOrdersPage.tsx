@@ -1,3 +1,5 @@
+import { fetchWorkflowFolderPages } from '@/lib/workflowFolderPages';
+import { runBoundedWorkflowBatch, summarizeWorkflowBatch } from '@/lib/workflowBatch';
 import { useMemo, useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -13,6 +15,13 @@ import {
 } from 'lucide-react';
 
 type Tab = 'entries' | 'dispatch';
+type ReadySupplyShop = Pick<Shop, 'id' | 'name' | 'city' | 'status' | 'purchase_order_id'> & {
+  clients: { name: string } | null;
+  zones: { name: string } | null;
+  purchase_orders: { fulfillment_type: string } | null;
+};
+// Must stay aligned with phase4_create_supply_dispatch RPC's maximum UUID array length.
+const MAX_DISPATCH_DESTINATIONS = 200;
 
 type Props = { embedded?: boolean; workOrderId?: string; initialTab?: Tab };
 
@@ -154,6 +163,8 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
   const visibleSupplyPOs = workOrderId ? (supplyPOs || []).filter(po => po.id === workOrderId) : (supplyPOs || []);
   const selectedPO = (supplyPOs || []).find((po) => po.id === form.purchase_order_id) || null;
   const selectedLineItem = selectedPO?.po_line_items.find((li) => li.id === form.po_line_item_id) || null;
+  // One eligible designer needs no manual selection. Multiple designers still require a deliberate assignment.
+  const effectiveDesignerId = form.designer_id || (designers?.length === 1 ? designers[0].id : '');
 
   // Default BOM template for this work type (double-sided tape, nails,
   // holders, packing material...) — Owner Console: Work Type Consumables.
@@ -178,7 +189,7 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
       if (!selectedLineItem.work_type_id) {
         throw new Error('This line item has no Work Type set — add one from the Purchase Orders page first.');
       }
-      if (form.artwork_source === 'agency' && !form.designer_id) throw new Error('Choose the assigned designer, or select company-provided artwork.');
+      if (form.artwork_source === 'agency' && !effectiveDesignerId) throw new Error('Choose the assigned designer, or select company-provided artwork.');
       const qty = Number(form.quantity);
       if (!form.quantity || isNaN(qty) || qty <= 0) throw new Error('Enter a valid quantity.');
 
@@ -290,11 +301,11 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
           organization_id: orgId,
           shop_id: shopId,
           status: 'assigned',
-          designer_id: form.artwork_source === 'agency' ? form.designer_id : null,
+          designer_id: form.artwork_source === 'agency' ? effectiveDesignerId : null,
         });
         if (taskInsertError) throw new Error(`Could not create design task: ${taskInsertError.message}`);
       } else {
-        const { error: taskUpdateError } = await supabase.from('design_tasks').update({ designer_id: form.artwork_source === 'agency' ? form.designer_id : null }).eq('id', existingTask.id).select('id');
+        const { error: taskUpdateError } = await supabase.from('design_tasks').update({ designer_id: form.artwork_source === 'agency' ? effectiveDesignerId : null }).eq('id', existingTask.id).select('id');
         if (taskUpdateError) throw new Error(`Could not assign designer: ${taskUpdateError.message}`);
       }
       // The designer needs to know they've got a new board to design — not
@@ -302,7 +313,7 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
       // owner/admin-only concern everywhere else on the Design Studio
       // screen too (see DesignerPage.tsx), so this notification text stays
       // scoped to just the work itself.
-      if (form.artwork_source === 'agency' && form.designer_id) await createNotification(form.designer_id, 'New Design Task', `You've been assigned to design "${selectedLineItem.description}"`, 'info', '/design');
+      if (form.artwork_source === 'agency' && effectiveDesignerId) await createNotification(effectiveDesignerId, 'New Design Task', `You've been assigned to design "${selectedLineItem.description}"`, 'info', '/design');
 
       await logAudit('work_items', workItem.id, 'insert', null, null, null, `Supply Only entry: ${qty} ${selectedLineItem.uom} of ${selectedLineItem.description} for PO ${selectedPO.name || selectedPO.po_number} — sent to Design`);
     },
@@ -464,7 +475,7 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
               onChange={(v) => setForm({ ...form, artwork_source: v })}
               options={[{value:'agency',label:'Agency will create artwork'},{value:'client',label:'Company artwork received'}]} />
             {form.artwork_source === 'agency' && <Select
-              label="Assign Designer" value={form.designer_id}
+              label="Assign Designer" value={effectiveDesignerId}
               onChange={(v) => setForm({ ...form, designer_id: v })}
               options={(designers || []).map((d) => ({ value: d.id, label: d.full_name }))} required />}
           </div>
@@ -482,7 +493,7 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
 
           <button
             onClick={() => createMutation.mutate()}
-            disabled={createMutation.isPending || !form.purchase_order_id || !form.po_line_item_id || !form.quantity || (form.artwork_source === 'agency' && !form.designer_id)}
+            disabled={createMutation.isPending || !form.purchase_order_id || !form.po_line_item_id || !form.quantity || (form.artwork_source === 'agency' && !effectiveDesignerId)}
             className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition disabled:opacity-50"
           >
             {createMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
@@ -501,6 +512,16 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
   const queryClient = useQueryClient();
 
   const [selectedShopIds, setSelectedShopIds] = useState<Set<string>>(new Set());
+  const [destinationSearch, setDestinationSearch] = useState('');
+  const [dispatchSelectionNotice, setDispatchSelectionNotice] = useState('');
+  const [routeLimit, setRouteLimit] = useState(20);
+  const [expandedRouteIds, setExpandedRouteIds] = useState<Set<string>>(new Set());
+  const [visibleZoneCounts, setVisibleZoneCounts] = useState<Record<string, number>>({});
+  const [selectedReceiptStopIds, setSelectedReceiptStopIds] = useState<Set<string>>(new Set());
+  const [batchReceiptOpen, setBatchReceiptOpen] = useState(false);
+  const [batchReceiptForm, setBatchReceiptForm] = useState({ received_by: '', proof_reference: '' });
+  const [batchReceiptProgress, setBatchReceiptProgress] = useState<{done:number;total:number}|null>(null);
+  const [batchReceiptFeedback, setBatchReceiptFeedback] = useState('');
   const [routeForm, setRouteForm] = useState({
     name: '', route_date: new Date().toISOString().split('T')[0], user_id: '',
     dispatch_mode: 'staff', transport_mode: '', tracking_reference: '',
@@ -509,9 +530,9 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
   const dispatchRequestId = useRef<string | null>(null);
   const [receiptTarget, setReceiptTarget] = useState<{ id: string; name: string } | null>(null);
   const [receiptForm, setReceiptForm] = useState({ received_by: '', proof_reference: '', notes: '' });
-  useEffect(() => { setSelectedShopIds(new Set()); }, [workOrderId]);
+  useEffect(() => { setSelectedShopIds(new Set()); setSelectedReceiptStopIds(new Set()); setDestinationSearch(''); setRouteLimit(20); setExpandedRouteIds(new Set()); setVisibleZoneCounts({}); setDispatchSelectionNotice(''); dispatchRequestId.current = null; }, [workOrderId]);
 
-  useRealtimeInvalidate(['shops', 'routes', 'route_stops'], orgId, [
+  useRealtimeInvalidate(['shops', 'routes', 'route_stops', 'supply_delivery_receipts'], orgId, [
     ['dispatch-ready-shops', orgId],
     ['dispatch-routes', orgId],
     ['po-billing-readiness', orgId],
@@ -520,15 +541,18 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
   const { data: readyShops } = useQuery({
     queryKey: ['dispatch-ready-shops', orgId, workOrderId],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('shops')
-        .select('*, clients(name), zones(name), purchase_orders(fulfillment_type)')
-        .eq('organization_id', orgId)
-        .eq('status', 'production_done')
-        .order('name');
-      if (error) throw error;
-      return (data as (Shop & { clients: { name: string } | null; zones: { name: string } | null; purchase_orders: { fulfillment_type: string } | null })[])
-        .filter((s) => s.purchase_orders?.fulfillment_type === 'supply_only' && (!workOrderId || s.purchase_order_id === workOrderId));
+      let q = supabase.from('shops')
+        .select('id, name, city, status, purchase_order_id, clients(name), zones(name), purchase_orders(fulfillment_type)')
+        .eq('organization_id', orgId).eq('status', 'production_done')
+        .order('id', { ascending: true });
+      if (workOrderId) q = q.eq('purchase_order_id', workOrderId);
+      const data = await fetchWorkflowFolderPages(async (from, to) => {
+        const { data: pageRows, error } = await q.range(from, to);
+        if (error) throw new Error(`Could not load dispatch destinations: ${error.message}`);
+        return pageRows || [];
+      });
+      return (data as ReadySupplyShop[])
+        .filter((shop) => shop.purchase_orders?.fulfillment_type === 'supply_only');
     },
     enabled: !!orgId,
   });
@@ -544,14 +568,14 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
   });
 
   const { data: routes } = useQuery({
-    queryKey: ['dispatch-routes', orgId],
+    queryKey: ['dispatch-routes', orgId, routeLimit],
     queryFn: async () => {
       const { data, error } = await supabase
         .from('routes')
         .select('*, profiles:user_id(full_name), confirmed_by_profile:owner_confirmed_by(full_name), route_stops(id, shop_id, status, shops(name,purchase_order_id,purchase_orders(fulfillment_type)), supply_delivery_receipts(received_by,confirmed_at,proof_reference))')
         .eq('organization_id', orgId)
         .order('created_at', { ascending: false })
-        .limit(20);
+        .limit(routeLimit);
       if (error) throw error;
       return data as (Route & {
         profiles: { full_name: string } | null;
@@ -597,26 +621,38 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
   }, [deliveryStaff]);
 
   const zoneGroups = useMemo(() => {
-    const groups = new Map<string, (Shop & { clients: { name: string } | null; zones: { name: string } | null })[]>();
+    const groups = new Map<string, ReadySupplyShop[]>();
+    const term = destinationSearch.trim().toLowerCase();
     for (const shop of readyShops || []) {
+      if (term && ![shop.name, shop.clients?.name, shop.zones?.name, shop.city].some(value => (value || '').toLowerCase().includes(term))) continue;
       const key = shop.zones?.name || 'No Zone';
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(shop);
     }
     return Array.from(groups.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [readyShops]);
+  }, [readyShops, destinationSearch]);
 
   function toggleShop(id: string) {
+    if (createRouteMutation.isPending) return;
+    dispatchRequestId.current = null;
     setSelectedShopIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < MAX_DISPATCH_DESTINATIONS) next.add(id);
+      else setDispatchSelectionNotice('One dispatch supports up to 200 destinations. Create this dispatch, then select the remaining sites.');
       return next;
     });
   }
 
+  function changeRouteForm(next: typeof routeForm) {
+    if (createRouteMutation.isPending) return;
+    dispatchRequestId.current = null;
+    setRouteForm(next);
+  }
+
   const createRouteMutation = useMutation({
     mutationFn: async () => {
-      if (selectedShopIds.size === 0) throw new Error('Select at least one destination.');
+      if (selectedShopIds.size === 0 || selectedShopIds.size > MAX_DISPATCH_DESTINATIONS) throw new Error('Select 1–200 destinations per dispatch.');
       if (routeForm.dispatch_mode === 'staff' && !routeForm.user_id) throw new Error('Choose delivery staff.');
       if (routeForm.dispatch_mode === 'courier' && !routeForm.transport_mode.trim()) throw new Error('Enter the transport company.');
       // Reuse the same request ID after network failure/timeouts. The server
@@ -671,7 +707,16 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
   const canRecordReceipt = profile?.role === 'agency_owner' || profile?.role === 'admin';
   const supplyRoutes = (routes || []).filter(route => route.route_stops.some(stop =>
     stop.shops?.purchase_orders?.fulfillment_type === 'supply_only' &&
-    (!workOrderId || stop.shops.purchase_order_id === workOrderId)));
+    (!workOrderId || stop.shops.purchase_order_id === workOrderId)))
+    .sort((a, b) => {
+      const pendingCount = (route: typeof a) => route.route_stops.filter(stop =>
+        stop.status === 'pending' &&
+        stop.shops?.purchase_orders?.fulfillment_type === 'supply_only' &&
+        (!workOrderId || stop.shops.purchase_order_id === workOrderId) &&
+        !(Array.isArray(stop.supply_delivery_receipts) ? stop.supply_delivery_receipts.length : stop.supply_delivery_receipts)
+      ).length;
+      return Number(pendingCount(b) > 0) - Number(pendingCount(a) > 0);
+    });
 
   return (
     <div>
@@ -700,6 +745,31 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
         </button>
       </div>
 
+      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
+        <label className="flex min-w-[190px] flex-1 flex-col gap-1 text-xs font-medium text-slate-600">
+          Find destination / client / zone
+          <input type="search" value={destinationSearch} onChange={e => setDestinationSearch(e.target.value)}
+            placeholder="Search ready destinations…" className="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none" />
+        </label>
+        <div className="flex items-center gap-2 self-end flex-wrap">
+          <span className="text-xs font-semibold text-slate-600">{selectedShopIds.size} selected · {readyShops?.length || 0} ready</span>
+          <button type="button" disabled={createRouteMutation.isPending || zoneGroups.length === 0} onClick={() => {
+            dispatchRequestId.current = null;
+            setSelectedShopIds(previous => {
+              const requested = [...previous, ...zoneGroups.flatMap(([,shops]) => shops.map(shop => shop.id))];
+              const distinct = [...new Set(requested)];
+              if (distinct.length > MAX_DISPATCH_DESTINATIONS)
+                setDispatchSelectionNotice('Showing the first 200 selected destinations. Dispatch these first; remaining destinations stay ready.');
+              return new Set(distinct.slice(0, MAX_DISPATCH_DESTINATIONS));
+            });
+          }} className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-2 text-xs font-semibold text-blue-700 disabled:opacity-50">
+            Select visible ({zoneGroups.reduce((sum,[,shops]) => sum + shops.length, 0)})
+          </button>
+          <button type="button" disabled={createRouteMutation.isPending || selectedShopIds.size === 0} onClick={() => { dispatchRequestId.current = null; setSelectedShopIds(new Set()); }}
+            className="rounded-md border border-slate-200 px-2.5 py-2 text-xs font-medium text-slate-600 disabled:opacity-50">Clear</button>
+        </div>
+      </div>
+      {dispatchSelectionNotice && <p role="status" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{dispatchSelectionNotice}</p>}
       {zoneGroups.length === 0 ? (
         <Card><EmptyState icon={<Boxes className="w-12 h-12" />} title="Nothing ready for hand-off" subtitle="Complete a Supply Only production order in Production Studio first — it will appear here, grouped by zone, ready to distribute." /></Card>
       ) : (
@@ -708,19 +778,40 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
             <Card key={zoneName} className="p-4">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-1.5"><MapPin className="w-4 h-4 text-slate-400" /> {zoneName}</h3>
-                <button type="button" onClick={() => setSelectedShopIds(previous => {
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button type="button" disabled={createRouteMutation.isPending || shops.length === 0}
+                    onClick={() => {
+                      dispatchRequestId.current = null;
+                      setSelectedShopIds(new Set(shops.slice(0, MAX_DISPATCH_DESTINATIONS).map(shop => shop.id)));
+                      if (shops.length > MAX_DISPATCH_DESTINATIONS) setDispatchSelectionNotice(`First ${MAX_DISPATCH_DESTINATIONS} ${zoneName} destinations selected. Dispatch the rest in the next batch.`);
+                      else setDispatchSelectionNotice('');
+                      setCreateOpen(true);
+                    }}
+                    className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50">
+                    Prepare dispatch ({Math.min(shops.length, MAX_DISPATCH_DESTINATIONS)})
+                  </button>
+                <button type="button" disabled={createRouteMutation.isPending} onClick={() => { dispatchRequestId.current = null; setSelectedShopIds(previous => {
                     const next = new Set(previous);
                     const allSelected = shops.every(shop => next.has(shop.id));
-                    shops.forEach(shop => allSelected ? next.delete(shop.id) : next.add(shop.id));
+                    let added = 0;
+                    for (const shop of shops) {
+                      if (allSelected) next.delete(shop.id);
+                      else if (next.has(shop.id)) continue;
+                      else if (next.size < MAX_DISPATCH_DESTINATIONS) { next.add(shop.id); added++; }
+                    }
+                    if (!allSelected && added < shops.filter(shop => !previous.has(shop.id)).length)
+                      setDispatchSelectionNotice('200 destinations selected (server limit). Dispatch these first, then continue with the remaining shops.');
                     return next;
-                  })} className="rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100">
+                  }); }} className="rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50">
                   {shops.every(shop => selectedShopIds.has(shop.id)) ? 'Clear zone' : `Select all ${shops.length}`}
                 </button>
+                </div>
               </div>
               <div className="space-y-1.5">
-                {shops.map((shop) => (
+                {shops.slice(0, visibleZoneCounts[zoneName] ?? 12).map((shop) => (
                   <button
                     key={shop.id}
+                    disabled={createRouteMutation.isPending}
                     onClick={() => toggleShop(shop.id)}
                     className="w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-lg hover:bg-slate-50 text-sm"
                   >
@@ -733,6 +824,12 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
                     <span className="text-slate-400 text-xs">{shop.clients?.name}</span>
                   </button>
                 ))}
+                {shops.length > (visibleZoneCounts[zoneName] ?? 12) && (
+                  <button type="button" onClick={() => setVisibleZoneCounts(prev => ({ ...prev, [zoneName]: (prev[zoneName] ?? 12) + 50 }))}
+                    className="mt-2 w-full rounded-lg border border-slate-200 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50">
+                    Show 50 more destinations · {shops.length - (visibleZoneCounts[zoneName] ?? 12)} remaining
+                  </button>
+                )}
               </div>
             </Card>
           ))}
@@ -743,6 +840,13 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
         <span className="flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-[11px] font-semibold shrink-0">2</span>
         <h3 className="text-sm font-semibold text-slate-800 flex items-center gap-1.5"><Truck className="w-4 h-4 text-blue-500" /> Dispatch tracking &amp; delivery receipts</h3>
       </div>
+      {canRecordReceipt && selectedReceiptStopIds.size > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2">
+          <span className="text-xs font-semibold text-teal-800">{selectedReceiptStopIds.size} pending delivery receipts selected</span>
+          <button type="button" onClick={() => setBatchReceiptOpen(true)} className="ml-auto rounded-md bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800">Confirm selected receipts</button>
+          <button type="button" onClick={() => setSelectedReceiptStopIds(new Set())} className="text-xs font-semibold text-teal-700">Clear</button>
+        </div>
+      )}
       <div className="space-y-2">
         {supplyRoutes.map((route) => (
           <Card key={route.id} className="p-4">
@@ -755,12 +859,41 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
                 </p>
                 {route.tracking_reference && <p className="text-xs text-slate-400">Tracking: {route.tracking_reference}</p>}
               </div>
-              <StatusBadge status={route.status} />
+              <div className="flex items-center gap-2 flex-wrap">
+                {canRecordReceipt && route.route_stops.some(stop => stop.status === 'pending' && !(Array.isArray(stop.supply_delivery_receipts) ? stop.supply_delivery_receipts.length : stop.supply_delivery_receipts) && stop.shops?.purchase_orders?.fulfillment_type === 'supply_only' && (!workOrderId || stop.shops.purchase_order_id === workOrderId)) && (
+                  <button type="button" disabled={!!batchReceiptProgress} onClick={() => {
+                    const stops = route.route_stops.filter(stop => stop.status === 'pending' && !(Array.isArray(stop.supply_delivery_receipts) ? stop.supply_delivery_receipts.length : stop.supply_delivery_receipts) && stop.shops?.purchase_orders?.fulfillment_type === 'supply_only' && (!workOrderId || stop.shops.purchase_order_id === workOrderId));
+                    setSelectedReceiptStopIds(previous => new Set([...previous,...stops.map(stop=>stop.id)]));
+                  }} className="rounded-md border border-teal-200 bg-teal-50 px-2 py-1.5 text-xs font-semibold text-teal-700 disabled:opacity-50">
+                    Select route receipts
+                  </button>
+                )}
+                <span className="rounded-md bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800" aria-label="Outstanding delivery receipts">
+                  {route.route_stops.filter(stop => stop.status === 'pending' && stop.shops?.purchase_orders?.fulfillment_type === 'supply_only' && (!workOrderId || stop.shops.purchase_order_id === workOrderId) && !(Array.isArray(stop.supply_delivery_receipts) ? stop.supply_delivery_receipts.length : stop.supply_delivery_receipts)).length} awaiting receipt
+                </span>
+                <button type="button" aria-expanded={expandedRouteIds.has(route.id)} aria-controls={`dispatch-route-${route.id}`}
+                  onClick={() => setExpandedRouteIds(prev => { const next = new Set(prev); if (next.has(route.id)) next.delete(route.id); else next.add(route.id); return next; })}
+                  className="rounded-md border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+                  {expandedRouteIds.has(route.id) ? 'Hide destinations' : `View destinations (${route.route_stops.filter(stop => stop.shops?.purchase_orders?.fulfillment_type === 'supply_only' && (!workOrderId || stop.shops.purchase_order_id === workOrderId)).length})`}
+                </button>
+                <StatusBadge status={route.status} />
+              </div>
             </div>
-            <div className="flex flex-wrap gap-1.5 mb-3">
+            {expandedRouteIds.has(route.id) && <div id={`dispatch-route-${route.id}`} className="flex flex-wrap gap-1.5 mb-3">
               {route.route_stops.filter(stop => stop.shops?.purchase_orders?.fulfillment_type === 'supply_only' && (!workOrderId || stop.shops.purchase_order_id === workOrderId)).map(stop => {
                 const receipt = Array.isArray(stop.supply_delivery_receipts) ? stop.supply_delivery_receipts[0] : stop.supply_delivery_receipts;
                 return <div key={stop.id} className="inline-flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs">
+                  {canRecordReceipt && !receipt && stop.status === 'pending' && (
+                    <label className="inline-flex items-center gap-1.5" title="Include in shared-recipient receipt confirmation">
+                      <input type="checkbox" checked={selectedReceiptStopIds.has(stop.id)} disabled={!!batchReceiptProgress}
+                        onChange={event => setSelectedReceiptStopIds(prev => {
+                          const next = new Set(prev);
+                          if (event.target.checked) next.add(stop.id); else next.delete(stop.id);
+                          return next;
+                        })} className="h-4 w-4 rounded border-slate-300" />
+                      <span className="sr-only">Select receipt for {stop.shops?.name || 'destination'}</span>
+                    </label>
+                  )}
                   <span className="font-medium text-slate-700">{stop.shops?.name || 'Destination'}</span>
                   {receipt ? <span className="font-semibold text-emerald-700" title={`Received by ${receipt.received_by}`}>Received · {receipt.received_by}</span>
                     : canRecordReceipt && stop.status === 'pending' ? <button type="button" onClick={() => {
@@ -770,7 +903,7 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
                     : <span className="text-amber-800">Awaiting receipt</span>}
                 </div>;
               })}
-            </div>
+            </div>}
             <div className="flex items-center justify-between pt-3 border-t border-slate-100">
               {route.owner_confirmed_at ? (
                 <p className="text-xs text-green-700 flex items-center gap-1.5">
@@ -793,7 +926,53 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
           </Card>
         ))}
         {supplyRoutes.length === 0 && <p className="text-sm text-slate-400">No supply dispatch routes for this Work Order yet.</p>}
+        {(routes?.length || 0) >= routeLimit && (
+          <button type="button" onClick={() => setRouteLimit(value => value + 20)}
+            className="w-full rounded-lg border border-slate-200 bg-white py-2 text-xs font-semibold text-blue-700 hover:bg-slate-50">
+            Load 20 earlier dispatch records
+          </button>
+        )}
+        {batchReceiptFeedback && <div role="status" className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800">{batchReceiptFeedback}</div>}
       </div>
+
+      <Modal open={batchReceiptOpen} onClose={() => { if (!batchReceiptProgress) setBatchReceiptOpen(false); }} title="Confirm selected delivery receipts">
+        <div className="space-y-3">
+          <p className="text-sm text-slate-600">Confirm only destinations actually received by <strong>the same named recipient</strong>. Different recipients should be confirmed separately. Every destination is independently validated by the server.</p>
+          <p className="text-xs font-semibold text-teal-800">{selectedReceiptStopIds.size} destinations</p>
+          <Input label="Received by (same person for all) *" value={batchReceiptForm.received_by} onChange={v => setBatchReceiptForm(prev => ({...prev,received_by:v}))} placeholder="Recipient's name" />
+          <Input label="Shared delivery reference (optional)" value={batchReceiptForm.proof_reference} onChange={v => setBatchReceiptForm(prev => ({...prev,proof_reference:v}))} placeholder="LR / acknowledgment number" />
+          {batchReceiptProgress && <p role="status" aria-live="polite" className="text-xs font-semibold text-blue-700">Recording {batchReceiptProgress.done}/{batchReceiptProgress.total} receipts…</p>}
+          <button type="button" onClick={async () => {
+            if (batchReceiptProgress || batchReceiptForm.received_by.trim().length < 2) return;
+            const ids = [...selectedReceiptStopIds];
+            setBatchReceiptProgress({done:0,total:ids.length}); setBatchReceiptFeedback('');
+            try {
+              const result = await runBoundedWorkflowBatch(ids, async id => {
+                const { error } = await supabase.rpc('phase4_confirm_supply_receipt', {
+                  p_route_stop_id: id,
+                  p_received_by: batchReceiptForm.received_by.trim(),
+                  p_proof_reference: batchReceiptForm.proof_reference.trim() || null,
+                  p_notes: null,
+                });
+                if (error) throw new Error(error.message);
+              },(done,total) => setBatchReceiptProgress({done,total}),3);
+              setBatchReceiptFeedback(summarizeWorkflowBatch(result, 'receipts confirmed', id => `Stop ${id.slice(0,8)}`));
+              const successful = new Set(result.completed);
+              setSelectedReceiptStopIds(prev => new Set([...prev].filter(id => !successful.has(id))));
+              queryClient.invalidateQueries({ queryKey: ['dispatch-routes', orgId] });
+              queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
+              queryClient.invalidateQueries({ queryKey: ['po-billing-readiness', orgId] });
+              queryClient.invalidateQueries({ queryKey: ['billing-completed-shops', orgId] });
+              queryClient.invalidateQueries({ queryKey: ['agency-operations-dashboard', orgId] });
+              if (!result.failed.length) { setBatchReceiptOpen(false); setBatchReceiptForm({received_by:'',proof_reference:''}); }
+            } catch (cause) { setBatchReceiptFeedback(cause instanceof Error ? cause.message : String(cause)); }
+            finally { setBatchReceiptProgress(null); }
+          }} disabled={!!batchReceiptProgress || selectedReceiptStopIds.size === 0 || batchReceiptForm.received_by.trim().length < 2}
+            className="w-full rounded-lg bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-teal-800 disabled:opacity-50">
+            {batchReceiptProgress ? 'Recording…' : `Confirm ${selectedReceiptStopIds.size} delivered destinations`}
+          </button>
+        </div>
+      </Modal>
 
       <Modal open={!!receiptTarget} onClose={() => { if (!receiptMutation.isPending) setReceiptTarget(null); }} title="Confirm delivery received">
         <div className="space-y-3">
@@ -809,25 +988,25 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
         </div>
       </Modal>
 
-      <Modal open={createOpen} onClose={() => setCreateOpen(false)} title="Create Dispatch Route">
+      <Modal open={createOpen} onClose={() => { if (!createRouteMutation.isPending) setCreateOpen(false); }} title="Create Dispatch Route">
         <div className="space-y-4">
           <p className="text-xs text-slate-500">{selectedShopIds.size} shop(s) selected.</p>
-          <Input label="Route Name (optional)" value={routeForm.name} onChange={(v) => setRouteForm({ ...routeForm, name: v })} placeholder="e.g. Jalgaon Zone Delivery" />
-          <Input label="Delivery Date" type="date" value={routeForm.route_date} onChange={(v) => setRouteForm({ ...routeForm, route_date: v })} required />
+          <Input label="Route Name (optional)" value={routeForm.name} onChange={(v) => changeRouteForm({ ...routeForm, name: v })} placeholder="e.g. Jalgaon Zone Delivery" />
+          <Input label="Delivery Date" type="date" value={routeForm.route_date} onChange={(v) => changeRouteForm({ ...routeForm, route_date: v })} required />
 
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Dispatch By</label>
             <div className="flex gap-2 mb-2">
               <button
                 type="button"
-                onClick={() => setRouteForm({ ...routeForm, dispatch_mode: 'staff' })}
+                onClick={() => changeRouteForm({ ...routeForm, dispatch_mode: 'staff' })}
                 className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium border ${routeForm.dispatch_mode === 'staff' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-500'}`}
               >
                 Own staff / vehicle
               </button>
               <button
                 type="button"
-                onClick={() => setRouteForm({ ...routeForm, dispatch_mode: 'courier' })}
+                onClick={() => changeRouteForm({ ...routeForm, dispatch_mode: 'courier' })}
                 className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium border ${routeForm.dispatch_mode === 'courier' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-500'}`}
               >
                 Courier / transport company
@@ -839,7 +1018,7 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
             <Select
               label="Assigned To"
               value={routeForm.user_id}
-              onChange={(v) => setRouteForm({ ...routeForm, user_id: v })}
+              onChange={(v) => changeRouteForm({ ...routeForm, user_id: v })}
               options={deliveryStaff.map((s) => ({ value: s.id, label: `${s.full_name} (${s.role})` }))}
               required
             />
@@ -847,7 +1026,7 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
             <Input
               label="Transport Mode / Courier Name"
               value={routeForm.transport_mode}
-              onChange={(v) => setRouteForm({ ...routeForm, transport_mode: v })}
+              onChange={(v) => changeRouteForm({ ...routeForm, transport_mode: v })}
               placeholder="e.g. Blue Dart, Local Transport Co."
               required
             />
@@ -855,7 +1034,7 @@ function DispatchTab({ workOrderId }: { workOrderId: string }) {
           <Input
             label="Tracking Reference (optional)"
             value={routeForm.tracking_reference}
-            onChange={(v) => setRouteForm({ ...routeForm, tracking_reference: v })}
+            onChange={(v) => changeRouteForm({ ...routeForm, tracking_reference: v })}
             placeholder="AWB / consignment / LR number"
           />
 

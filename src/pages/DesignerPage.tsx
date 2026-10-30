@@ -1,3 +1,5 @@
+import { fetchWorkflowFolderPages } from '@/lib/workflowFolderPages';
+import { runBoundedWorkflowBatch, summarizeWorkflowBatch } from '@/lib/workflowBatch';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
@@ -33,7 +35,7 @@ const BOARD_DONE_STATUSES = ['designed', 'design_approved', 'in_production', 'pr
 // already gone to production.
 const BOARD_TOGGLEABLE_STATUSES = ['approved', 'designing', 'designed'];
 
-const PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 50;
 
 // Sentinel for the folder browser's "No Campaign" / "No Work Order" /
 // "No Zone" bucket — distinct from '' (which means "haven't narrowed by
@@ -274,7 +276,7 @@ export default function DesignerPage() {
     enabled: !!orgId,
   });
 
-  const [activeTab, setActiveTab] = useState(isDesigner ? 'pending' : 'all');
+  const [activeTab, setActiveTab] = useState(isDesigner ? 'pending' : (linkedPoId ? 'all' : 'in_review'));
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   // Order-type filter — owner/admin only. A designer must never see PO
@@ -297,13 +299,14 @@ export default function DesignerPage() {
   const [campaignFilter, setCampaignFilter] = useState('');
   const [poFilter, setPoFilter] = useState(linkedPoId);
   const [zoneFilter, setZoneFilter] = useState('');
-  const [browsingList, setBrowsingList] = useState(!!linkedPoId || isDesigner);
+  const [browsingList, setBrowsingList] = useState(true);
   useEffect(() => {
     setPoFilter(linkedPoId);
     if (linkedPoId) { setClientFilter(''); setCampaignFilter(''); setZoneFilter(''); setBrowsingList(true); }
   }, [linkedPoId]);
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [expandedShopId, setExpandedShopId] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<string | null>(null);
@@ -328,7 +331,14 @@ export default function DesignerPage() {
   const [stagedFiles, setStagedFiles] = useState<{ id: string; file: File; previewUrl: string | null }[]>([]);
   const [batchNotes, setBatchNotes] = useState('');
   const [batchSource, setBatchSource] = useState<'agency_designed' | 'client_provided'>('agency_designed');
+  // Default to completing the handoff in the same save. Partial/incomplete boards remain drafts.
+  const [submitAfterUpload, setSubmitAfterUpload] = useState(true);
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
+  const eligibleUploadItems = uploadTask?.items.filter((item) => !NOT_READY_STATUSES.includes(item.status) && !BOARD_DONE_STATUSES.includes(item.status)) || [];
+  const canSubmitUploadForReview = !!uploadTask && (uploadTask.items?.length || 0) > 0
+    && !uploadTask.items.some((item) => NOT_READY_STATUSES.includes(item.status))
+    && eligibleUploadItems.every((item) => selectedItemIds.has(item.id))
+    && (eligibleUploadItems.length > 0 || uploadTask.items.some((item) => BOARD_DONE_STATUSES.includes(item.status)));
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -385,7 +395,7 @@ export default function DesignerPage() {
     error: listQueryError,
     refetch: refetchList,
   } = useQuery({
-    queryKey: ['design-task-list', orgId, designerFilter, activeTab, debouncedSearch, page, typeFilter, boardProgressFilter, sortDir, clientFilter, campaignFilter, poFilter, zoneFilter],
+    queryKey: ['design-task-list', orgId, designerFilter, activeTab, debouncedSearch, page, pageSize, typeFilter, boardProgressFilter, sortDir, clientFilter, campaignFilter, poFilter, zoneFilter],
     queryFn: async () => {
       let q = supabase.from('v_design_task_list').select('*', { count: 'exact' }).eq('organization_id', orgId);
       if (designerFilter) q = q.eq('designer_id', designerFilter);
@@ -410,8 +420,8 @@ export default function DesignerPage() {
       if (zoneFilter === NO_FOLDER_BUCKET) q = q.is('zone_id', null);
       else if (zoneFilter) q = q.eq('zone_id', zoneFilter);
       const term = debouncedSearch.replace(/[,%()]/g, ' ').trim();
-      if (term) q = q.or(`shop_name.ilike.%${term}%,client_name.ilike.%${term}%,shop_city.ilike.%${term}%`);
-      q = q.order('created_at', { ascending: sortDir === 'asc' }).range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
+      if (term) q = q.or(`shop_name.ilike.%${term}%,client_name.ilike.%${term}%,shop_city.ilike.%${term}%,po_number.ilike.%${term}%,po_name.ilike.%${term}%`);
+      q = q.order('created_at', { ascending: sortDir === 'asc' }).range(page * pageSize, page * pageSize + pageSize - 1);
       const { data, error, count } = await q;
       if (error) throw new Error(error.message || 'Could not load design tasks.');
       return { rows: (data || []) as DesignTaskRow[], count: count || 0 };
@@ -422,7 +432,7 @@ export default function DesignerPage() {
   });
   const rows = useMemo(() => listResult?.rows || [], [listResult]);
   const totalCount = listResult?.count || 0;
-  const pageCount = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const pageCount = Math.max(1, Math.ceil(totalCount / pageSize));
 
   // ---- Folder browser (Campaign -> Work Order -> Zone) ----
   // Same lightweight, unpaginated tree fetch Production Studio uses:
@@ -443,9 +453,13 @@ export default function DesignerPage() {
       }
       if (boardProgressFilter !== 'all') q = q.eq('board_progress', boardProgressFilter);
       const term = debouncedSearch.replace(/[,%()]/g, ' ').trim();
-      if (term) q = q.or(`shop_name.ilike.%${term}%,client_name.ilike.%${term}%,shop_city.ilike.%${term}%`);
-      const { data, error } = await q;
-      if (error) throw new Error(`Could not load the folder browser: ${error.message}`);
+      if (term) q = q.or(`shop_name.ilike.%${term}%,client_name.ilike.%${term}%,shop_city.ilike.%${term}%,po_number.ilike.%${term}%,po_name.ilike.%${term}%`);
+      q = q.order('design_task_id', { ascending: true });
+      const data = await fetchWorkflowFolderPages(async (from, to) => {
+        const { data: batch, error } = await q.range(from, to);
+        if (error) throw new Error(`Could not load the folder browser: ${error.message}`);
+        return batch || [];
+      });
       return data as {
         design_task_id: string; client_id: string; client_name: string | null; project_id: string | null; project_name: string | null;
         campaign_id: string | null; campaign_name: string | null;
@@ -453,7 +467,10 @@ export default function DesignerPage() {
         zone_id: string | null; zone_name: string | null; status: string;
       }[];
     },
-    enabled: !!orgId,
+    // Fetch organization-wide folder data only while browsing folders (or within a selected folder).
+    // The default Action Queue uses the server-paginated task list instead of loading the entire tree.
+    enabled: !!orgId && !browsingList && !debouncedSearch,
+    staleTime: 30_000,
   });
 
   // A PO's "Campaign" is project_id (agency's own) OR campaign_id
@@ -657,7 +674,7 @@ export default function DesignerPage() {
   const updateStatusMutation = useMutation({
     mutationFn: async ({
       row, status, assignedTo, versions,
-    }: { row: DesignTaskRow; status: string; assignedTo?: string; versions?: DesignVersion[] }) => {
+    }: { row: DesignTaskRow; status: string; assignedTo?: string; versions?: DesignVersion[]; advance?: boolean }) => {
       if (status === 'ready_for_production') {
         if (!assignedTo) throw new Error('Pick a production person to assign this order to first.');
         await sendDesignTaskToProduction(row, assignedTo);
@@ -701,7 +718,10 @@ export default function DesignerPage() {
 
       await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, status, `Design task status changed to ${status} for ${row.shop_name}`);
     },
-    onSuccess: () => {
+    onSuccess: (_result, variables) => {
+      const nextReview = variables.status === 'approved' && variables.advance
+        ? rows.find((candidate) => candidate.status === 'in_review' && candidate.design_task_id !== variables.row.design_task_id)
+        : undefined;
       queryClient.invalidateQueries({ queryKey: ['design-task-list', orgId] });
       queryClient.invalidateQueries({ queryKey: ['design-task-stats', orgId] });
       queryClient.invalidateQueries({ queryKey: ['design-task-detail'] });
@@ -714,6 +734,7 @@ export default function DesignerPage() {
       setReviewTask(null);
       setRequestingChanges(false);
       setChangesNote('');
+      if (nextReview) void quickReview(nextReview);
     },
   });
 
@@ -769,103 +790,74 @@ export default function DesignerPage() {
   // notification (never a single blended notification), exactly as if it
   // had been approved individually; this is purely a faster way to fire
   // the same per-shop approval multiple times.
+  const [designBatchProgress, setDesignBatchProgress] = useState<{ done: number; total: number } | null>(null);
+  const [designBatchResult, setDesignBatchResult] = useState<string | null>(null);
+  const designBatchProgressCallback = (done: number, total: number) => setDesignBatchProgress({ done, total });
+  const refreshDesignBatch = () => {
+    queryClient.invalidateQueries({ queryKey: ['design-task-list', orgId] });
+    queryClient.invalidateQueries({ queryKey: ['design-task-tree', orgId] });
+    queryClient.invalidateQueries({ queryKey: ['design-task-stats', orgId] });
+    queryClient.invalidateQueries({ queryKey: ['design-task-detail'] });
+    queryClient.invalidateQueries({ queryKey: ['production-order-list'] });
+    queryClient.invalidateQueries({ queryKey: ['production-order-tree'] });
+    queryClient.invalidateQueries({ queryKey: ['production-order-stats'] });
+    queryClient.invalidateQueries({ queryKey: ['shops'] });
+    queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
+  };
   const bulkApproveMutation = useMutation({
-    mutationFn: async (selected: DesignTaskRow[]) => {
-      const failures: string[] = [];
-      for (const row of selected) {
-        try {
-          const d = await fetchShopDetail(row.shop_id, row.design_task_id);
-          const { error: taskError } = await supabase.from('design_tasks').update({ status: 'approved', completed_at: new Date().toISOString() }).eq('id', row.design_task_id).select('id');
-          if (taskError) throw new Error(taskError.message);
-          const { error: shopError } = await supabase.from('shops').update({ status: 'design_approved' }).eq('id', row.shop_id).select('id');
-          if (shopError) throw new Error(shopError.message);
-          const latestVersion = d.versions.slice().sort((a, b) => b.version_number - a.version_number)[0];
-          if (latestVersion) {
-            const { error: versionError } = await supabase.from('design_versions').update({ status: 'approved' }).eq('id', latestVersion.id).select('id');
-            if (versionError) throw new Error(versionError.message);
-          }
-          if (row.designer_id) {
-            await createNotification(row.designer_id, 'Design Approved', `Your design for ${row.shop_name} was approved.`, 'success', '/design');
-          }
-          await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, 'approved', `Design task status changed to approved for ${row.shop_name} (bulk approve)`);
-        } catch (err) {
-          failures.push(`${row.shop_name}: ${(err as Error).message}`);
-        }
+    mutationFn: (selected: DesignTaskRow[]) => runBoundedWorkflowBatch(selected, async (row) => {
+      // The current company approval trigger still validates each task individually.
+      const d = await fetchShopDetail(row.shop_id, row.design_task_id);
+      const { error: taskError } = await supabase.from('design_tasks').update({ status: 'approved', completed_at: new Date().toISOString() }).eq('id', row.design_task_id).select('id');
+      if (taskError) throw new Error(taskError.message);
+      const { error: shopError } = await supabase.from('shops').update({ status: 'design_approved' }).eq('id', row.shop_id).select('id');
+      if (shopError) throw new Error(shopError.message);
+      const latestVersion = d.versions.slice().sort((a, b) => b.version_number - a.version_number)[0];
+      if (latestVersion) {
+        const { error: versionError } = await supabase.from('design_versions').update({ status: 'approved' }).eq('id', latestVersion.id).select('id');
+        if (versionError) throw new Error(versionError.message);
       }
-      if (failures.length > 0) {
-        throw new Error(`${selected.length - failures.length}/${selected.length} approved. Failed — ${failures.join('; ')}`);
+      if (row.designer_id) {
+        await createNotification(row.designer_id, 'Design Approved', `Your design for ${row.shop_name} was approved.`, 'success', '/design');
       }
+      await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, 'approved', `Design task status changed to approved for ${row.shop_name} (bulk approve)`);
+    }, designBatchProgressCallback),
+    onSuccess: (result) => {
+      setDesignBatchResult(summarizeWorkflowBatch(result, 'designs approved', row => row.shop_name));
+      const succeeded = new Set(result.completed.map(row => row.design_task_id));
+      setSelectedRowIds(prev => new Set([...prev].filter(id => !succeeded.has(id))));
     },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['design-task-list', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['design-task-stats', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['design-task-detail'] });
-      queryClient.invalidateQueries({ queryKey: ['shops'] });
-      queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
-      setSelectedRowIds(new Set());
-    },
+    onSettled: () => { setDesignBatchProgress(null); refreshDesignBatch(); },
   });
 
-  // Bulk "Send to Production" — same per-shop production-order create/
-  // reuse + notify + status flips as the single-row flow (via the shared
-  // `sendDesignTaskToProduction` helper), just looped over every selected
-  // `approved` shop with one production-person pick for all of them.
   const bulkSendToProductionMutation = useMutation({
-    mutationFn: async ({ selected, assignedTo }: { selected: DesignTaskRow[]; assignedTo: string }) => {
-      if (!assignedTo) throw new Error('Pick a production person to assign these orders to first.');
-      const failures: string[] = [];
-      for (const row of selected) {
-        try {
-          await sendDesignTaskToProduction(row, assignedTo);
-        } catch (err) {
-          failures.push(`${row.shop_name}: ${(err as Error).message}`);
-        }
-      }
-      if (failures.length > 0) {
-        throw new Error(`${selected.length - failures.length}/${selected.length} sent. Failed — ${failures.join('; ')}`);
-      }
+    mutationFn: ({ selected, assignedTo }: { selected: DesignTaskRow[]; assignedTo: string }) => {
+      if (!assignedTo) throw new Error('Select the Production team member.');
+      return runBoundedWorkflowBatch(selected, row => sendDesignTaskToProduction(row, assignedTo), designBatchProgressCallback);
     },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['design-task-list', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['design-task-stats', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['design-task-detail'] });
-      queryClient.invalidateQueries({ queryKey: ['production-order-list'] });
-      queryClient.invalidateQueries({ queryKey: ['production-order-stats'] });
-      queryClient.invalidateQueries({ queryKey: ['shops'] });
-      queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
-      setSelectedRowIds(new Set());
-      setBulkProductionRows(null);
-      setBulkProductionUserId('');
+    onSuccess: (result) => {
+      setDesignBatchResult(summarizeWorkflowBatch(result, 'sent to Production', row => row.shop_name));
+      const succeeded = new Set(result.completed.map(row => row.design_task_id));
+      setSelectedRowIds(prev => new Set([...prev].filter(id => !succeeded.has(id))));
+      if (result.failed.length) setBulkProductionRows(result.failed.map(f => f.item));
+      else { setBulkProductionRows(null); setBulkProductionUserId(''); }
     },
+    onSettled: () => { setDesignBatchProgress(null); refreshDesignBatch(); },
   });
 
-  // Designer's equivalent of bulk approve — send several finished
-  // (design_ready) shops up for review in one action instead of opening
-  // each one to click "Send for Review" individually. Reviewers still get
-  // one notification per shop (never a single blended one), same as the
-  // single-row action.
   const bulkSendForReviewMutation = useMutation({
-    mutationFn: async (selected: DesignTaskRow[]) => {
-      const failures: string[] = [];
-      for (const row of selected) {
-        try {
-          const { error } = await supabase.from('design_tasks').update({ status: 'in_review' }).eq('id', row.design_task_id).select('id');
-          if (error) throw new Error(error.message);
-          await notifyDesignReviewers(row.organization_id, row.shop_name);
-          await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, 'in_review', `Design task status changed to in_review for ${row.shop_name} (bulk send)`);
-        } catch (err) {
-          failures.push(`${row.shop_name}: ${(err as Error).message}`);
-        }
-      }
-      if (failures.length > 0) {
-        throw new Error(`${selected.length - failures.length}/${selected.length} sent. Failed — ${failures.join('; ')}`);
-      }
+    mutationFn: (selected: DesignTaskRow[]) => runBoundedWorkflowBatch(selected, async row => {
+      const { error } = await supabase.from('design_tasks').update({ status: 'in_review' }).eq('id', row.design_task_id).select('id');
+      if (error) throw new Error(error.message);
+      await notifyDesignReviewers(row.organization_id, row.shop_name);
+      await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, 'in_review', `Design task status changed to in_review for ${row.shop_name} (bulk send)`);
+    }, designBatchProgressCallback),
+    onSuccess: (result) => {
+      setDesignBatchResult(summarizeWorkflowBatch(result, 'sent for review', row => row.shop_name));
+      const succeeded = new Set(result.completed.map(row => row.design_task_id));
+      setSelectedRowIds(prev => new Set([...prev].filter(id => !succeeded.has(id))));
     },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['design-task-list', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['design-task-stats', orgId] });
-      setSelectedRowIds(new Set());
-    },
+    onSettled: () => { setDesignBatchProgress(null); refreshDesignBatch(); },
   });
 
   function toggleRowSelected(id: string) {
@@ -898,6 +890,7 @@ export default function DesignerPage() {
     setUploadTask({ ...row, ...loadedDetail });
     setBatchNotes('');
     setBatchSource('agency_designed');
+    setSubmitAfterUpload(true);
     setStagedFiles([]);
     const pending = loadedDetail.items.filter(
       (i) => !BOARD_DONE_STATUSES.includes(i.status) && !NOT_READY_STATUSES.includes(i.status)
@@ -999,6 +992,13 @@ export default function DesignerPage() {
     mutationFn: async () => {
       if (!uploadTask || !profile) return;
       if (stagedFiles.length === 0) throw new Error('Add at least one file before uploading.');
+      // Avoid uploading orphaned versions when a reviewer already finished the task.
+      const { data: currentTask, error: currentTaskError } = await supabase.from('design_tasks')
+        .select('status').eq('id', uploadTask.design_task_id).maybeSingle();
+      if (currentTaskError) throw new Error(`Could not verify design state: ${currentTaskError.message}`);
+      if (!currentTask || !['assigned', 'designing', 'design_ready', 'in_review'].includes(currentTask.status)) {
+        throw new Error('This design moved to the next stage. Refresh before uploading new artwork.');
+      }
       // Section 5 — "every design upload must be unambiguously tagged to
       // shop + survey + work item ... never a bare file-upload with a
       // freeform 'which shop' text note." The shop/survey side is already
@@ -1064,8 +1064,22 @@ export default function DesignerPage() {
         if (itemsError) throw new Error(`Could not update board status: ${itemsError.message}`);
       }
 
-      const { error: taskError } = await supabase.from('design_tasks').update({ status: 'design_ready' }).eq('id', uploadTask.design_task_id).select('id');
+      // One save, one next-stage handoff: never send a partially covered shop for review.
+      // The same server-side status and RLS rules still apply to this update.
+      const nextTaskStatus = submitAfterUpload && canSubmitUploadForReview ? 'in_review' : 'design_ready';
+      const { data: changedTask, error: taskError } = await supabase.from('design_tasks')
+        .update({ status: nextTaskStatus })
+        .eq('id', uploadTask.design_task_id)
+        .in('status', ['assigned', 'designing', 'design_ready', 'in_review'])
+        .select('id');
       if (taskError) throw new Error(`Could not update design task: ${taskError.message}`);
+      if (!changedTask?.length) throw new Error('This design was updated in another session. Reload the task before continuing.');
+      // Refresh the reviewer queue through its existing notification path.
+      // A delivery failure must never turn an already-saved upload into a duplicate retry.
+      if (nextTaskStatus === 'in_review') {
+        try { await notifyDesignReviewers(uploadTask.organization_id, uploadTask.shop_name); }
+        catch (notificationError) { console.warn('Design saved for review; reviewer notification failed.', notificationError); }
+      }
 
       await logAudit(
         'design_versions',
@@ -1111,13 +1125,34 @@ export default function DesignerPage() {
         subtitle={isDesigner ? "Your assigned shops — what to design, what's pending, what's done" : 'Manage design tasks for approved shops'}
       />
 
+      {/* Task-first default: folders are optional organization, never a mandatory four-click path. */}
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+        <div className="flex items-center gap-1.5" role="group" aria-label="Design navigation mode">
+          <button type="button" aria-pressed={showList && browsingList} onClick={() => setBrowsingList(true)}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold ${browsingList ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <LayoutList className="h-4 w-4" /> Action Queue
+          </button>
+          <button type="button" aria-pressed={!browsingList} onClick={() => { setSearch(''); setDebouncedSearch(''); setBrowsingList(false); }}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold ${!browsingList ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <FolderTree className="h-4 w-4" /> Browse Folders
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {(clientFilter || campaignFilter || poFilter || zoneFilter) && !linkedPoId && (
+            <button type="button" onClick={() => { setClientFilter(''); setCampaignFilter(''); setPoFilter(''); setZoneFilter(''); setBrowsingList(true); }}
+              className="rounded-md px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50">Clear folder scope</button>
+          )}
+          <p className="text-xs text-slate-500">Open a task directly, or browse Client → Campaign → Work Order → Zone.</p>
+        </div>
+      </div>
+
       {/* Summary strip */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-5">
-        <StatTile icon={<Clock className="w-4 h-4" />} label="Pending Shops" value={stats?.pending_shops} accent="amber" />
+        <StatTile icon={<Clock className="w-4 h-4" />} label="Pending Shops" value={stats?.pending_shops} accent="amber" onClick={() => { setActiveTab('pending'); setBrowsingList(true); }} />
         <StatTile icon={<Layers className="w-4 h-4" />} label="Boards Pending" value={stats?.boards_pending} accent="fuchsia" />
-        <StatTile icon={<Eye className="w-4 h-4" />} label="In Review" value={stats?.in_review} accent="blue" />
-        <StatTile icon={<CheckCircle2 className="w-4 h-4" />} label="Approved" value={stats?.approved} accent="green" />
-        <StatTile icon={<PackageCheck className="w-4 h-4" />} label="In Production" value={stats?.in_production} accent="teal" />
+        <StatTile icon={<Eye className="w-4 h-4" />} label="In Review" value={stats?.in_review} accent="blue" onClick={() => { setActiveTab('in_review'); setBrowsingList(true); }} />
+        <StatTile icon={<CheckCircle2 className="w-4 h-4" />} label="Approved" value={stats?.approved} accent="green" onClick={() => { setActiveTab('approved'); setBrowsingList(true); }} />
+        <StatTile icon={<PackageCheck className="w-4 h-4" />} label="In Production" value={stats?.in_production} accent="teal" onClick={() => { setActiveTab('ready_for_production'); setBrowsingList(true); }} />
       </div>
 
       {/* Filter menu + search */}
@@ -1198,7 +1233,7 @@ export default function DesignerPage() {
 
       {/* Folder browser — Client -> Campaign -> Work Order -> Zone, same
           pattern and levels as Production Studio, for both roles. */}
-      <nav aria-label="Folder path" className="flex items-center gap-1.5 text-sm mb-4 flex-wrap text-slate-400">
+      {(!browsingList || clientFilter || campaignFilter || poFilter || zoneFilter) && <nav aria-label="Folder path" className="flex items-center gap-1.5 text-sm mb-4 flex-wrap text-slate-400">
         <button
           onClick={() => resetFolderFrom('root')}
           className={`flex items-center gap-1.5 ${!clientFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
@@ -1252,7 +1287,7 @@ export default function DesignerPage() {
             <button onClick={() => setBrowsingList(false)} className="font-semibold text-slate-900">All Items</button>
           </>
         )}
-      </nav>
+      </nav>}
 
       {/* FOLDER TILES — shown until a folder is actually opened all the
           way to a Zone (or "View all" is tapped to skip ahead). No list
@@ -1330,6 +1365,18 @@ export default function DesignerPage() {
           selection its own status actually applies to, and says exactly
           how many that is so it's never ambiguous what "Approve 3" vs
           "Send 2 to Production" is about to do. */}
+      {(canApprove || isDesigner) && selectedRowIds.size === 0 && rows.length > 0 && (
+        <div className="mb-3 flex items-center justify-end">
+          <button type="button" onClick={() => setSelectedRowIds(new Set(rows.map(r => r.design_task_id)))}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+            Select visible {rows.length} design tasks
+          </button>
+        </div>
+      )}
+      {designBatchResult && <div role="status" className="mb-3 flex items-start justify-between rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+        <span>{designBatchResult}</span><button type="button" onClick={() => setDesignBatchResult(null)} className="ml-3 font-semibold">Dismiss</button>
+      </div>}
+      {designBatchProgress && <div role="status" aria-live="polite" className="mb-3 text-xs font-medium text-blue-700">Processing {designBatchProgress.done}/{designBatchProgress.total} tasks…</div>}
       {(canApprove || isDesigner) && selectedRowIds.size > 0 && (() => {
         const selectedRows = rows.filter((r) => selectedRowIds.has(r.design_task_id));
         const selInReview = selectedRows.filter((r) => r.status === 'in_review');
@@ -1338,6 +1385,10 @@ export default function DesignerPage() {
         return (
           <div className="mb-4 flex items-center gap-2 flex-wrap bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2.5">
             <span className="text-sm font-medium text-indigo-900">{selectedRowIds.size} selected</span>
+            <button type="button" onClick={() => setSelectedRowIds(new Set(rows.map(r => r.design_task_id)))}
+              disabled={!!designBatchProgress} className="rounded-md bg-white border border-indigo-200 px-2 py-1 text-xs font-semibold text-indigo-700 disabled:opacity-50">
+              Select visible ({rows.length})
+            </button>
             <button
               onClick={() => setSelectedRowIds(new Set())}
               className="text-xs text-indigo-600 hover:underline"
@@ -1367,7 +1418,7 @@ export default function DesignerPage() {
               {canApprove && selInReview.length > 0 && (
                 <button
                   onClick={() => bulkApproveMutation.mutate(selInReview)}
-                  disabled={bulkApproveMutation.isPending}
+                  disabled={bulkApproveMutation.isPending || !!designBatchProgress}
                   className="flex items-center gap-1 bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
                 >
                   <CheckCircle2 className="w-3.5 h-3.5" /> {bulkApproveMutation.isPending ? 'Approving…' : `Approve ${selInReview.length}`}
@@ -1384,7 +1435,7 @@ export default function DesignerPage() {
               {isDesigner && selDesignReady.length > 0 && (
                 <button
                   onClick={() => bulkSendForReviewMutation.mutate(selDesignReady)}
-                  disabled={bulkSendForReviewMutation.isPending}
+                  disabled={bulkSendForReviewMutation.isPending || !!designBatchProgress}
                   className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
                 >
                   <Send className="w-3.5 h-3.5" /> {bulkSendForReviewMutation.isPending ? 'Sending…' : `Send ${selDesignReady.length} for Review`}
@@ -1435,7 +1486,7 @@ export default function DesignerPage() {
                   tabIndex={0}
                   onClick={() => toggleExpand(row)}
                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(row); } }}
-                  className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-slate-50 transition cursor-pointer"
+                  className="w-full text-left px-3 sm:px-4 py-3 flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 transition cursor-pointer"
                 >
                   {/* Bulk-select checkbox — owner sees it on shops awaiting
                       their approval, designer sees it on shops of their own
@@ -1492,7 +1543,7 @@ export default function DesignerPage() {
 
                   {/* Quick actions — the primary next step for this exact
                       shop, one click away, no expanding required. */}
-                  <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                  <div className="order-last sm:order-none w-full sm:w-auto flex items-center justify-end gap-1.5 flex-wrap sm:shrink-0" onClick={(e) => e.stopPropagation()}>
                     {canApprove && row.requires_design_all_false && row.status !== 'ready_for_production' && (
                       <button
                         onClick={() => { setProductionTask(row); setProductionUserId(''); }}
@@ -1774,7 +1825,7 @@ export default function DesignerPage() {
                               Design Not Required — Send to Production
                             </button>
                           )}
-                          {isDesigner && (
+                          {isDesigner && ['assigned', 'designing', 'design_ready', 'in_review'].includes(row.status) && (
                             <button onClick={() => detail && openUploadModal(row, detail)} className="flex items-center gap-1 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium">
                               <Upload className="w-4 h-4" /> Upload Designs
                             </button>
@@ -1827,7 +1878,9 @@ export default function DesignerPage() {
           <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 text-sm">
             <p className="text-xs text-slate-500 flex items-center gap-1.5">
               <LayoutList className="w-3.5 h-3.5" />
-              Showing {page * PAGE_SIZE + 1}–{Math.min(totalCount, page * PAGE_SIZE + PAGE_SIZE)} of {totalCount}
+<select aria-label="Tasks per page" value={pageSize} onChange={event => { setPageSize(Number(event.target.value)); setPage(0); setSelectedRowIds(new Set()); }} className="mr-2 rounded border border-slate-200 bg-white px-1.5 py-1 text-xs text-slate-700">
+                <option value={20}>20/page</option><option value={50}>50/page</option><option value={100}>100/page</option>
+              </select>               Showing {page * pageSize + 1}–{Math.min(totalCount, page * pageSize + pageSize)} of {totalCount}
             </p>
             <div className="flex items-center gap-2">
               <button
@@ -1971,11 +2024,11 @@ export default function DesignerPage() {
                   Request Changes
                 </button>
                 <button
-                  onClick={() => updateStatusMutation.mutate({ row: reviewTask, status: 'approved', versions: reviewTask.versions })}
+                  onClick={() => updateStatusMutation.mutate({ row: reviewTask, status: 'approved', versions: reviewTask.versions, advance: true })}
                   disabled={updateStatusMutation.isPending}
                   className="flex-1 bg-green-600 hover:bg-green-700 text-white font-medium py-2.5 rounded-lg text-sm disabled:opacity-50"
                 >
-                  {updateStatusMutation.isPending ? 'Approving…' : 'Approve Design'}
+                  {updateStatusMutation.isPending ? 'Approving…' : rows.some((candidate) => candidate.status === 'in_review' && candidate.design_task_id !== reviewTask.design_task_id) ? 'Approve & Next' : 'Approve Design'}
                 </button>
               </div>
             )}
@@ -2047,6 +2100,16 @@ export default function DesignerPage() {
           />
 
           <Textarea label="Notes" value={batchNotes} onChange={setBatchNotes} rows={2} placeholder="Notes for this batch (applies to every file uploaded)..." />
+          {canSubmitUploadForReview ? (
+            <label className="flex items-start gap-2.5 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 cursor-pointer">
+              <input type="checkbox" checked={submitAfterUpload} onChange={(event) => setSubmitAfterUpload(event.target.checked)} className="mt-0.5 h-4 w-4 accent-blue-600" />
+              <span><strong>Upload & send for review</strong><span className="block text-xs text-blue-700 mt-0.5">No separate "Send for Review" click. Owner/Admin receives the same design-review task.</span></span>
+            </label>
+          ) : (
+            <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+              Files will save as a design draft. Finish selecting/covering all eligible boards to send the complete shop for review.
+            </p>
+          )}
 
           <input ref={fileRef} type="file" accept="image/*,.pdf" multiple onChange={handleFilesSelected} className="hidden" />
           <button
@@ -2089,7 +2152,9 @@ export default function DesignerPage() {
             <Upload className="w-5 h-5" />
             {uploadMutation.isPending
               ? `Uploading ${uploadProgress ? `${uploadProgress.done}/${uploadProgress.total}` : '...'}`
-              : `Upload ${stagedFiles.length || ''} Design${stagedFiles.length === 1 ? '' : 's'}`}
+              : submitAfterUpload && canSubmitUploadForReview
+                ? `Upload ${stagedFiles.length || ''} & Send for Review`
+                : `Save ${stagedFiles.length || ''} Design File${stagedFiles.length === 1 ? '' : 's'}`}
           </button>
         </div>
       </Modal>
@@ -2130,7 +2195,7 @@ export default function DesignerPage() {
 
       {/* Bulk "Send to Production" — one production-person pick applied to
           every selected approved shop at once. */}
-      <Modal open={!!bulkProductionRows} onClose={() => { setBulkProductionRows(null); setBulkProductionUserId(''); }} title="Send to Production">
+      <Modal open={!!bulkProductionRows} onClose={() => { if (!bulkSendToProductionMutation.isPending) { setBulkProductionRows(null); setBulkProductionUserId(''); } }} title="Send to Production">
         <div className="space-y-4">
           <div>
             <p className="text-sm text-slate-600 mb-1.5">Sending <span className="font-medium text-slate-900">{bulkProductionRows?.length}</span> shop(s):</p>
@@ -2177,8 +2242,8 @@ const ACCENTS: Record<string, string> = {
   teal: 'text-teal-600 bg-teal-50 border-teal-100',
 };
 
-function StatTile({ icon, label, value, accent }: { icon: React.ReactNode; label: string; value: number | undefined; accent: string }) {
-  return (
+function StatTile({ icon, label, value, accent, onClick }: { icon: React.ReactNode; label: string; value: number | undefined; accent: string; onClick?: () => void }) {
+  const content = (
     <Card className="p-3.5 flex items-center gap-3">
       <div className={`w-9 h-9 rounded-lg border flex items-center justify-center shrink-0 ${ACCENTS[accent]}`}>{icon}</div>
       <div className="min-w-0">
@@ -2187,6 +2252,12 @@ function StatTile({ icon, label, value, accent }: { icon: React.ReactNode; label
       </div>
     </Card>
   );
+  return onClick ? (
+    <button type="button" aria-label={`Show ${label} tasks`} onClick={onClick}
+      className="w-full rounded-xl text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 hover:shadow-md transition">
+      {content}
+    </button>
+  ) : content;
 }
 
 // The uploaded design file's own preview inside the Review modal — same

@@ -22,6 +22,6 @@ const sql=fs.readFileSync(path.join(root,'supabase/migrations/20261027100000_009
 check('Additive migration carries guard and initialization triggers',()=>{assert(sql.includes("'production_install'"));assert(sql.includes('trg_guard_po_fulfillment_change'));assert(sql.includes('trg_phase1_production_install_shop'));assert(sql.includes('trg_phase1_production_install_line'));assert(sql.includes('trg_guard_phase1_survey_assignment'))});
 check('Bootstrap does not invent billable quantity or approvals',()=>{assert(sql.includes('approved_quantity,approved_area'));assert(sql.includes("'pending',NULL,NULL,NULL"));assert(!sql.includes("SET status='approved'"));});
 const supply=fs.readFileSync(path.join(root,'src/pages/SupplyOrdersPage.tsx'),'utf8');
-check('Client-supplied artwork does not force assigned designer',()=>{assert(supply.includes("form.artwork_source === 'agency' && !form.designer_id"));assert(supply.includes("designer_id: form.artwork_source === 'agency' ? form.designer_id : null"));});
+check('Client-supplied artwork does not force assigned designer',()=>{assert(supply.includes("form.artwork_source === 'agency' && !effectiveDesignerId"));assert(supply.includes("designer_id: form.artwork_source === 'agency' ? effectiveDesignerId : null"));assert(supply.includes('designers?.length === 1 ? designers[0].id'));});
 check('Supply entry still requires a design review record',()=>assert(supply.includes(".from('design_tasks')")));
 console.log(`ALL ${passed} PHASE 1 FULFILLMENT CHECKS PASSED`);

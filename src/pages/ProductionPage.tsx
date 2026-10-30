@@ -1,3 +1,5 @@
+import { fetchWorkflowFolderPages } from '@/lib/workflowFolderPages';
+import { runBoundedWorkflowBatch, summarizeWorkflowBatch } from '@/lib/workflowBatch';
 import { ReactNode, useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
@@ -23,7 +25,7 @@ const PRODUCTION_ELIGIBLE_STATUSES = ['approved', 'design_approved', 'in_product
 // Statuses that mean this board is fully done and locked from further edits
 // here (it's moved on to/through installation).
 const BOARD_LOCKED_STATUSES = ['production_done', 'installed'];
-const PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 50;
 
 // Sentinel for the folder browser's "No Campaign" / "No Work Order" /
 // "No Zone" bucket — distinct from '' (which means "haven't narrowed by
@@ -48,6 +50,13 @@ const STATUS_BORDER: Record<string, string> = {
   hold: 'border-l-red-400',
   completed: 'border-l-emerald-400',
 };
+
+// A fully recorded, material-ready order can be sent through the same atomic
+// completion RPC without an intermediate dialog. Empty orders are never eligible.
+function readyForDirectCompletion(row: ProductionOrderRow): boolean {
+  return row.total_boards > 0 && row.pending_boards === 0 && row.materials_pending_boards === 0
+    && ['in_production', 'ready'].includes(row.status);
+}
 
 type ProductionStats = {
   total: number; pending: number; in_production: number; ready: number; hold: number; completed: number;
@@ -219,7 +228,7 @@ export default function ProductionPage() {
   // per-board work list), and Vehicle Load (Production hands off finished
   // boards to an installer's vehicle). One click switches between them;
   // nothing here is a separate route, so there's no navigation dead-end.
-  const [mainView, setMainView] = useState<'overview' | 'production' | 'vehicle_load'>(linkedPoId || isProduction ? 'production' : 'overview');
+  const [mainView, setMainView] = useState<'overview' | 'production' | 'vehicle_load'>('production');
   const [activeTab, setActiveTab] = useState('all');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -232,6 +241,7 @@ export default function ProductionPage() {
   const [assignedFilter, setAssignedFilter] = useState(''); // owner/admin only
   const [sortBy, setSortBy] = useState<'attention' | 'oldest' | 'newest' | 'zone' | 'completion'>('attention');
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [expandedShopId, setExpandedShopId] = useState<string | null>(null);
@@ -241,7 +251,7 @@ export default function ProductionPage() {
   // Campaign/Work Order/Zone has been chosen so far". Becomes true either
   // by picking all the way down to a Zone, or by tapping "View All Here"
   // at any level to skip the rest of the folder tree.
-  const [browsingList, setBrowsingList] = useState(!!linkedPoId || isProduction);
+  const [browsingList, setBrowsingList] = useState(true);
   // Mobile: the sidebar (View switcher + Status + Filters) collapses into
   // this panel below the lg breakpoint, opened via a "Filters" button
   // next to search — so a production floor tablet/phone isn't
@@ -268,6 +278,8 @@ export default function ProductionPage() {
   const [bulkInstallerId, setBulkInstallerId] = useState('');
 
   const [editingItem, setEditingItem] = useState<{ orderId: string; itemId: string } | null>(null);
+  const [quickLogLoadingId, setQuickLogLoadingId] = useState<string | null>(null);
+  const [quickLogError, setQuickLogError] = useState<string | null>(null);
   const [itemQty, setItemQty] = useState('');
   const [itemNotes, setItemNotes] = useState('');
 
@@ -319,7 +331,8 @@ export default function ProductionPage() {
       if (error) throw new Error(`Could not load installers: ${error.message}`);
       return data as { id: string; full_name: string }[];
     },
-    enabled: !!orgId && ((!!editOrder && isCompleting && !skipsInstaller) || !!bulkCompleteOrders),
+    // Load once for the action queue too: when exactly one installer exists, completion needs no picker.
+    enabled: !!orgId && canApprove && (mainView === 'production' || (!!editOrder && isCompleting && !skipsInstaller) || !!bulkCompleteOrders),
   });
 
   // Reuse the only available installer automatically, avoiding a redundant click.
@@ -336,7 +349,7 @@ export default function ProductionPage() {
     error: listQueryError,
     refetch: refetchList,
   } = useQuery({
-    queryKey: ['production-order-list', orgId, assignedFilterValue, activeTab, debouncedSearch, page, zoneFilter, poFilter, campaignFilter, clientFilter, workTypeFilter, fulfillmentFilter, assignedFilter, sortBy],
+    queryKey: ['production-order-list', orgId, assignedFilterValue, activeTab, debouncedSearch, page, pageSize, zoneFilter, poFilter, campaignFilter, clientFilter, workTypeFilter, fulfillmentFilter, assignedFilter, sortBy],
     queryFn: async () => {
       let q = supabase.from('v_production_order_list').select('*', { count: 'exact' }).eq('organization_id', orgId);
       if (assignedFilterValue) q = q.eq('assigned_to', assignedFilterValue);
@@ -364,7 +377,7 @@ export default function ProductionPage() {
       else if (sortBy === 'completion') q = q.order('progress_pct', { ascending: false });
       else q = q.order('attention_rank', { ascending: true }).order('created_at', { ascending: false });
 
-      q = q.range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
+      q = q.range(page * pageSize, page * pageSize + pageSize - 1);
       const { data, error, count } = await q;
       if (error) throw new Error(error.message || 'Could not load production orders.');
       return { rows: (data || []) as ProductionOrderRow[], count: count || 0 };
@@ -375,7 +388,7 @@ export default function ProductionPage() {
   });
   const rows = useMemo(() => listResult?.rows || [], [listResult]);
   const totalCount = listResult?.count || 0;
-  const pageCount = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const pageCount = Math.max(1, Math.ceil(totalCount / pageSize));
 
   // ---- Folder browser (Campaign → Work Order → Zone) ----
   // One lightweight, UNPAGINATED fetch — same status tab / search / work
@@ -404,8 +417,12 @@ export default function ProductionPage() {
       if (fulfillmentFilter) q = q.eq('fulfillment_type', fulfillmentFilter);
       const term = debouncedSearch.replace(/[,%()]/g, ' ').trim();
       if (term) q = q.or(`shop_name.ilike.%${term}%,client_name.ilike.%${term}%,shop_city.ilike.%${term}%,shop_contact_phone.ilike.%${term}%,po_number.ilike.%${term}%,po_name.ilike.%${term}%`);
-      const { data, error } = await q;
-      if (error) throw new Error(`Could not load the folder browser: ${error.message}`);
+      q = q.order('production_order_id', { ascending: true });
+      const data = await fetchWorkflowFolderPages(async (from, to) => {
+        const { data: batch, error } = await q.range(from, to);
+        if (error) throw new Error(`Could not load the folder browser: ${error.message}`);
+        return batch || [];
+      });
       return data as {
         production_order_id: string; client_id: string; client_name: string | null; project_id: string | null; project_name: string | null;
         campaign_id: string | null; campaign_name: string | null;
@@ -413,7 +430,9 @@ export default function ProductionPage() {
         zone_id: string | null; zone_name: string | null; status: string; materials_pending_boards: number;
       }[];
     },
-    enabled: !!orgId,
+    // The task-first queue is paginated: only load the whole folder tree when the user asks for it.
+    enabled: !!orgId && !browsingList && !debouncedSearch,
+    staleTime: 30_000,
   });
 
   // Client tiles — the new top level. Every distinct client present in
@@ -604,6 +623,38 @@ export default function ProductionPage() {
     }
   }
 
+  // Opens the first unfinished board without forcing shop → expand → scroll → pencil.
+  // Load only this shop's detail and reuse the existing editable quantity/material view.
+  async function quickLogNextBoard(row: ProductionOrderRow) {
+    if (!canLogProduction || quickLogLoadingId) return;
+    setQuickLogError(null);
+    setQuickLogLoadingId(row.production_order_id);
+    try {
+      const loaded = await queryClient.fetchQuery({
+        queryKey: ['production-order-detail', row.shop_id, row.production_order_id],
+        queryFn: () => fetchOrderDetail(row.shop_id, row.production_order_id),
+        staleTime: 0,
+      });
+      const next = enrichBoards(loaded).find((board) => !board.locked && !board.isDone);
+      if (!next) throw new Error('No unfinished board found. Refresh this order to confirm its current status.');
+      setExpandedOrderId(row.production_order_id);
+      setExpandedShopId(row.shop_id);
+      openItemEditor(row.production_order_id, next);
+    } catch (error) {
+      setQuickLogError((error as Error).message || 'Could not open the next production item.');
+    } finally {
+      setQuickLogLoadingId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!editingItem) return;
+    const timer = window.setTimeout(() => {
+      document.getElementById(`production-board-${editingItem.itemId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 75);
+    return () => window.clearTimeout(timer);
+  }, [editingItem]);
+
   function openEditOrder(row: ProductionOrderRow) {
     setEditOrder(row);
     setForm({ notes: row.notes || '', status: row.status === 'pending' ? 'in_production' : row.status, forceComplete: false });
@@ -787,7 +838,8 @@ export default function ProductionPage() {
         await completeProductionOrder(editOrder, effectiveInstallerId, form.notes || '', Boolean(form.forceComplete));
         return;
       }
-      const { error: orderError } = await supabase.from('production_orders').update({ status: form.status, notes: form.notes || null }).eq('id', editOrder.production_order_id).select('id');
+      const { data: updatedOrder, error: orderError } = await supabase.from('production_orders').update({ status: form.status, notes: form.notes || null }).eq('id', editOrder.production_order_id).eq('status', editOrder.status).select('id');
+      if (!orderError && !updatedOrder?.length) throw new Error('This production order changed in another session. Refresh before changing its status.');
       if (orderError) throw new Error(`Could not update production order: ${orderError.message}`);
       await logAudit('production_orders', editOrder.production_order_id, 'update', 'status', editOrder.status, form.status, `Production ${form.status} for ${editOrder.shop_name}`);
     },
@@ -802,67 +854,85 @@ export default function ProductionPage() {
     },
   });
 
+  // One-click completion for genuinely ready orders only. The same atomic RPC
+  // performs quantity/material checks, organization/role authorization and handoff.
+  // Never guess an installer when the agency has multiple active members.
+  const instantCompleteMutation = useMutation({
+    mutationFn: async ({ row, installer }: { row: ProductionOrderRow; installer: string }) => {
+      if (!canApprove) throw new Error('Only Owner/Admin may complete production.');
+      if (!readyForDirectCompletion(row)) {
+        throw new Error('This order is not yet ready for completion. Review pending work first.');
+      }
+      const needsInstaller = row.fulfillment_type !== 'supply_only' && !row.requires_installation_all_false;
+      if (needsInstaller && (!installer || orgInstallers?.length !== 1 || orgInstallers[0].id !== installer)) {
+        throw new Error('Select the correct installer in the completion form.');
+      }
+      await completeProductionOrder(row, installer, row.notes || '');
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['production-order-list', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['production-order-stats', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['production-order-detail'] });
+      queryClient.invalidateQueries({ queryKey: ['production-order-tree', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['shops'] });
+      queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
+    },
+  });
+
   // Bulk status change (In Production / Ready / On Hold) — both roles can
   // use this; it never touches "completed" (that stays a deliberate,
   // per-batch decision via bulk complete below, never a drive-by status
   // pick that could skip installer assignment or the pending-boards
   // check).
+  const [productionBatchProgress, setProductionBatchProgress] = useState<{ done: number; total: number } | null>(null);
+  const [productionBatchResult, setProductionBatchResult] = useState<string | null>(null);
+  const productionProgress = (done: number, total: number) => setProductionBatchProgress({ done, total });
+  const refreshProductionBatch = () => {
+    queryClient.invalidateQueries({ queryKey: ['production-order-list', orgId] });
+    queryClient.invalidateQueries({ queryKey: ['production-order-tree', orgId] });
+    queryClient.invalidateQueries({ queryKey: ['production-order-stats', orgId] });
+    queryClient.invalidateQueries({ queryKey: ['shops'] });
+    queryClient.invalidateQueries({ queryKey: ['dispatch-ready-shops', orgId] });
+    queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
+  };
   const bulkStatusMutation = useMutation({
-    mutationFn: async ({ selected, status }: { selected: ProductionOrderRow[]; status: string }) => {
-      const failures: string[] = [];
-      for (const row of selected) {
-        try {
-          const { error } = await supabase.from('production_orders').update({ status }).eq('id', row.production_order_id).select('id');
-          if (error) throw new Error(error.message);
-          await logAudit('production_orders', row.production_order_id, 'update', 'status', row.status, status, `Production ${status} for ${row.shop_name} (bulk)`);
-        } catch (err) {
-          failures.push(`${row.shop_name}: ${(err as Error).message}`);
-        }
-      }
-      if (failures.length > 0) throw new Error(`${selected.length - failures.length}/${selected.length} updated. Failed — ${failures.join('; ')}`);
+    mutationFn: ({ selected, status }: { selected: ProductionOrderRow[]; status: string }) =>
+      runBoundedWorkflowBatch(selected, async row => {
+        const { data: updated, error } = await supabase.from('production_orders').update({ status }).eq('id', row.production_order_id).eq('status', row.status).select('id');
+        if (error) throw new Error(error.message);
+        if (!updated?.length) throw new Error('Order status changed elsewhere; reload and retry this item.');
+        await logAudit('production_orders', row.production_order_id, 'update', 'status', row.status, status, `Production ${status} for ${row.shop_name} (bulk)`);
+      }, productionProgress),
+    onSuccess: result => {
+      setProductionBatchResult(summarizeWorkflowBatch(result, 'production statuses updated', row => row.shop_name));
+      const succeeded = new Set(result.completed.map(row => row.production_order_id));
+      setSelectedOrderIds(prev => new Set([...prev].filter(id => !succeeded.has(id))));
+      if (result.failed.length) setBulkStatusOrders(result.failed.map(f => f.item));
+      else setBulkStatusOrders(null);
     },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['production-order-list', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['production-order-stats', orgId] });
-      setSelectedOrderIds(new Set());
-      setBulkStatusOrders(null);
-    },
+    onSettled: () => { setProductionBatchProgress(null); refreshProductionBatch(); },
   });
 
-  // Bulk complete — owner/admin only. Only ever acts on the selected
-  // orders that actually have zero pending boards; anything still short
-  // is skipped and named in the result rather than silently force-
-  // completed, so a batch action can never quietly cover for a board that
-  // was never actually logged as produced.
   const bulkCompleteMutation = useMutation({
     mutationFn: async ({ selected, installer }: { selected: ProductionOrderRow[]; installer: string }) => {
-      const eligible = selected.filter((r) => r.pending_boards === 0);
-      const skipped = selected.filter((r) => r.pending_boards > 0);
-      if (eligible.length === 0) {
-        throw new Error('None of the selected orders are fully produced yet — nothing to complete.');
-      }
-      const failures: string[] = [];
-      for (const row of eligible) {
-        try {
-          await completeProductionOrder(row, (row.fulfillment_type === 'supply_only' || row.requires_installation_all_false) ? '' : installer, '', false);
-        } catch (err) {
-          failures.push(`${row.shop_name}: ${(err as Error).message}`);
-        }
-      }
-      const notes: string[] = [];
-      if (skipped.length > 0) notes.push(`Skipped (still has pending boards): ${skipped.map((s) => s.shop_name).join(', ')}`);
-      if (failures.length > 0) notes.push(`Failed: ${failures.join('; ')}`);
-      if (notes.length > 0) throw new Error(`${eligible.length - failures.length}/${selected.length} completed. ${notes.join(' — ')}`);
+      const eligible = selected.filter(r => r.pending_boards === 0);
+      const skipped = selected.filter(r => r.pending_boards > 0);
+      if (!eligible.length) throw new Error('No selected orders are fully produced. Complete their pending boards first.');
+      const result = await runBoundedWorkflowBatch(eligible, async row => {
+        await completeProductionOrder(row, (row.fulfillment_type === 'supply_only' || row.requires_installation_all_false) ? '' : installer, '', false);
+      }, productionProgress);
+      return { result, skipped };
     },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['production-order-list', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['production-order-stats', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['shops'] });
-      queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
-      setSelectedOrderIds(new Set());
-      setBulkCompleteOrders(null);
-      setBulkInstallerId('');
+    onSuccess: ({ result, skipped }) => {
+      const summary = summarizeWorkflowBatch(result, 'production orders completed', row => row.shop_name);
+      setProductionBatchResult(`${summary}${skipped.length ? ` ${skipped.length} unfinished orders remain selected.` : ''}`);
+      const succeeded = new Set(result.completed.map(row => row.production_order_id));
+      setSelectedOrderIds(prev => new Set([...prev].filter(id => !succeeded.has(id))));
+      const remaining = [...skipped, ...result.failed.map(f => f.item)];
+      if (remaining.length) setBulkCompleteOrders(remaining);
+      else { setBulkCompleteOrders(null); setBulkInstallerId(''); }
     },
+    onSettled: () => { setProductionBatchProgress(null); refreshProductionBatch(); },
   });
 
   const activeFilterCount = [clientFilter, campaignFilter, poFilter, zoneFilter, workTypeFilter, fulfillmentFilter, assignedFilter].filter(Boolean).length;
@@ -953,6 +1023,27 @@ export default function ProductionPage() {
         ))}
       </div>
 
+      {/* Work first. Folder navigation stays available without a four-level drill-down on each visit. */}
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+        <div className="flex items-center gap-1.5" role="group" aria-label="Production navigation mode">
+          <button type="button" aria-pressed={browsingList} onClick={() => setBrowsingList(true)}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold ${browsingList ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <LayoutList className="h-4 w-4" /> Action Queue
+          </button>
+          <button type="button" aria-pressed={!browsingList} onClick={() => { setSearch(''); setDebouncedSearch(''); setBrowsingList(false); }}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold ${!browsingList ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+            <FolderTree className="h-4 w-4" /> Browse Folders
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {(clientFilter || campaignFilter || poFilter || zoneFilter) && !linkedPoId && (
+            <button type="button" onClick={() => { setClientFilter(''); setCampaignFilter(''); setPoFilter(''); setZoneFilter(''); setBrowsingList(true); }}
+              className="rounded-md px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50">Clear folder scope</button>
+          )}
+          <p className="text-xs text-slate-500">Production tasks first; folders remain optional.</p>
+        </div>
+      </div>
+
       {/* Search + Filters — one compact row. Work Type/Fulfillment/
           Assigned/Sort open in a small popover from the "Filters"
           button rather than a permanent inline block, keeping this row
@@ -1023,7 +1114,7 @@ export default function ProductionPage() {
             except the current/deepest one, which is bold and un-styled
             as a link since it's where you already are. Clicking it still
             works though — it steps back to that level's own tiles. */}
-        <nav aria-label="Folder path" className="flex items-center gap-1.5 text-sm mb-5 flex-wrap text-slate-400">
+        {(!browsingList || clientFilter || campaignFilter || poFilter || zoneFilter) && <nav aria-label="Folder path" className="flex items-center gap-1.5 text-sm mb-5 flex-wrap text-slate-400">
           <button
             onClick={() => resetFolderFrom('root')}
             className={`flex items-center gap-1.5 ${!clientFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
@@ -1079,7 +1170,7 @@ export default function ProductionPage() {
               </button>
             </>
           )}
-        </nav>
+        </nav>}
 
         {(listIsError || statsIsError) && (
           <div className="mb-4 flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-lg px-3 py-2.5 text-sm">
@@ -1180,12 +1271,28 @@ export default function ProductionPage() {
           </label>
         </div>
 
-        {/* Bulk toolbar */}
+        {quickLogError && <div role="alert" className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800"><span>{quickLogError}</span><button type="button" onClick={() => setQuickLogError(null)} className="underline font-semibold">Dismiss</button></div>}
+        {instantCompleteMutation.isError && <div role="alert" className="mb-3 flex items-start justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800"><span>{(instantCompleteMutation.error as Error).message}</span><button type="button" className="font-semibold underline" onClick={() => instantCompleteMutation.reset()}>Dismiss</button></div>}
+        {productionBatchResult && <div role="status" className="mb-3 flex items-start justify-between rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+        <span>{productionBatchResult}</span><button type="button" onClick={() => setProductionBatchResult(null)} className="ml-3 font-semibold">Dismiss</button>
+      </div>}
+      {productionBatchProgress && <div role="status" aria-live="polite" className="mb-3 text-xs font-medium text-blue-700">Processing {productionBatchProgress.done}/{productionBatchProgress.total} orders…</div>}
+      {rows.some(r => isRowSelectable(r)) && selectedOrderIds.size === 0 && (
+        <div className="mb-3 flex justify-end">
+          <button type="button" onClick={() => setSelectedOrderIds(new Set(rows.filter(r => isRowSelectable(r)).map(r => r.production_order_id)))}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+            Select visible {rows.filter(r => isRowSelectable(r)).length} orders
+          </button>
+        </div>
+      )}
+      {/* Bulk toolbar */}
       {selectedOrderIds.size > 0 && (() => {
         const selected = rows.filter((r) => selectedOrderIds.has(r.production_order_id));
         return (
           <div className="mb-4 flex items-center gap-2 flex-wrap bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2.5">
             <span className="text-sm font-medium text-indigo-900">{selected.length} selected</span>
+            <button type="button" disabled={!!productionBatchProgress} onClick={() => setSelectedOrderIds(new Set(rows.filter(r => isRowSelectable(r)).map(r => r.production_order_id)))}
+              className="rounded-md bg-white border border-indigo-200 px-2 py-1 text-xs font-semibold text-indigo-700 disabled:opacity-50">Select visible</button>
             <button onClick={() => setSelectedOrderIds(new Set())} className="text-xs text-indigo-600 hover:underline">Clear</button>
             <div className="ml-auto flex items-center gap-2 flex-wrap">
               <button
@@ -1221,7 +1328,7 @@ export default function ProductionPage() {
                   tabIndex={0}
                   onClick={() => toggleExpand(row)}
                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(row); } }}
-                  className="w-full text-left pl-3 pr-4 py-3 flex items-center gap-3 hover:bg-slate-50 transition cursor-pointer"
+                  className="w-full text-left px-3 sm:px-4 py-3 flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 transition cursor-pointer"
                 >
                   {isRowSelectable(row) && (
                     <input
@@ -1269,15 +1376,44 @@ export default function ProductionPage() {
                     <p className="text-[10px] text-slate-400 mt-1 text-right">{row.progress_pct}%</p>
                   </div>
 
+                  {canLogProduction && row.pending_boards > 0 && !['completed', 'hold'].includes(row.status) && (
+                    <button type="button" onClick={(event) => { event.stopPropagation(); void quickLogNextBoard(row); }}
+                      disabled={!!quickLogLoadingId || !!productionBatchProgress}
+                      title="Open the first unfinished board and enter actual production quantity"
+                      className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50">
+                      {quickLogLoadingId === row.production_order_id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pencil className="h-3.5 w-3.5" />}
+                      Log Qty
+                    </button>
+                  )}
                   {/* Quick status change — right here on the row, so
                       updating an order never requires opening it, scrolling
                       through its boards, and finding the button at the
                       bottom. That's the whole point of this redesign. */}
                   <button
-                    onClick={(e) => { e.stopPropagation(); openEditOrder(row); }}
-                    className="shrink-0 flex items-center gap-1 bg-blue-600 hover:bg-blue-700 text-white px-2.5 py-1.5 rounded-lg text-xs font-medium"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const ready = canApprove && readyForDirectCompletion(row);
+                      const needsInstaller = row.fulfillment_type !== 'supply_only' && !row.requires_installation_all_false;
+                      if (ready && (!needsInstaller || orgInstallers?.length === 1)) {
+                        instantCompleteMutation.mutate({ row, installer: needsInstaller ? orgInstallers![0].id : '' });
+                        return;
+                      }
+                      openEditOrder(row);
+                      if (ready) setForm({ notes: row.notes || '', status: 'completed', forceComplete: false });
+                    }}
+                    disabled={instantCompleteMutation.isPending || updateMutation.isPending || !!productionBatchProgress}
+                    title={canApprove && readyForDirectCompletion(row)
+                      ? (row.fulfillment_type === 'supply_only' || row.requires_installation_all_false || orgInstallers?.length === 1
+                        ? 'Complete now using the existing server-side approval and handoff checks'
+                        : 'Choose an installer and confirm completion')
+                      : 'Update production status or open the order'}
+                    className={`shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-50 ${canApprove && readyForDirectCompletion(row) ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-blue-600 hover:bg-blue-700'}`}
                   >
-                    <Send className="w-3.5 h-3.5" /> Status
+                    {instantCompleteMutation.isPending && instantCompleteMutation.variables?.row.production_order_id === row.production_order_id
+                      ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Completing</>
+                      : canApprove && readyForDirectCompletion(row)
+                        ? <><PackageCheck className="w-3.5 h-3.5" /> Complete{row.fulfillment_type === 'supply_only' || row.requires_installation_all_false || orgInstallers?.length === 1 ? ' now' : ''}</>
+                        : <><Send className="w-3.5 h-3.5" /> Status</>}
                   </button>
 
                   <StatusBadge status={row.status} />
@@ -1317,7 +1453,7 @@ export default function ProductionPage() {
                           const bomOpen = expandedBom.has(item.id) || needsAttentionOpen;
                           const readyCount = comps.filter((c) => c.status === 'ready').length;
                           return (
-                            <div key={item.id} className="px-3 py-2.5 text-sm">
+                            <div key={item.id} id={`production-board-${item.id}`} className="px-3 py-2.5 text-sm scroll-mt-28">
                               <div className="flex items-center gap-2">
                                 {locked ? (
                                   <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
@@ -1518,7 +1654,9 @@ export default function ProductionPage() {
         {totalCount > 0 && (
           <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 text-sm">
             <p className="text-xs text-slate-500 flex items-center gap-1.5">
-              <LayoutList className="w-3.5 h-3.5" /> Showing {page * PAGE_SIZE + 1}–{Math.min(totalCount, page * PAGE_SIZE + PAGE_SIZE)} of {totalCount}
+              <select aria-label="Tasks per page" value={pageSize} onChange={event => { setPageSize(Number(event.target.value)); setPage(0); setSelectedOrderIds(new Set()); }} className="mr-2 rounded border border-slate-200 bg-white px-1.5 py-1 text-xs text-slate-700">
+                <option value={20}>20/page</option><option value={50}>50/page</option><option value={100}>100/page</option>
+              </select> <LayoutList className="w-3.5 h-3.5" /> Showing {page * pageSize + 1}–{Math.min(totalCount, page * pageSize + pageSize)} of {totalCount}
             </p>
             <div className="flex items-center gap-2">
               <button onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={page === 0 || listFetching} className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 text-xs font-medium disabled:opacity-40 hover:bg-slate-50">
@@ -1597,7 +1735,7 @@ export default function ProductionPage() {
       </Modal>
 
       {/* Bulk status change */}
-      <Modal open={!!bulkStatusOrders} onClose={() => setBulkStatusOrders(null)} title="Change Status">
+      <Modal open={!!bulkStatusOrders} onClose={() => { if (!bulkStatusMutation.isPending) setBulkStatusOrders(null); }} title="Change Status">
         <div className="space-y-4">
           <div>
             <p className="text-sm text-slate-600 mb-1.5">Updating <span className="font-medium text-slate-900">{bulkStatusOrders?.length}</span> order(s):</p>
@@ -1619,7 +1757,7 @@ export default function ProductionPage() {
           {bulkStatusMutation.isError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(bulkStatusMutation.error as Error).message}</p>}
           <button
             onClick={() => bulkStatusOrders && bulkStatusMutation.mutate({ selected: bulkStatusOrders, status: bulkStatus })}
-            disabled={bulkStatusMutation.isPending}
+            disabled={bulkStatusMutation.isPending || !!productionBatchProgress}
             className="w-full bg-blue-600 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
           >
             {bulkStatusMutation.isPending ? 'Updating...' : `Update ${bulkStatusOrders?.length || ''} Order(s)`}
@@ -1628,7 +1766,7 @@ export default function ProductionPage() {
       </Modal>
 
       {/* Bulk complete */}
-      <Modal open={!!bulkCompleteOrders} onClose={() => { setBulkCompleteOrders(null); setBulkInstallerId(''); }} title="Complete Production">
+      <Modal open={!!bulkCompleteOrders} onClose={() => { if (!bulkCompleteMutation.isPending) { setBulkCompleteOrders(null); setBulkInstallerId(''); } }} title="Complete Production">
         <div className="space-y-4">
           {(() => {
             const eligible = (bulkCompleteOrders || []).filter((r) => r.pending_boards === 0);
@@ -1668,7 +1806,7 @@ export default function ProductionPage() {
                 {bulkCompleteMutation.isError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">{(bulkCompleteMutation.error as Error).message}</p>}
                 <button
                   onClick={() => bulkCompleteOrders && bulkCompleteMutation.mutate({ selected: bulkCompleteOrders, installer: effectiveBulkInstallerId })}
-                  disabled={bulkCompleteMutation.isPending || eligible.length === 0 || (anyNeedsInstaller && !effectiveBulkInstallerId)}
+                  disabled={bulkCompleteMutation.isPending || !!productionBatchProgress || eligible.length === 0 || (anyNeedsInstaller && !effectiveBulkInstallerId)}
                   className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50"
                 >
                   {bulkCompleteMutation.isPending ? 'Completing...' : `Complete ${eligible.length} Order(s)`}

@@ -1,20 +1,19 @@
-const fs=require('fs'),path=require('path');
-const root=path.resolve(process.argv[2]||process.cwd());
-const files={
-  'src/lib/workCompletion.ts':['groupShopCompletion','isShopFinished','orderOperationalPercent'],
-  'src/pages/PurchaseOrdersPage.tsx':['shopCompletionByPo','physicalCompletion','<Modal open={!!po}'],
-  'src/pages/DashboardPage.tsx':['ordersOperationalPercent(own, byOrder)','refetchInterval: 20000'],
-  'src/pages/ShopsPages.tsx':['groupShopCompletion','pct}% delivery'],
-  'src/pages/AgencyHierarchyPage.tsx':['ordersOperationalPercent(targetOrders, progress)','orderOperationalPercent(o,progress.get(o.id))'],
-  'src/pages/WorkProgressPage.tsx':['isShopFinished(flowByOrder.get(s.purchase_order_id),s.status)'],
+// Current source structure verification; older patch-marker snapshots were obsolete after phases 1–7.
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+const root = path.resolve(process.argv[2] || path.join(__dirname,'..'));
+const markers = {
+  'src/lib/workCompletion.ts': ['groupShopCompletion', 'isShopFinished', 'receiptRequired'],
+  'src/pages/PurchaseOrdersPage.tsx': ['milestoneProgress', 'po_line_items'],
+  'src/pages/WorkProgressPage.tsx': ['isShopFinished'],
+  'src/pages/DesignerPage.tsx': ['fetchWorkflowFolderPages', 'sendDesignTaskToProduction'],
+  'src/pages/ProductionPage.tsx': ['fetchWorkflowFolderPages', 'completeProductionOrder'],
+  'src/pages/SupplyOrdersPage.tsx': ['phase4_create_supply_dispatch', 'phase4_confirm_supply_receipt'],
 };
-let errors=0;
-for(const [file,markers] of Object.entries(files)){
-  const abs=path.join(root,file);
-  if(!fs.existsSync(abs)){console.error('MISSING '+file);errors++;continue;}
-  const txt=fs.readFileSync(abs,'utf8');
-  for(const marker of markers)if(!txt.includes(marker)){console.error('NOT APPLIED '+file+': '+marker);errors++;}
-  if(markers.every(m=>txt.includes(m)))console.log('OK '+file);
+for (const [file, values] of Object.entries(markers)) {
+  const text = fs.readFileSync(path.join(root, file), 'utf8');
+  for (const value of values) assert.ok(text.includes(value), `${file}: missing ${value}`);
+  console.log('PASS', file);
 }
-if(errors){console.error(`FAILED: ${errors} incomplete patch markers. Do not push.`);process.exit(1)}
-console.log('Agency progression source changes present. Still requires npm build, browser test and Vercel deployment.');
+console.log('Current workflow source markers present. Full build and browser/database tests remain separate release gates.');

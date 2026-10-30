@@ -54,7 +54,7 @@ export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, batchM
   const [designerId, setDesignerId] = useState('');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState<'approve' | 'redo' | null>(null);
+  const [confirm, setConfirm] = useState<'approved' | 'redo' | null>(null);
   const [correctionScope, setCorrectionScope] = useState<SurveyCorrectionScope>('both');
   const [selectedPhotoId, setSelectedPhotoId] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
@@ -222,7 +222,7 @@ export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, batchM
         <span className="mr-auto text-xs font-semibold text-slate-700">{batchMode ? `Individual measurement / photo · ${selectedCount} selected` : `${selectedCount} selected`}</span>
         <label className="sr-only" htmlFor="survey-review-designer">Assign designer</label>
         <select id="survey-review-designer" value={designerId} onChange={e => setDesignerId(e.target.value)} className="min-w-[160px] max-w-[250px] flex-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="">Select designer</option>{(designers.data || []).map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}</select>
-        <button type="button" onClick={() => setConfirm('approve')} disabled={!selectedCount || busy || !designerId || designers.isPending || designers.isError} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40"><Check className="w-3.5 h-3.5" />Approve</button>
+        <button type="button" onClick={() => setConfirm('approved')} disabled={!selectedCount || busy || !designerId || designers.isPending || designers.isError} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40"><Check className="w-3.5 h-3.5" />Approve</button>
         <button type="button" onClick={() => setConfirm('redo')} disabled={!selectedCount || busy} className="inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 disabled:opacity-40"><RotateCcw className="w-3.5 h-3.5" />Reject / redo</button>
       </div>
       {confirm && <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 p-2.5">
@@ -239,7 +239,7 @@ export function SurveyReviewGallery({ surveyId, shopId, readOnly = false, batchM
           <option value="all">All linked photos</option>
         </select>}
         {confirm === 'redo' && <input aria-label="Correction instructions" value={note} onChange={e => setNote(e.target.value)} placeholder="Describe the required correction" className="min-w-[150px] flex-1 rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs" />}
-        <span className="text-xs text-slate-600">{confirm === 'approve' ? `Approve ${selectedCount} selected review item(s)?` : `Reject selected evidence and request correction for ${selectedCount} review item(s)?`}</span>
+        <span className="text-xs text-slate-600">{confirm === 'approved' ? `Approve ${selectedCount} selected review item(s)?` : `Reject selected evidence and request correction for ${selectedCount} review item(s)?`}</span>
         <button type="button" onClick={() => setConfirm(null)} className="rounded px-2 py-1 text-xs text-slate-600">Cancel</button>
         <button type="button" onClick={() => void submit(confirm)} disabled={busy || (confirm === 'redo' && !note.trim())} className="rounded bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-40">{busy ? 'Saving…' : 'Confirm review decision'}</button>
       </div>}

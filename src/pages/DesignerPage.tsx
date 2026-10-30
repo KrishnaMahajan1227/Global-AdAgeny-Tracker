@@ -330,6 +330,9 @@ export default function DesignerPage() {
   const [uploadTask, setUploadTask] = useState<(DesignTaskRow & ShopDesignDetail) | null>(null);
   const [stagedFiles, setStagedFiles] = useState<{ id: string; file: File; previewUrl: string | null }[]>([]);
   const [batchNotes, setBatchNotes] = useState('');
+  const [showDesignOptions, setShowDesignOptions] = useState(false);
+  const [fileDragOver, setFileDragOver] = useState(false);
+  const [stagingError, setStagingError] = useState('');
   const [batchSource, setBatchSource] = useState<'agency_designed' | 'client_provided'>('agency_designed');
   // Default to completing the handoff in the same save. Partial/incomplete boards remain drafts.
   const [submitAfterUpload, setSubmitAfterUpload] = useState(true);
@@ -890,6 +893,8 @@ export default function DesignerPage() {
     setUploadTask({ ...row, ...loadedDetail });
     setBatchNotes('');
     setBatchSource('agency_designed');
+    setShowDesignOptions(false);
+    setStagingError('');
     setSubmitAfterUpload(true);
     setStagedFiles([]);
     const pending = loadedDetail.items.filter(
@@ -960,14 +965,30 @@ export default function DesignerPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Browse and drag-and-drop use exactly the same evidence upload path.
+  // Duplicate files are ignored so repeated drops cannot create extra design versions.
+  function stageDesignFiles(files: File[]) {
+    const accepted = files.filter(file => file.type.startsWith('image/') || file.type === 'application/pdf' || /\.pdf$/i.test(file.name));
+    setStagingError(accepted.length !== files.length ? 'Only images and PDF artwork can be uploaded. Unsupported files were skipped.' : '');
+    setStagedFiles(previous => {
+      const seen = new Set(previous.map(entry => `${entry.file.name}:${entry.file.size}:${entry.file.lastModified}`));
+      const next = [...previous];
+      for (const file of accepted) {
+        const key = `${file.name}:${file.size}:${file.lastModified}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        next.push({
+          id: `${file.name}-${file.size}-${Math.random().toString(36).slice(2)}`,
+          file,
+          previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
+        });
+      }
+      return next;
+    });
+  }
+
   function handleFilesSelected(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files || []);
-    const staged = files.map((file) => ({
-      id: `${file.name}-${file.size}-${Math.random().toString(36).slice(2)}`,
-      file,
-      previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
-    }));
-    setStagedFiles((prev) => [...prev, ...staged]);
+    stageDesignFiles(Array.from(e.target.files || []));
     e.target.value = '';
   }
 
@@ -1092,11 +1113,19 @@ export default function DesignerPage() {
       );
     },
     onSuccess: () => {
+      const completedTaskId = uploadTask?.design_task_id;
+      const sentForReview = submitAfterUpload && canSubmitUploadForReview;
+      // A designer proceeds immediately to the next assigned shop after a
+      // successful completed handoff. Partial drafts stay on the current task.
+      const nextTask = sentForReview && isDesigner
+        ? rows.find(row => row.design_task_id !== completedTaskId && ['assigned', 'designing'].includes(row.status))
+        : undefined;
       queryClient.invalidateQueries({ queryKey: ['design-task-list', orgId] });
       queryClient.invalidateQueries({ queryKey: ['design-task-stats', orgId] });
       queryClient.invalidateQueries({ queryKey: ['design-task-detail'] });
       queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
       closeUploadModal();
+      if (nextTask) void quickUpload(nextTask);
     },
     onSettled: () => setUploadProgress(null),
   });
@@ -2089,35 +2118,45 @@ export default function DesignerPage() {
             </div>
           )}
 
-          <Select
-            label="Design Source"
-            value={batchSource}
-            onChange={(v) => setBatchSource(v as 'agency_designed' | 'client_provided')}
-            options={[
-              { value: 'agency_designed', label: 'Agency-designed (made in-house)' },
-              { value: 'client_provided', label: 'Client-provided (received from client)' },
-            ]}
-          />
-
-          <Textarea label="Notes" value={batchNotes} onChange={setBatchNotes} rows={2} placeholder="Notes for this batch (applies to every file uploaded)..." />
+          <button type="button" onClick={() => setShowDesignOptions(previous => !previous)}
+            aria-expanded={showDesignOptions}
+            className="text-sm text-blue-700 font-semibold flex items-center gap-1 hover:underline">
+            <ChevronDown className={`w-4 h-4 transition-transform ${showDesignOptions ? 'rotate-180' : ''}`} />
+            Artwork source & notes {batchSource === 'client_provided' ? '· Company artwork' : '· Agency artwork'}
+          </button>
+          {showDesignOptions && <div className="space-y-3 rounded-lg bg-slate-50 border border-slate-200 p-3">
+            <Select label="Artwork Source" value={batchSource}
+              onChange={(v) => setBatchSource(v as 'agency_designed' | 'client_provided')}
+              options={[{ value: 'agency_designed', label: 'Agency artwork' }, { value: 'client_provided', label: 'Company-provided artwork' }]} />
+            <Textarea label="Optional Notes" value={batchNotes} onChange={setBatchNotes} rows={2} placeholder="Version notes or instructions…" />
+          </div>}
           {canSubmitUploadForReview ? (
-            <label className="flex items-start gap-2.5 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 cursor-pointer">
-              <input type="checkbox" checked={submitAfterUpload} onChange={(event) => setSubmitAfterUpload(event.target.checked)} className="mt-0.5 h-4 w-4 accent-blue-600" />
-              <span><strong>Upload & send for review</strong><span className="block text-xs text-blue-700 mt-0.5">No separate "Send for Review" click. Owner/Admin receives the same design-review task.</span></span>
-            </label>
+            <div className="flex flex-wrap justify-between items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-sm">
+              <div className="min-w-0"><strong className="text-blue-900">{submitAfterUpload ? 'Ready: upload and send for review' : 'Save artwork as draft'}</strong>
+                <p className="text-xs text-blue-700 mt-0.5">{submitAfterUpload ? 'No separate handoff step. Next assigned design opens after success.' : 'Review will not start until you send it.'}</p>
+              </div>
+              <button type="button" onClick={() => setSubmitAfterUpload(previous => !previous)} className="shrink-0 rounded-lg border border-blue-200 bg-white px-3 py-1.5 font-medium text-xs text-blue-700 hover:bg-blue-100">
+                {submitAfterUpload ? 'Save draft instead' : 'Send for review instead'}
+              </button>
+            </div>
           ) : (
             <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-              Files will save as a design draft. Finish selecting/covering all eligible boards to send the complete shop for review.
+              Incomplete board coverage — save draft first. Only fully covered shops can be sent for review.
             </p>
           )}
 
           <input ref={fileRef} type="file" accept="image/*,.pdf" multiple onChange={handleFilesSelected} className="hidden" />
-          <button
-            onClick={() => fileRef.current?.click()}
-            className="w-full flex items-center justify-center gap-2 border-2 border-dashed border-slate-300 text-slate-600 font-medium py-3 rounded-lg hover:border-blue-400 hover:text-blue-600 transition"
-          >
-            <Plus className="w-5 h-5" /> Add Files
-          </button>
+          {stagingError && <p role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{stagingError}</p>}
+          <div onDragOver={event => { event.preventDefault(); setFileDragOver(true); }}
+            onDragLeave={event => { event.preventDefault(); setFileDragOver(false); }}
+            onDrop={event => { event.preventDefault(); setFileDragOver(false); stageDesignFiles(Array.from(event.dataTransfer.files)); }}
+            className={`rounded-lg border-2 border-dashed transition ${fileDragOver ? 'border-blue-600 bg-blue-50' : 'border-slate-300 bg-slate-50/30'}`}>
+            <button type="button" disabled={uploadMutation.isPending}
+              onClick={() => fileRef.current?.click()}
+              className="w-full flex items-center justify-center gap-2 text-slate-700 font-medium py-4 rounded-lg hover:text-blue-700 disabled:opacity-50">
+              <Plus className="w-5 h-5" /> Drop artwork here or browse files
+            </button>
+          </div>
 
           {stagedFiles.length > 0 && (
             <div>

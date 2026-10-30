@@ -205,8 +205,8 @@ function AppRoutes() {
           <Navigate to="/dashboard" replace />
         } />
         <Route path="/survey-review" element={<SurveyReviewPage />} />
-        <Route path="/design" element={<DesignerPage />} />
-        <Route path="/production" element={<ProductionPage />} />
+        <Route path="/design" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'designer']}><DesignerPage /></ProtectedRoute>} />
+        <Route path="/production" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'printing']}><ProductionPage /></ProtectedRoute>} />
         <Route path="/installation-review" element={<InstallationReviewPage />} />
         <Route path="/field-map" element={<FieldMapPage />} />
         <Route path="/route-planning" element={

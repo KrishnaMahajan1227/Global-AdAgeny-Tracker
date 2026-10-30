@@ -97,7 +97,7 @@ export default function AdminLayout() {
     { to: '/campaigns', label: 'Campaigns', icon: ClipboardList, show: isAdmin || isClientManager },
     { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts || isClientManager, badge: pendingCounts?.clientRequests },
     { to: '/survey-review', label: 'Survey Review', icon: FileCheck, show: isAdmin, badge: pendingCounts?.survey },
-    { to: '/design', label: 'Design Queue', icon: Palette, show: isAdmin || isDesigner, badge: (isAdmin || isDesigner) ? pendingCounts?.design : undefined },
+    { to: '/design', label: 'Design Queue', icon: Palette, show: isOwner || profile?.role === 'admin' || isDesigner, badge: (isOwner || profile?.role === 'admin' || isDesigner) ? pendingCounts?.design : undefined },
     { to: '/production', label: 'Production', icon: Printer, show: isAdmin || isProduction, badge: (isAdmin || isProduction) ? pendingCounts?.production : undefined },
     { to: '/installation-review', label: 'Installation Review', icon: ClipboardCheck, show: isAdmin, badge: pendingCounts?.installation },
     { to: '/field-map', label: 'Live Field Map', icon: MapIcon, show: isAdmin },

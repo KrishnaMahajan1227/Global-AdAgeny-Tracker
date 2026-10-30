@@ -22,7 +22,7 @@ ok('Both studios keep folder hierarchy instead of removing existing saved contex
 ok('Task and folder modes have accessible semantics', [d,p].every(src => src.includes('aria-pressed=') && src.includes('Action Queue') && src.includes('Browse Folders')));
 ok('Deep-linked Work Order remains scoped', [d,p].every(src => src.includes('validWorkOrderId(routeParams.get(\'po\'))') && src.includes('setPoFilter(linkedPoId)')));
 ok('Default queue does not require full org-wide tree download', [d,p].every(src => src.includes('enabled: !!orgId && !browsingList && !debouncedSearch') && src.includes('fetchWorkflowFolderPages(async (from, to)')));
-ok('List remains server-paginated and has controlled search', [d,p].every(src => src.includes("count: 'exact'") && src.includes('.range(page * pageSize, page * pageSize + pageSize - 1)') && src.includes('debouncedSearch')));
+ok('List remains server-paginated and has controlled search', [d,p].every(src => src.includes("count: 'exact'") && (src.includes('.range(page * pageSize, page * pageSize + pageSize - 1)') || src.includes('.range(pageNumber * size, pageNumber * size + size - 1)')) && src.includes('debouncedSearch')));
 ok('Design search can locate Work Orders directly', d.includes('po_number.ilike.%${term}%') && d.includes('po_name.ilike.%${term}%'));
 ok('Clickable KPI shortcuts jump to relevant Design queues', d.includes("setActiveTab('in_review')") && d.includes("setActiveTab('approved')") && d.includes('aria-label={`Show ${label} tasks`}'));
 ok('Agency-supplied artwork still bypasses unnecessary Designer assignment', s.includes("form.artwork_source === 'agency' ? effectiveDesignerId : null"));

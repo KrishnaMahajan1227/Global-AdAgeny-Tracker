@@ -41,7 +41,9 @@ export function DesignMarkingPreview({
 }) {
   const hasMarking = !!photoUrl && !!points && points.length >= 3;
   const key = hasMarking ? `${photoUrl}::${JSON.stringify(points)}::${label || ''}` : null;
-  const [markedSrc, setMarkedSrc] = useState<string | null>(key ? cache.get(key) || null : null);
+  const [markedImage, setMarkedImage] = useState<{ key: string; src: string } | null>(
+    key && cache.has(key) ? { key, src: cache.get(key)! } : null
+  );
   const [photoFailed, setPhotoFailed] = useState(false);
 
   useEffect(() => {
@@ -53,14 +55,17 @@ export function DesignMarkingPreview({
     if (!key || !photoUrl || !points) return;
     const hit = cache.get(key);
     if (hit) {
-      setMarkedSrc(hit);
+      setMarkedImage({ key, src: hit });
       return;
     }
-    renderMarkedImage(photoUrl, points, { labels: [label], maxDim: 500 })
+    renderMarkedImage(photoUrl, points, { labels: [label], maxDim: 350 })
       .then(({ dataUrl }) => {
         if (cancelled) return;
+        // Bound memory usage in a 100+ shop session. The current thumbnail
+        // remains rendered even if its cached data is later evicted.
+        if (cache.size >= 120) cache.delete(cache.keys().next().value!);
         cache.set(key, dataUrl);
-        setMarkedSrc(dataUrl);
+        setMarkedImage({ key, src: dataUrl });
       })
       .catch(() => {
         // Canvas render failed (slow/blocked/CORS) — the plain photo is
@@ -74,7 +79,8 @@ export function DesignMarkingPreview({
 
   // Prefer the outlined version once it's ready; otherwise show the raw
   // photo right away rather than waiting.
-  const shown = (hasMarking && markedSrc) || photoUrl || null;
+  // When switching shops, never flash the previous shop's marked image.
+  const shown = (hasMarking && markedImage?.key === key ? markedImage.src : null) || photoUrl || null;
 
   if (!shown || photoFailed) {
     return (

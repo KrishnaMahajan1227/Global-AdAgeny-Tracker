@@ -1,0 +1,60 @@
+/** Run with: node scripts/verify-designer-marking-upload-v8.cjs */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const Module = require('node:module');
+const root = path.resolve(__dirname, '..');
+const ts = require('typescript');
+const helperFile = path.join(root, 'src/lib/designArtworkMapping.ts');
+const helperSource = fs.readFileSync(helperFile, 'utf8');
+const js = ts.transpileModule(helperSource, {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+const compiled = new Module(helperFile, module); compiled.filename=helperFile; compiled.paths=module.paths; compiled._compile(js, helperFile);
+const { editableDesignBoards, validateArtworkMappings, designCoverage } = compiled.exports;
+let checks=0;
+function test(name, fn){ try{fn(); checks++; console.log(`  PASS ${name}`)} catch(e){console.error(`  FAIL ${name}`);throw e}}
+const board=(id,status='approved')=>({id,status});
+const file=(id,workItemIds=[])=>({id,workItemIds});
+const version=(id,status='uploaded')=>({id,status});
+const link=(design_version_id, work_item_id)=>({design_version_id,work_item_id});
+test('single marking maps one artwork',()=>assert.equal(validateArtworkMappings([board('one')],[file('art',['one'])]),null));
+test('multiple markings same shop and different artwork each',()=>assert.equal(validateArtworkMappings([board('a'),board('b'),board('c')],[file('v1',['a']),file('v2',['b']),file('v3',['c'])]),null));
+test('one artwork intentionally covers two work items',()=>assert.equal(validateArtworkMappings([board('a'),board('b')],[file('shared',['a','b'])]),null));
+test('mixed shared and individual artwork',()=>assert.equal(validateArtworkMappings([board('a'),board('b')],[file('shared',['a','b']),file('extra',['b'])]),null));
+test('unmapped artwork blocked',()=>assert.match(validateArtworkMappings([board('a'),board('b')],[file('loose')]),/Map artwork/));
+test('foreign shop work item blocked',()=>assert.match(validateArtworkMappings([board('a')],[file('foreign',['b'])]),/another shop/));
+test('locked board blocked',()=>assert.match(validateArtworkMappings([board('a','design_approved')],[file('v',['a'])]),/editable/));
+test('unapproved survey board blocked',()=>assert.match(validateArtworkMappings([board('a','surveyed')],[file('v',['a'])]),/editable/));
+test('cancelled board blocked',()=>assert.match(validateArtworkMappings([board('a','cancelled')],[file('v',['a'])]),/editable/));
+test('duplicate same marking in one file blocked',()=>assert.match(validateArtworkMappings([board('a')],[file('v',['a','a'])]),/twice/));
+test('zero work items blocked',()=>assert.match(validateArtworkMappings([],[file('v',['a'])]),/No Work Items/));
+test('zero files blocked',()=>assert.match(validateArtworkMappings([board('a')],[]),/Select/));
+test('only intended board covered, next remains missing',()=>{const v=designCoverage([board('a'),board('b')],[],[],[file('v',['a'])]);assert.equal(v.ready,false);assert.deepEqual(v.missing.map(x=>x.id),['b']);});
+test('multiple file mapping covers all required boards',()=>assert.equal(designCoverage([board('a'),board('b')],[],[],[file('v1',['a']),file('v2',['b'])]).ready,true));
+test('shared file covers all explicitly linked boards',()=>assert.equal(designCoverage([board('a'),board('b')],[],[],[file('shared',['a','b'])]).ready,true));
+test('previous draft coverage counts towards handoff',()=>assert.equal(designCoverage([board('a','designed'),board('b')],[version('old')],[link('old','a')],[file('new',['b'])]).ready,true));
+test('rejected prior design cannot cover a board',()=>assert.equal(designCoverage([board('a')],[version('old','rejected')],[link('old','a')],[]).ready,false));
+test('legacy approved/produced board does not require new artwork',()=>assert.equal(designCoverage([board('a','design_approved'),board('b')],[],[],[file('new',['b'])]).ready,true));
+test('unapproved board blocks review even if mapped',()=>assert.equal(designCoverage([board('a','surveyed')],[],[],[file('x',['a'])]).ready,false));
+test('invalid work item status blocks review',()=>assert.equal(designCoverage([board('a','unknown')],[],[],[]).ready,false));
+test('all cancelled is not review ready',()=>assert.equal(designCoverage([board('a','cancelled')],[],[],[]).ready,false));
+test('editable status includes designed for revisions',()=>assert.deepEqual(editableDesignBoards([board('a','designed'),board('b','in_production')]).map(x=>x.id),['a']));
+
+const designerPath=path.join(root,'src/pages/DesignerPage.tsx');
+const code=fs.readFileSync(designerPath,'utf8');
+const previewPath=path.join(root,'src/components/DesignMarkingPreview.tsx');
+const previewCode=fs.readFileSync(previewPath,'utf8');
+for (const f of [designerPath,previewPath,helperFile]){
+  const source=ts.createSourceFile(f,fs.readFileSync(f,'utf8'),ts.ScriptTarget.Latest,true,f.endsWith('.tsx')?ts.ScriptKind.TSX:ts.ScriptKind.TS);
+  test(`TS${f.endsWith('tsx')?'X':''} parses: ${path.basename(f)}`,()=>assert.deepEqual(source.parseDiagnostics.map(e=>String(e.messageText)),[]));
+}
+test('visible add-artwork control on each board',()=>assert.match(code, /Add artwork[\s\S]*?<input type="file"/));
+test('modal uses own shop markings instead of expanded row',()=>assert.match(code,/function uploadMarkingRefFor/));
+test('file-by-file mapping inserted in loop',()=>assert.match(code,/entry\.workItemIds\.map\(workItemId =>/));
+test('no legacy global selectedItemIds Cartesian mapping',()=>assert.doesNotMatch(code, /selectedItemIds/));
+test('live board status and shop ownership reverified',()=>assert.match(code,/eq\('shop_id', uploadTask\.shop_id\)\.in\('id', mappedItemIds\)/));
+test('review send checks already mapped existing drafts',()=>assert.match(code,/designCoverage\(liveDetail\.items, liveDetail\.versions, liveDetail\.versionItems, \[\]\)/));
+test('design metadata preserves company/agency source',()=>assert.match(code,/source: batchSource/));
+test('no premature review on partial coverage',()=>assert.match(code,/submitAfterUpload && canSubmitUploadForReview \? 'in_review' : 'design_ready'/));
+test('modal blocks accidental close while upload in progress',()=>assert.match(code,/if \(!uploadMutation\.isPending\) closeUploadModal\(\)/));
+test('marking preview never shows previous shop rendered image',()=>assert.match(previewCode,/markedImage\?\.key === key/));
+console.log(`\n${checks} designer artwork/mapping checks passed.`);

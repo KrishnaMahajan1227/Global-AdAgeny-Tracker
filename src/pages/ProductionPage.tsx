@@ -1,6 +1,6 @@
 import { fetchWorkflowFolderPages } from '@/lib/workflowFolderPages';
 import { runBoundedWorkflowBatch, summarizeWorkflowBatch } from '@/lib/workflowBatch';
-import { ReactNode, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
@@ -21,7 +21,8 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { validWorkOrderId } from '@/lib/operationalNavigation';
 
 // Work-item statuses relevant to the Production screen at all.
-const PRODUCTION_ELIGIBLE_STATUSES = ['approved', 'design_approved', 'in_production', 'produced', 'production_done'];
+// Include downstream installed work for read-only history; never expose quantity edits on closed orders.
+const PRODUCTION_ELIGIBLE_STATUSES = ['approved', 'design_approved', 'in_production', 'produced', 'production_done', 'installed'];
 // Statuses that mean this board is fully done and locked from further edits
 // here (it's moved on to/through installation).
 const BOARD_LOCKED_STATUSES = ['production_done', 'installed'];
@@ -34,6 +35,7 @@ const DEFAULT_PAGE_SIZE = 50;
 const NO_FOLDER_BUCKET = '__none__';
 
 const TABS: { key: string; label: string; statuses: string[] | null; statKey: keyof ProductionStats | null }[] = [
+  { key: 'active', label: 'Action Queue', statuses: ['pending', 'in_production', 'ready'], statKey: null },
   { key: 'all', label: 'All', statuses: null, statKey: 'total' },
   { key: 'needs_materials', label: 'Needs Materials', statuses: null, statKey: 'needs_materials_orders' },
   { key: 'pending', label: 'Pending', statuses: ['pending'], statKey: 'pending' },
@@ -126,6 +128,49 @@ type ProductionOrderDetail = {
   components: WorkItemComponent[];
 };
 
+// The Production workbench never guesses which design belongs to a board.
+// Only explicit design_version_items links may display an approved artwork.
+type ProductionArtwork = { id: string; file_name: string | null; file_url: string; status: string; version_number: number };
+type ProductionArtworkState = { byItem: Record<string, ProductionArtwork[]>; warning: string | null };
+
+const EMPTY_ARTWORK: ProductionArtworkState = { byItem: {}, warning: null };
+function artworkIsImage(file: ProductionArtwork): boolean {
+  const filename = (file.file_name || file.file_url).split('?')[0].toLowerCase();
+  return /\.(png|jpe?g|webp|gif|avif|svg)$/.test(filename);
+}
+
+async function fetchApprovedProductionArtwork(orderId: string, shopId: string, itemIds: string[]): Promise<ProductionArtworkState> {
+  // For supply / direct work with no design task, absence of artwork is valid.
+  const { data: order, error: orderError } = await supabase.from('production_orders')
+    .select('id,shop_id,design_task_id').eq('id', orderId).maybeSingle();
+  if (orderError) return { ...EMPTY_ARTWORK, warning: `Artwork unavailable: ${orderError.message}` };
+  if (!order || order.shop_id !== shopId) return { ...EMPTY_ARTWORK, warning: 'Production order changed. Refresh before using artwork.' };
+  if (!order.design_task_id || !itemIds.length) return EMPTY_ARTWORK;
+
+  const { data: versions, error: versionsError } = await supabase.from('design_versions')
+    .select('id,file_name,file_url,status,version_number')
+    .eq('design_task_id', order.design_task_id).eq('status', 'approved')
+    .order('version_number', { ascending: false }).limit(200);
+  if (versionsError) return { ...EMPTY_ARTWORK, warning: `Artwork unavailable: ${versionsError.message}` };
+  if (!versions?.length) return EMPTY_ARTWORK;
+
+  const { data: links, error: linksError } = await supabase.from('design_version_items')
+    .select('design_version_id,work_item_id')
+    .in('design_version_id', versions.map(v => v.id));
+  if (linksError) return { ...EMPTY_ARTWORK, warning: `Artwork mapping unavailable: ${linksError.message}` };
+  const allowed = new Set(itemIds);
+  const byVersion = new Map(versions.map(v => [v.id, v]));
+  const byItem: Record<string, ProductionArtwork[]> = {};
+  for (const link of links || []) {
+    if (!allowed.has(link.work_item_id)) continue;
+    const version = byVersion.get(link.design_version_id);
+    if (!version) continue;
+    (byItem[link.work_item_id] ||= []).push(version as ProductionArtwork);
+  }
+  for (const matches of Object.values(byItem)) matches.sort((a, b) => b.version_number - a.version_number);
+  return { byItem, warning: null };
+}
+
 type EnrichedBoard = {
   item: WorkItem;
   record?: ProductionItem;
@@ -145,6 +190,13 @@ function telHref(phone: string) {
 
 function mapsHref(address: string) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
+}
+
+// Bulk "as planned" is available only for a real, explicitly measured plan.
+// The display-only fallback of 1 piece is never evidence of production.
+function hasRecordedProductionPlan(item: WorkItem): boolean {
+  const planned = item.approved_quantity ?? item.survey_quantity;
+  return planned != null && Number.isSafeInteger(planned) && planned > 0;
 }
 
 function boardLabel(item: WorkItem) {
@@ -218,7 +270,7 @@ export default function ProductionPage() {
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
 
-  const canApprove = profile?.role === 'agency_owner' || profile?.role === 'admin' || profile?.role === 'demo';
+  const canApprove = profile?.role === 'agency_owner' || profile?.role === 'admin';
   const isProduction = profile?.role === 'printing';
   const canLogProduction = isProduction || canApprove;
   const assignedFilterValue = isProduction ? profile!.id : null;
@@ -229,7 +281,7 @@ export default function ProductionPage() {
   // boards to an installer's vehicle). One click switches between them;
   // nothing here is a separate route, so there's no navigation dead-end.
   const [mainView, setMainView] = useState<'overview' | 'production' | 'vehicle_load'>('production');
-  const [activeTab, setActiveTab] = useState('all');
+  const [activeTab, setActiveTab] = useState('active');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [zoneFilter, setZoneFilter] = useState('');
@@ -291,6 +343,13 @@ export default function ProductionPage() {
   const [workbenchSaving, setWorkbenchSaving] = useState(false);
   const [workbenchLoadingId, setWorkbenchLoadingId] = useState<string | null>(null);
   const [workbenchMessage, setWorkbenchMessage] = useState('');
+  const [workbenchArtwork, setWorkbenchArtwork] = useState<ProductionArtworkState>(EMPTY_ARTWORK);
+  const [workbenchInstaller, setWorkbenchInstaller] = useState('');
+  // A single review session may span many server pages. Never cycle back to a shop
+  // already visited in that session or guess that a partially saved item is done.
+  const visitedProductionIds = useRef<Set<string>>(new Set());
+  // Synchronous guard closes the double-click / Ctrl+Enter race before React re-renders.
+  const workbenchActionLock = useRef(false);
 
 
   const [expandedBom, setExpandedBom] = useState<Set<string>>(new Set());
@@ -351,16 +410,9 @@ export default function ProductionPage() {
   const effectiveBulkInstallerId = bulkInstallerId || (orgInstallers?.length === 1 ? orgInstallers[0].id : '');
 
   const tab = TABS.find((t) => t.key === activeTab)!;
-  const {
-    data: listResult,
-    isFetching: listFetching,
-    isLoading: listLoading,
-    isError: listIsError,
-    error: listQueryError,
-    refetch: refetchList,
-  } = useQuery({
-    queryKey: ['production-order-list', orgId, assignedFilterValue, activeTab, debouncedSearch, page, pageSize, zoneFilter, poFilter, campaignFilter, clientFilter, workTypeFilter, fulfillmentFilter, assignedFilter, sortBy],
-    queryFn: async () => {
+  // One canonical list fetch for the visible queue AND its cross-page Next action.
+  // No separate unfiltered/permission-bypassing query for navigation.
+  async function fetchProductionPage(pageNumber: number, size: number) {
       let q = supabase.from('v_production_order_list').select('*', { count: 'exact' }).eq('organization_id', orgId);
       if (assignedFilterValue) q = q.eq('assigned_to', assignedFilterValue);
       else if (assignedFilter) q = q.eq('assigned_to', assignedFilter);
@@ -387,11 +439,22 @@ export default function ProductionPage() {
       else if (sortBy === 'completion') q = q.order('progress_pct', { ascending: false });
       else q = q.order('attention_rank', { ascending: true }).order('created_at', { ascending: false });
 
-      q = q.range(page * pageSize, page * pageSize + pageSize - 1);
+      q = q.range(pageNumber * size, pageNumber * size + size - 1);
       const { data, error, count } = await q;
       if (error) throw new Error(error.message || 'Could not load production orders.');
       return { rows: (data || []) as ProductionOrderRow[], count: count || 0 };
-    },
+  }
+
+  const {
+    data: listResult,
+    isFetching: listFetching,
+    isLoading: listLoading,
+    isError: listIsError,
+    error: listQueryError,
+    refetch: refetchList,
+  } = useQuery({
+    queryKey: ['production-order-list', orgId, assignedFilterValue, activeTab, debouncedSearch, page, pageSize, zoneFilter, poFilter, campaignFilter, clientFilter, workTypeFilter, fulfillmentFilter, assignedFilter, sortBy],
+    queryFn: () => fetchProductionPage(page, pageSize),
     enabled: !!orgId,
     placeholderData: keepPreviousData,
     retry: 1,
@@ -399,6 +462,45 @@ export default function ProductionPage() {
   const rows = useMemo(() => listResult?.rows || [], [listResult]);
   const totalCount = listResult?.count || 0;
   const pageCount = Math.max(1, Math.ceil(totalCount / pageSize));
+
+  // After saving the current order, move FORWARD through the same filtered,
+  // paginated queue (including its role/assignment scope). No looping back to
+  // the first task, and no manual Next Page click for 1000+ shop queues.
+  async function openNextProductionTask(currentOrderId: string) {
+    visitedProductionIds.current.add(currentOrderId);
+    // When someone chose a workset, Save & Next must stay inside that
+    // workset. Normal queue navigation still continues across server pages.
+    const selectedWorkset = selectedOrderIds.has(currentOrderId) ? selectedOrderIds : null;
+    const eligible = (row: ProductionOrderRow) => row.pending_boards > 0 &&
+      !['completed', 'hold'].includes(row.status) &&
+      !visitedProductionIds.current.has(row.production_order_id) &&
+      (!selectedWorkset || selectedWorkset.has(row.production_order_id));
+    const currentIndex = rows.findIndex(row => row.production_order_id === currentOrderId);
+    const nextInPage = rows.slice(Math.max(0, currentIndex + 1)).find(eligible);
+    if (nextInPage) {
+      await openQuantityWorkbench(nextInPage, true);
+      if (selectedWorkset) setSelectedOrderIds(previous => new Set([...previous].filter(id => id !== currentOrderId)));
+      return;
+    }
+    if (selectedWorkset) {
+      // Selection belongs only to the visible page, never silently approve or
+      // fetch unrelated shops. Another selection may be started afterwards.
+      setSelectedOrderIds(previous => new Set([...previous].filter(id => id !== currentOrderId)));
+      setQuantityWorkbench(null);
+      return;
+    }
+    const count = totalCount;
+    for (let nextPage = page + 1; nextPage * pageSize < count; nextPage++) {
+      const result = await fetchProductionPage(nextPage, pageSize);
+      const next = result.rows.find(eligible);
+      if (!next) continue;
+      setPage(nextPage);
+      await openQuantityWorkbench(next, true);
+      return;
+    }
+    setQuantityWorkbench(null);
+  }
+
 
   // ---- Folder browser (Campaign → Work Order → Zone) ----
   // One lightweight, UNPAGINATED fetch — same status tab / search / work
@@ -635,8 +737,9 @@ export default function ProductionPage() {
 
   // Details are fetched fresh when the operator opens a shop. They are not
   // preloaded for hundreds of shops and never expose another agency's tasks.
-  async function openQuantityWorkbench(row: ProductionOrderRow) {
-    if (!canLogProduction || workbenchLoadingId || workbenchSaving || ['completed', 'hold'].includes(row.status)) return;
+  async function openQuantityWorkbench(row: ProductionOrderRow, afterSave = false) {
+    if (!canLogProduction || (!afterSave && workbenchLoadingId) || (!afterSave && workbenchSaving) || ['completed', 'hold'].includes(row.status)) return;
+    if (!afterSave) visitedProductionIds.current.clear();
     setQuickLogError(null);
     setWorkbenchLoadingId(row.production_order_id);
     try {
@@ -649,14 +752,20 @@ export default function ProductionPage() {
       if (boardRows.length === 0 || boardRows.every(board => board.locked)) {
         throw new Error('No editable boards in this production order.');
       }
+      const artwork = await fetchApprovedProductionArtwork(row.production_order_id, row.shop_id, boardRows.map(b => b.item.id));
       const original = Object.fromEntries(boardRows.map(board => [board.item.id, board.producedQty == null ? '' : String(board.producedQty)]));
+      setWorkbenchArtwork(artwork);
+      setWorkbenchInstaller('');
       setQuantityWorkbench({ row, boards: boardRows });
       setWorkbenchValues(original);
       setWorkbenchBaseline(original);
       setWorkbenchErrors({});
       setWorkbenchMessage('');
     } catch (error) {
-      setQuickLogError((error as Error).message || 'Unable to load production quantities.');
+      const message = (error as Error).message || 'Unable to load production quantities.';
+      if (afterSave) setWorkbenchMessage(`Could not open the next shop: ${message}`);
+      else setQuickLogError(message);
+      if (afterSave) throw error;
     } finally {
       setWorkbenchLoadingId(null);
     }
@@ -669,27 +778,45 @@ export default function ProductionPage() {
     row: ProductionOrderRow,
     board: Pick<EnrichedBoard, 'item' | 'record' | 'componentsReady' | 'targetQty'>,
     producedQty: number,
-    notes: string
+    notes: string,
+    expectedQty?: number | null
   ) {
     if (!canLogProduction || !orgId) throw new Error('You do not have permission to record production.');
-    if (!Number.isFinite(producedQty) || producedQty < 0) throw new Error('Enter a valid actual quantity (0 or more).');
+    if (row.status === 'completed') throw new Error('Production is completed and is read-only.');
+    if (!Number.isSafeInteger(producedQty) || producedQty < 0) throw new Error('Enter a whole-number actual quantity (0 or more).');
     const { data: current, error: currentError } = await supabase.from('work_items')
       .select('id,status,shop_id').eq('id', board.item.id).maybeSingle();
     if (currentError) throw new Error(currentError.message);
     if (!current || current.shop_id !== row.shop_id || !['approved', 'design_approved', 'in_production', 'produced'].includes(current.status)) {
       throw new Error('This board has moved to another stage. Refresh before saving.');
     }
-    // Migration 0019 ensures unique (production_order_id, work_item_id).
-    // Preserve the original requested/approved quantities on existing records.
-    // For a new record, upsert makes an interrupted retry duplicate-safe.
+    // Re-read this item's production record to prevent lost updates. When a
+    // prior request saved the production row but failed on its work-item status
+    // write, retrying the exact same quantity safely resumes that write.
+    const { data: persisted, error: persistedError } = await supabase.from('production_items')
+      .select('id,produced_qty,notes')
+      .eq('production_order_id', row.production_order_id).eq('work_item_id', board.item.id).maybeSingle();
+    if (persistedError) throw new Error(`Could not verify current quantity: ${persistedError.message}`);
+    const expected = expectedQty === undefined ? (board.record?.produced_qty ?? null) : expectedQty;
     if (board.record) {
-      const { data: saved, error: productionError } = await supabase.from('production_items')
+      if (!persisted || persisted.id !== board.record.id ||
+          (persisted.produced_qty !== expected && persisted.produced_qty !== producedQty)) {
+        throw new Error('This quantity changed in another session. Refresh this order before saving.');
+      }
+    } else if (persisted && persisted.produced_qty !== expected && persisted.produced_qty !== producedQty) {
+      throw new Error('Another operator recorded a quantity for this board. Refresh before changing it.');
+    }
+    if (persisted && (persisted.produced_qty !== producedQty || (persisted.notes || '') !== notes.trim())) {
+      let request = supabase.from('production_items')
         .update({ produced_qty: producedQty, notes: notes.trim() || null })
-        .eq('id', board.record.id).eq('production_order_id', row.production_order_id).select('id');
+        .eq('id', persisted.id).eq('production_order_id', row.production_order_id)
+        .eq('work_item_id', board.item.id);
+      request = persisted.produced_qty == null ? request.is('produced_qty', null) : request.eq('produced_qty', persisted.produced_qty);
+      const { data: saved, error: productionError } = await request.select('id');
       if (productionError) throw new Error(`Could not update quantity: ${productionError.message}`);
-      if (!saved?.length) throw new Error('Production record changed in another session. Reload this order.');
-    } else {
-      const { error: productionError } = await supabase.from('production_items').upsert({
+      if (!saved?.length) throw new Error('Production quantity changed in another session. Refresh and retry.');
+    } else if (!persisted) {
+      const { error: productionError } = await supabase.from('production_items').insert({
         organization_id: orgId,
         production_order_id: row.production_order_id,
         work_item_id: board.item.id,
@@ -697,8 +824,8 @@ export default function ProductionPage() {
         approved_qty: board.item.approved_quantity ?? null,
         produced_qty: producedQty,
         notes: notes.trim() || null,
-      }, { onConflict: 'production_order_id,work_item_id' });
-      if (productionError) throw new Error(`Could not save quantity: ${productionError.message}`);
+      });
+      if (productionError) throw new Error(`Could not save quantity: ${productionError.message}. Refresh and retry if this board was updated elsewhere.`);
     }
     const status = producedQty >= board.targetQty && board.componentsReady ? 'produced' : 'in_production';
     const { data: updated, error: itemError } = await supabase.from('work_items')
@@ -714,46 +841,97 @@ export default function ProductionPage() {
         .update({ status: 'in_production' }).eq('id', row.production_order_id).eq('status', 'pending');
       if (orderError) throw new Error(`Quantity saved but production status could not update: ${orderError.message}`);
     }
-    await logAudit('production_items', board.record?.id || null, board.record ? 'update' : 'insert',
-      'produced_qty', board.record?.produced_qty == null ? null : String(board.record.produced_qty),
+    await logAudit('production_items', persisted?.id || null, persisted ? 'update' : 'insert',
+      'produced_qty', expected == null ? null : String(expected),
       String(producedQty), `${board.item.work_type_name || 'Board'} production logged (${producedQty}/${board.targetQty}) for ${row.shop_name}`);
   }
 
-  async function saveWorkbenchQuantities() {
-    if (!quantityWorkbench || workbenchSaving) return;
+  // One workbench for all board quantities; save/next/complete reuse the
+  // same write path. Completion still goes through phase3_complete_production.
+  async function saveWorkbenchQuantities(action: 'save' | 'next' | 'complete' = 'save', confirmBlankPlans = false) {
+    if (!quantityWorkbench || workbenchSaving || workbenchActionLock.current) return;
+    workbenchActionLock.current = true;
+    const currentRow = quantityWorkbench.row;
+    const valuesToSave = { ...workbenchValues };
+    if (confirmBlankPlans) {
+      // Explicit user confirmation only. Never overwrite an existing actual
+      // quantity, an operator's edits, or any locked work item.
+      for (const board of quantityWorkbench.boards) {
+        if (board.locked || valuesToSave[board.item.id] !== '') continue;
+        if (!hasRecordedProductionPlan(board.item) || !Number.isSafeInteger(board.targetQty) || board.targetQty <= 0) {
+          setWorkbenchMessage('A verified planned quantity is missing. Enter the actual output manually for this board.');
+          workbenchActionLock.current = false;
+          return;
+        }
+        valuesToSave[board.item.id] = String(board.targetQty);
+      }
+      setWorkbenchValues(valuesToSave);
+    }
     const changed = quantityWorkbench.boards.filter(board =>
-      !board.locked && workbenchValues[board.item.id] !== workbenchBaseline[board.item.id]);
-    if (!changed.length) { setWorkbenchMessage('No quantity changes to save.'); return; }
+      !board.locked && valuesToSave[board.item.id] !== workbenchBaseline[board.item.id]);
+    if (!changed.length && action !== 'complete') {
+      if (action === 'next') {
+        try { await openNextProductionTask(currentRow.production_order_id); }
+        catch { /* openNextProductionTask already reports the load failure */ }
+        finally { workbenchActionLock.current = false; }
+      } else {
+        setWorkbenchMessage('No changes to save.');
+        workbenchActionLock.current = false;
+      }
+      return;
+    }
     setWorkbenchSaving(true);
     setWorkbenchMessage('');
     const errors: Record<string, string> = {};
     const nextBaseline = { ...workbenchBaseline };
     let successes = 0;
     try {
-      for (const board of changed) {
-        const raw = (workbenchValues[board.item.id] || '').trim();
+      // Each board is independent; bounded concurrency shortens multi-board
+      // saves without flooding Supabase or weakening per-board CAS checks.
+      const result = await runBoundedWorkflowBatch(changed, async board => {
+        const raw = (valuesToSave[board.item.id] || '').trim();
         const qty = Number(raw);
-        if (!raw || !Number.isFinite(qty) || qty < 0) {
-          errors[board.item.id] = 'Enter a valid actual quantity (0 or more).';
-          continue;
+        if (!raw || !Number.isSafeInteger(qty) || qty < 0) {
+          throw new Error('Enter a whole-number actual quantity (0 or more).');
         }
-        try {
-          await saveProducedBoard(quantityWorkbench.row, board, qty, board.record?.notes || '');
-          nextBaseline[board.item.id] = raw;
-          successes++;
-        } catch (error) {
-          errors[board.item.id] = (error as Error).message || 'Save failed.';
-        }
-      }
+        const baseline = workbenchBaseline[board.item.id];
+        await saveProducedBoard(currentRow, board, qty, board.record?.notes || '', baseline === '' ? null : Number(baseline));
+        nextBaseline[board.item.id] = raw;
+      }, undefined, 3);
+      successes = result.completed.length;
+      for (const failure of result.failed) errors[failure.item.item.id] = failure.message;
       setWorkbenchBaseline(nextBaseline);
       setWorkbenchErrors(errors);
       queryClient.invalidateQueries({ queryKey: ['production-order-list', orgId] });
       queryClient.invalidateQueries({ queryKey: ['production-order-stats', orgId] });
       queryClient.invalidateQueries({ queryKey: ['production-order-detail'] });
+      queryClient.invalidateQueries({ queryKey: ['production-order-tree', orgId] });
       queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
-      if (Object.keys(errors).length === 0) setQuantityWorkbench(null);
-      else setWorkbenchMessage(`${successes} saved. ${Object.keys(errors).length} board(s) need correction or retry; successful quantities will not be submitted again.`);
+      if (Object.keys(errors).length > 0) {
+        setWorkbenchMessage(`${successes} saved. ${Object.keys(errors).length} board(s) need correction or retry. Successful quantities won't be re-submitted.`);
+        return;
+      }
+      if (action === 'complete') {
+        if (!canApprove) throw new Error('Only Owner/Admin may complete production.');
+        // Fresh database state: no completion based solely on typed numbers.
+        const verified = enrichBoards(await fetchOrderDetail(currentRow.shop_id, currentRow.production_order_id));
+        if (!verified.length || verified.some(b => !b.locked && (!b.qtyMet || !b.componentsReady))) {
+          throw new Error('Quantities saved. Some boards or materials are still pending; complete after resolving them.');
+        }
+        const skipInstall = currentRow.fulfillment_type === 'supply_only' || currentRow.requires_installation_all_false;
+        const installer = skipInstall ? '' : (workbenchInstaller || (orgInstallers?.length === 1 ? orgInstallers[0].id : ''));
+        if (!skipInstall && (!installer || !orgInstallers?.some(x => x.id === installer))) {
+          throw new Error('Quantities saved. Select an active Installer before completion.');
+        }
+        await completeProductionOrder(currentRow, installer, currentRow.notes || '');
+        queryClient.invalidateQueries({ queryKey: ['shops'] });
+      }
+      if (action === 'next') await openNextProductionTask(currentRow.production_order_id);
+      else setQuantityWorkbench(null);
+    } catch (error) {
+      setWorkbenchMessage((error as Error).message || 'Could not finish this action.');
     } finally {
+      workbenchActionLock.current = false;
       setWorkbenchSaving(false);
     }
   }
@@ -767,6 +945,7 @@ export default function ProductionPage() {
   }, [editingItem]);
 
   function openEditOrder(row: ProductionOrderRow) {
+    if (row.status === 'completed') return; // A finished production handoff is read-only.
     setEditOrder(row);
     setForm({ notes: row.notes || '', status: row.status === 'pending' ? 'in_production' : row.status, forceComplete: false });
     setInstallerId('');
@@ -900,6 +1079,7 @@ export default function ProductionPage() {
   const updateMutation = useMutation({
     mutationFn: async () => {
       if (!editOrder) return;
+      if (editOrder.status === 'completed') throw new Error('This production order is already completed and cannot be reopened here.');
       if (form.status === 'completed' && !effectiveInstallerId && !skipsInstaller) {
         throw new Error('Pick an installer to assign before marking production completed.');
       }
@@ -1367,6 +1547,18 @@ export default function ProductionPage() {
               className="rounded-md bg-white border border-indigo-200 px-2 py-1 text-xs font-semibold text-indigo-700 disabled:opacity-50">Select visible</button>
             <button onClick={() => setSelectedOrderIds(new Set())} className="text-xs text-indigo-600 hover:underline">Clear</button>
             <div className="ml-auto flex items-center gap-2 flex-wrap">
+              {canLogProduction && selected.some(row => row.pending_boards > 0 && !['completed', 'hold'].includes(row.status)) && (
+                <button type="button"
+                  onClick={() => {
+                    const first = selected.find(row => row.pending_boards > 0 && !['completed', 'hold'].includes(row.status));
+                    if (first) void openQuantityWorkbench(first);
+                  }}
+                  disabled={!!workbenchLoadingId || workbenchSaving || !!productionBatchProgress}
+                  title="Process selected shops in order, one quantity sheet at a time; no bulk quantity assumptions"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50">
+                  <Pencil className="w-3.5 h-3.5" /> Process selected shops
+                </button>
+              )}
               <button
                 onClick={() => { setBulkStatusOrders(selected); setBulkStatus('in_production'); }}
                 className="flex items-center gap-1 bg-white border border-indigo-200 text-indigo-700 px-2.5 py-1.5 rounded-lg text-xs font-medium"
@@ -1404,6 +1596,7 @@ export default function ProductionPage() {
 
           {!listLoading && rows.map((row) => {
             const isOpen = expandedOrderId === row.production_order_id;
+            const stageProgress = row.status === 'completed' ? 100 : row.progress_pct;
             return (
               <div key={row.production_order_id} className={`border-l-4 ${STATUS_BORDER[row.status] || 'border-l-slate-300'}`}>
                 <div
@@ -1422,9 +1615,10 @@ export default function ProductionPage() {
                       className="shrink-0 w-4 h-4 rounded border-slate-300"
                     />
                   )}
-                  <div className="shrink-0 w-11 h-11 rounded-lg bg-slate-50 border border-slate-200 flex flex-col items-center justify-center">
-                    <span className="text-xs font-bold text-slate-700 leading-none">{row.done_boards}/{row.total_boards || 0}</span>
-                    <span className="text-[8px] text-slate-400 mt-0.5">boards</span>
+                  <div className={`shrink-0 min-w-11 h-11 px-1 rounded-lg border flex flex-col items-center justify-center ${row.status === 'completed' ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}
+                    title={row.status === 'completed' ? (row.total_boards === 0 ? 'Production complete; no board-level records linked' : `Production completed · ${row.total_boards} board records linked`) : `${row.done_boards} of ${row.total_boards} production boards ready`}>
+                    {row.status === 'completed' ? <CheckCircle2 className="w-5 h-5 text-emerald-600" /> : <span className="text-xs font-bold text-slate-700 leading-none">{row.total_boards ? `${row.done_boards}/${row.total_boards}` : '—'}</span>}
+                    <span className={`text-[9px] mt-0.5 ${row.status === 'completed' ? 'text-emerald-700' : 'text-slate-500'}`}>{row.status === 'completed' ? 'Done' : row.total_boards ? 'boards' : 'no boards'}</span>
                   </div>
 
                   <div className="min-w-0 flex-1">
@@ -1454,9 +1648,11 @@ export default function ProductionPage() {
 
                   <div className="hidden sm:block w-24 shrink-0">
                     <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                      <div className={`h-1.5 transition-all ${row.progress_pct === 100 ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{ width: `${row.progress_pct}%` }} />
+                      <div className={`h-1.5 transition-all ${stageProgress === 100 ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{ width: `${stageProgress}%` }} />
                     </div>
-                    <p className="text-[10px] text-slate-400 mt-1 text-right">{row.progress_pct}%</p>
+                    <p className={`text-[10px] mt-1 text-right ${row.status === 'completed' ? 'font-semibold text-emerald-700' : 'text-slate-500'}`}>
+                      {row.status === 'completed' ? '100% · stage done' : `${stageProgress}% · boards`}
+                    </p>
                   </div>
 
                   {canLogProduction && row.pending_boards > 0 && !['completed', 'hold'].includes(row.status) && (
@@ -1472,7 +1668,7 @@ export default function ProductionPage() {
                       updating an order never requires opening it, scrolling
                       through its boards, and finding the button at the
                       bottom. That's the whole point of this redesign. */}
-                  <button
+                  {row.status !== 'completed' && <button
                     onClick={(e) => {
                       e.stopPropagation();
                       const ready = canApprove && readyForDirectCompletion(row);
@@ -1497,7 +1693,7 @@ export default function ProductionPage() {
                       : canApprove && readyForDirectCompletion(row)
                         ? <><PackageCheck className="w-3.5 h-3.5" /> Complete{row.fulfillment_type === 'supply_only' || row.requires_installation_all_false || orgInstallers?.length === 1 ? ' now' : ''}</>
                         : <><Send className="w-3.5 h-3.5" /> Status</>}
-                  </button>
+                  </button>}
 
                   <StatusBadge status={row.status} />
                   <ChevronDown className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
@@ -1519,6 +1715,10 @@ export default function ProductionPage() {
                       )}
                     </div>
 
+                    {row.status === 'completed' && <div role="status" className="mb-3 flex items-start gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+                      <CheckCircle2 className="h-4 w-4 shrink-0" />
+                      <span>Production stage completed. {row.total_boards === 0 ? 'Board-level records are not linked to this shop; no quantities have been assumed.' : `Board records linked: ${row.total_boards}. Actual recorded quantities remain separate from stage completion.`} This record is read-only.</span>
+                    </div>}
                     {detailLoading ? (
                       <div className="flex items-center gap-2 text-sm text-slate-400 py-6 justify-center">
                         <Loader2 className="w-4 h-4 animate-spin" /> Loading boards & materials…
@@ -1526,7 +1726,8 @@ export default function ProductionPage() {
                     ) : boards.length > 0 ? (
                       <div className="mb-3 border border-slate-200 rounded-lg overflow-hidden bg-white divide-y divide-slate-100">
                         {boards.map((entry) => {
-                          const { item, targetQty, producedQty, locked, isDone, isPartial, comps, componentsReady, qtyMet } = entry;
+                          const { item, targetQty, producedQty, isDone, isPartial, comps, componentsReady, qtyMet } = entry;
+                          const locked = entry.locked || row.status === 'completed';
                           const isEditing = editingItem?.orderId === row.production_order_id && editingItem?.itemId === item.id;
                           // Auto-open the materials checklist for a board
                           // that's actually blocked on it, so the person
@@ -1708,16 +1909,16 @@ export default function ProductionPage() {
                         })}
                       </div>
                     ) : (
-                      <p className="text-xs text-slate-400 mb-3 italic">No approved boards found for this shop yet.</p>
+                      <p className="text-xs text-slate-500 mb-3 italic">{row.status === 'completed' ? 'Production is completed, but no board-level records are available for this shop.' : 'No production boards found for this shop yet.'}</p>
                     )}
 
                     <div className="flex gap-2">
                       <Link to={`/shops/${row.shop_id}`} className="text-sm text-blue-600 hover:underline mr-auto flex items-center gap-1">
                         Shop Details <ChevronRight className="w-4 h-4" />
                       </Link>
-                      <button onClick={() => openEditOrder(row)} className="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium">
+                      {row.status !== 'completed' && <button onClick={() => openEditOrder(row)} className="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium">
                         Update Order Status
-                      </button>
+                      </button>}
                     </div>
                   </div>
                 )}
@@ -1759,53 +1960,129 @@ export default function ProductionPage() {
       {/* Multi-board quantity workbench — one shop, one save, with selective retry. */}
       <Modal open={!!quantityWorkbench} onClose={() => { if (!workbenchSaving) setQuantityWorkbench(null); }} title="Record Production — All Boards" size="lg">
         {quantityWorkbench && (
-          <div className="space-y-3">
+          <div className="space-y-3" onKeyDown={event => {
+            // Desktop quick flow; Enter alone keeps the normal quantity input behavior.
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !workbenchSaving) {
+              event.preventDefault();
+              void saveWorkbenchQuantities('next');
+            }
+          }}>
             <div className="rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
-              <p className="font-semibold text-sm text-slate-900">{quantityWorkbench.row.shop_name}</p>
-              <p className="text-xs text-slate-500">{quantityWorkbench.row.client_name || 'Client'} · {quantityWorkbench.row.po_number || 'Work Order'} · {quantityWorkbench.boards.length} boards</p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-900">Production sheet · {quantityWorkbench.boards.length} work items</p>
+                <span className="text-xs text-slate-600 tabular-nums">
+                  {quantityWorkbench.boards.filter(board => board.locked || (workbenchValues[board.item.id] !== '' && Number(workbenchValues[board.item.id]) >= board.targetQty)).length}/{quantityWorkbench.boards.length} quantity targets recorded
+                </span>
+              </div>
+              <p className="text-xs text-slate-500">{quantityWorkbench.row.shop_name} · {quantityWorkbench.row.po_number || 'Work Order'} · {quantityWorkbench.row.client_name || 'Client'}</p>
+              {selectedOrderIds.has(quantityWorkbench.row.production_order_id) && (
+                <p className="text-[11px] font-medium text-blue-700">Focused workset · {selectedOrderIds.size} selected shops · Save & next stays within this selection</p>
+              )}
             </div>
-            <p className="text-xs text-slate-600">Enter <strong>actual produced quantities</strong>. The planned amount is a reference only. Materials and final completion are checked separately; saving quantities does not approve/dispatch work.</p>
+            <p className="text-xs text-slate-600">Match each <strong>work type + size</strong> to approved artwork. Record actual production quantities; planned quantities are for reference.</p>
+            {workbenchArtwork.warning && <p role="alert" className="text-xs rounded-lg border border-amber-200 bg-amber-50 text-amber-800 px-3 py-2">{workbenchArtwork.warning} — open the Design review before using an unverified file.</p>}
             <div className="max-h-[55vh] overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-lg">
-              {quantityWorkbench.boards.map((board) => {
+              {quantityWorkbench.boards.map((board, index) => {
                 const id = board.item.id;
                 const disabled = board.locked;
                 const actual = workbenchValues[id] ?? '';
-                return <div key={id} className="p-3 flex flex-wrap items-center gap-3">
-                  <div className="flex-1 min-w-[180px]">
-                    <p className="text-sm font-semibold text-slate-800">{board.item.work_type_name || 'Board'}</p>
-                    <p className="text-xs text-slate-500">{boardLabel(board.item).dims || 'Size not entered'} · Planned: {board.targetQty} · Recorded: {board.producedQty ?? '—'}</p>
-                    {!board.componentsReady && <p className="text-xs text-amber-700">Materials pending — this board cannot finish until ready.</p>}
-                    {disabled && <p className="text-xs text-emerald-700">Finalized — locked</p>}
-                    {workbenchErrors[id] && <p role="alert" className="text-xs text-red-600 mt-1">{workbenchErrors[id]}</p>}
+                const mappedArtwork = workbenchArtwork.byItem[id] || [];
+                const design = mappedArtwork[0];
+                const dimension = boardLabel(board.item).dims || 'Size not recorded';
+                return <div key={id} className="p-3 sm:p-4 space-y-2">
+                  <div className="flex justify-between gap-2 items-start">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-900">{board.item.work_type_name || 'Work Item'} <span className="text-blue-700">· {dimension}</span></p>
+                      <p className="text-xs text-slate-500">Work item {index + 1} · {board.item.material || 'Material not specified'} · Planned {board.targetQty} · Recorded {board.producedQty ?? '—'}</p>
+                    </div>
+                    <span className={`text-[11px] rounded-full px-2 py-0.5 font-medium shrink-0 ${disabled ? 'bg-emerald-100 text-emerald-700' : board.componentsReady ? 'bg-slate-100 text-slate-600' : 'bg-amber-100 text-amber-800'}`}>
+                      {disabled ? 'Locked' : board.componentsReady ? 'Materials ready' : 'Materials pending'}
+                    </span>
                   </div>
-                  <label className="text-xs text-slate-600 font-medium flex flex-col gap-1">
-                    Actual qty
-                    <input aria-label={`Actual produced quantity for ${board.item.work_type_name || 'board'}`} type="number" min="0" step="any"
-                      value={actual} disabled={disabled || workbenchSaving}
-                      onChange={event => { setWorkbenchValues(prev => ({ ...prev, [id]: event.target.value })); setWorkbenchErrors(prev => { const next = { ...prev }; delete next[id]; return next; }); }}
-                      className="w-28 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500" />
-                  </label>
-                  {!disabled && <button type="button" disabled={workbenchSaving} onClick={() => setWorkbenchValues(prev => ({ ...prev, [id]: String(board.targetQty) }))}
-                    className="text-xs font-medium text-blue-700 border border-blue-200 rounded-lg px-2 py-2 hover:bg-blue-50 disabled:opacity-50"
-                    title="Only use if the full planned quantity has actually been produced">Use planned</button>}
+                  <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto] gap-3 items-center">
+                    <div className="flex items-center gap-3 min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-2 py-2">
+                      {design && artworkIsImage(design) ? <img src={design.file_url} alt={`Approved artwork for ${board.item.work_type_name || 'work item'} ${dimension}`} loading="lazy" className="w-14 h-12 object-contain bg-white rounded border border-slate-200 shrink-0" /> :
+                        <div className="w-14 h-12 shrink-0 flex items-center justify-center rounded bg-white border border-slate-200 text-slate-400"><Layers className="w-5 h-5" /></div>}
+                      <div className="min-w-0 flex-1">
+                        {design ? <>
+                          <a href={design.file_url} target="_blank" rel="noopener noreferrer" className="text-xs font-medium text-blue-700 hover:underline break-all line-clamp-2" title={design.file_name || 'View approved design'}>{design.file_name || `Approved artwork v${design.version_number}`}</a>
+                          <p className="text-[11px] text-emerald-700">Approved design{mappedArtwork.length > 1 ? ` · ${mappedArtwork.length} linked` : ''}</p>
+                          {mappedArtwork.length > 1 && <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
+                            {mappedArtwork.slice(1, 4).map((file, fileIndex) => <a key={file.id} href={file.file_url} target="_blank" rel="noopener noreferrer" className="text-[11px] text-blue-700 underline" title={file.file_name || 'Approved design'}>
+                              {file.file_name || `Other artwork ${fileIndex + 2}`}
+                            </a>)}
+                            {mappedArtwork.length > 4 && <span className="text-[11px] text-slate-500">+{mappedArtwork.length - 4} more in Design Studio</span>}
+                          </div>}
+                        </> : <>
+                          <p className="text-xs font-medium text-slate-600">No approved artwork linked</p>
+                          <p className="text-[11px] text-slate-400">Valid for work without a design stage; otherwise check Design review</p>
+                        </>}
+                      </div>
+                    </div>
+                    <div className="flex items-end gap-2">
+                      <label className="text-xs text-slate-600 font-medium flex flex-col gap-1">
+                        Actual produced
+                        <input aria-label={`Actual produced quantity for ${board.item.work_type_name || 'work item'} ${dimension}`} type="number" min="0" step="1"
+                          value={actual} disabled={disabled || workbenchSaving}
+                          onChange={event => { setWorkbenchValues(prev => ({ ...prev, [id]: event.target.value })); setWorkbenchErrors(prev => { const next = { ...prev }; delete next[id]; return next; }); }}
+                          className="w-24 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm text-slate-900 focus:ring-2 focus:ring-blue-500" />
+                      </label>
+                      {!disabled && <button type="button" disabled={workbenchSaving} onClick={() => setWorkbenchValues(prev => ({ ...prev, [id]: String(board.targetQty) }))}
+                        className="text-xs font-medium text-blue-700 border border-blue-200 rounded-lg px-2 py-2 hover:bg-blue-50 disabled:opacity-50"
+                        title="Use only when the full planned quantity was actually produced">Use plan</button>}
+                    </div>
+                  </div>
+                  {!board.componentsReady && !disabled && <p className="text-xs text-amber-700">Materials incomplete — record quantity now; final completion remains blocked.</p>}
+                  {workbenchErrors[id] && <p role="alert" className="text-xs text-red-700">{workbenchErrors[id]}</p>}
                 </div>;
               })}
             </div>
             <div className="flex flex-wrap justify-between items-center gap-2">
-              <button type="button" disabled={workbenchSaving} onClick={() => setWorkbenchValues(prev => {
-                const next = { ...prev };
-                for (const board of quantityWorkbench.boards) if (!board.locked && next[board.item.id] === '') next[board.item.id] = String(board.targetQty);
-                return next;
-              })} className="text-xs font-semibold text-blue-700 hover:underline disabled:opacity-50" title="Explicitly fill blank actual fields with planned quantities; verify before saving">Fill blanks from plan</button>
-              <span className="text-xs text-slate-500">{quantityWorkbench.boards.filter(board => !board.locked && workbenchValues[board.item.id] !== workbenchBaseline[board.item.id]).length} changed</span>
+              {quantityWorkbench.boards.some(board => !board.locked && workbenchValues[board.item.id] === '') &&
+                quantityWorkbench.boards.every(board => board.locked || workbenchValues[board.item.id] !== '' || hasRecordedProductionPlan(board.item)) && (
+                <button type="button" disabled={workbenchSaving} onClick={() => void saveWorkbenchQuantities('next', true)}
+                  className="text-xs font-semibold text-blue-700 border border-blue-200 hover:bg-blue-50 rounded-lg px-3 py-2 disabled:opacity-50"
+                  title="Only if you actually produced the full planned quantities for every blank board; saved values and other edits are preserved">
+                  Confirm blanks as produced · Save & next
+                </button>
+              )}
+              <span className="text-xs text-slate-500" aria-live="polite">{quantityWorkbench.boards.filter(board => !board.locked && workbenchValues[board.item.id] !== workbenchBaseline[board.item.id]).length} changed</span>
             </div>
             {workbenchMessage && <p role="status" className="text-xs text-amber-700 bg-amber-50 rounded-lg p-2">{workbenchMessage}</p>}
-            <div className="flex justify-end gap-2 border-t border-slate-100 pt-3">
-              <button type="button" disabled={workbenchSaving} onClick={() => setQuantityWorkbench(null)} className="border border-slate-200 rounded-lg px-4 py-2 text-sm font-medium">Close</button>
+            {canApprove && quantityWorkbench.boards.every(board => board.locked || (
+              board.componentsReady && Number.isSafeInteger(Number(workbenchValues[board.item.id])) &&
+              (workbenchValues[board.item.id] || '').trim() !== '' && Number(workbenchValues[board.item.id]) >= board.targetQty
+            )) && quantityWorkbench.row.fulfillment_type !== 'supply_only' && !quantityWorkbench.row.requires_installation_all_false && (orgInstallers?.length || 0) > 1 && (
+              <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">Assign Installer for handoff
+                <select value={workbenchInstaller} disabled={workbenchSaving} onChange={e => setWorkbenchInstaller(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white">
+                  <option value="">Choose Installer</option>
+                  {(orgInstallers || []).map(person => <option key={person.id} value={person.id}>{person.full_name}</option>)}
+                </select>
+              </label>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3">
+              <span className="text-[11px] text-slate-400 hidden sm:inline">Ctrl / ⌘ + Enter: Save & next</span>
+              <div className="flex flex-wrap justify-end gap-2">
+              <button type="button" disabled={workbenchSaving} onClick={() => setQuantityWorkbench(null)} className="border border-slate-200 rounded-lg px-3 py-2 text-xs font-medium">Close</button>
               <button type="button" disabled={workbenchSaving || !quantityWorkbench.boards.some(board => !board.locked && workbenchValues[board.item.id] !== workbenchBaseline[board.item.id])}
-                onClick={() => void saveWorkbenchQuantities()} className="rounded-lg bg-blue-600 text-white font-semibold px-4 py-2 text-sm disabled:opacity-50">
-                {workbenchSaving ? 'Saving & checking…' : 'Save changed quantities'}
+                onClick={() => void saveWorkbenchQuantities('save')} className="rounded-lg border border-slate-200 bg-white text-slate-700 font-semibold px-3 py-2 text-xs disabled:opacity-50">
+                Save only
               </button>
+              <button type="button" disabled={workbenchSaving} onClick={() => void saveWorkbenchQuantities('next')}
+                className="rounded-lg bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 text-xs font-semibold disabled:opacity-50">
+                {workbenchSaving ? 'Saving…' : selectedOrderIds.has(quantityWorkbench.row.production_order_id) ? 'Save & next selected' : 'Save & next shop'}
+              </button>
+              {canApprove && quantityWorkbench.boards.every(board => board.locked || (
+                board.componentsReady && Number.isSafeInteger(Number(workbenchValues[board.item.id])) &&
+                (workbenchValues[board.item.id] || '').trim() !== '' && Number(workbenchValues[board.item.id]) >= board.targetQty
+              )) && <button type="button" disabled={workbenchSaving || (
+                quantityWorkbench.row.fulfillment_type !== 'supply_only' && !quantityWorkbench.row.requires_installation_all_false &&
+                !(workbenchInstaller || orgInstallers?.length === 1))}
+                onClick={() => void saveWorkbenchQuantities('complete')}
+                className="rounded-lg bg-emerald-700 text-white font-semibold px-3 py-2 text-xs disabled:opacity-50">
+                Save & complete <Check className="w-3 h-3 inline" />
+              </button>}
+              </div>
             </div>
           </div>
         )}

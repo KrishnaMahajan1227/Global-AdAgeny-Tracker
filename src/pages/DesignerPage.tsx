@@ -11,6 +11,8 @@ import { CompanyApprovalHandoff } from '@/components/CompanyApprovalHandoff';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { WorkItem, SurveyPhoto, BoardMarking, DesignVersion, DesignVersionItem, Shop, Organization } from '@/lib/types';
 import { numberMarkingsByPhoto } from '@/lib/markingUtils';
+import { designCoverage, editableDesignBoards, validateArtworkMappings } from '@/lib/designArtworkMapping';
+import { designWorkDisplay, designArtworkDisplayName, designArtworkStorageStem } from '@/lib/designPresentation';
 import { formatDim, itemSizeLabel } from '@/lib/units';
 import { buildDesignComparisonRows, generateDesignComparisonPDF, generateDesignComparisonPPT } from '@/lib/reports';
 import { DesignMarkingPreview } from '@/components/DesignMarkingPreview';
@@ -19,7 +21,7 @@ import {
   Palette, Upload, ChevronRight, ChevronDown, ChevronLeft, FileImage, FileText, CheckCircle2, Circle,
   X, Search, MapPin, Phone, User, Layers, Lock, Plus, FileDown,
   Presentation, Calendar, Hash, Clock, Eye, PackageCheck, LayoutList, Loader2, Filter, ArrowUpDown, AlertTriangle, Send, Camera,
-  Folder, FolderTree,
+  Folder, FolderTree, ImagePlus,
 } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { validWorkOrderId } from '@/lib/operationalNavigation';
@@ -177,7 +179,7 @@ async function fetchShopDetail(shopId: string, designTaskId: string): Promise<Sh
 // Every design-task action notifies exactly the people whose job the next
 // step is — never the whole org. Designer-facing events go to that one
 // design task's `designer_id`; "needs a decision" events go to whichever
-// org members can actually approve a design (agency_owner/admin/demo —
+// org members can actually approve a design (agency_owner/admin —
 // the same set `canApprove` checks against on this page), never to
 // designers, production, or installer accounts who have no reason to see
 // design-review traffic.
@@ -186,7 +188,7 @@ async function notifyDesignReviewers(orgId: string, shopName: string) {
     .from('profiles')
     .select('id')
     .eq('organization_id', orgId)
-    .in('role', ['agency_owner', 'admin', 'demo'])
+    .in('role', ['agency_owner', 'admin'])
     .eq('is_active', true);
   for (const r of reviewers || []) {
     await createNotification(r.id, 'Design Ready for Review', `${shopName}'s design is uploaded and waiting for your review.`, 'info', '/design');
@@ -262,7 +264,10 @@ export default function DesignerPage() {
   const orgId = profile?.organization_id;
   const queryClient = useQueryClient();
   const isDesigner = profile?.role === 'designer';
-  const canApprove = profile?.role === 'agency_owner' || profile?.role === 'admin' || profile?.role === 'demo';
+  const canApprove = profile?.role === 'agency_owner' || profile?.role === 'admin';
+  // The assigned Designer works their own queue; Owner/Admin may also prepare or
+  // correct artwork without impersonating the assigned person. Approval stays privileged.
+  const canEditArtwork = isDesigner || canApprove;
   const designerFilter = isDesigner ? profile!.id : null;
 
   // Org letterhead (name/logo/GST/etc.) for the design-comparison PDF/PPT —
@@ -328,21 +333,40 @@ export default function DesignerPage() {
   const [bulkExportProgress, setBulkExportProgress] = useState<{ done: number; total: number } | null>(null);
 
   const [uploadTask, setUploadTask] = useState<(DesignTaskRow & ShopDesignDetail) | null>(null);
-  const [stagedFiles, setStagedFiles] = useState<{ id: string; file: File; previewUrl: string | null }[]>([]);
+  const [stagedFiles, setStagedFiles] = useState<{ id: string; file: File; previewUrl: string | null; workItemIds: string[] }[]>([]);
   const [batchNotes, setBatchNotes] = useState('');
   const [showDesignOptions, setShowDesignOptions] = useState(false);
   const [fileDragOver, setFileDragOver] = useState(false);
   const [stagingError, setStagingError] = useState('');
   const [batchSource, setBatchSource] = useState<'agency_designed' | 'client_provided'>('agency_designed');
   // Default to completing the handoff in the same save. Partial/incomplete boards remain drafts.
-  const [submitAfterUpload, setSubmitAfterUpload] = useState(true);
-  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
-  const eligibleUploadItems = uploadTask?.items.filter((item) => !NOT_READY_STATUSES.includes(item.status) && !BOARD_DONE_STATUSES.includes(item.status)) || [];
-  const canSubmitUploadForReview = !!uploadTask && (uploadTask.items?.length || 0) > 0
-    && !uploadTask.items.some((item) => NOT_READY_STATUSES.includes(item.status))
-    && eligibleUploadItems.every((item) => selectedItemIds.has(item.id))
-    && (eligibleUploadItems.length > 0 || uploadTask.items.some((item) => BOARD_DONE_STATUSES.includes(item.status)));
+  // Every file has its own explicit, shop-scoped work-item/marking mapping.
+  // Existing saved drafts also count toward a complete design; uploading a
+  // revision for one board must not force reuploading all of its siblings.
+  const uploadEditableItems = useMemo(() => editableDesignBoards(uploadTask?.items || []), [uploadTask]);
+  const uploadCoverage = useMemo(() => designCoverage(
+    uploadTask?.items || [], uploadTask?.versions || [], uploadTask?.versionItems || [], stagedFiles,
+  ), [uploadTask, stagedFiles]);
+  const uploadMappingError = validateArtworkMappings(uploadTask?.items || [], stagedFiles);
+  const uncoveredEditableItemIds = uploadEditableItems.filter(item => !uploadCoverage.covered.has(item.id)).map(item => item.id);
+  const canSubmitUploadForReview = !!uploadTask && !uploadMappingError && uploadCoverage.ready;
+
+  // IMPORTANT: the expanded row may belong to another shop. Upload previews
+  // must ALWAYS resolve markings against this modal's own shop detail.
+  const uploadNumbering = useMemo(() => numberMarkingsByPhoto(uploadTask?.markings || []), [uploadTask]);
+  const uploadMarkingByItem = useMemo(() => new Map((uploadTask?.markings || [])
+    .filter(marking => marking.work_item_id).map(marking => [marking.work_item_id as string, marking])), [uploadTask]);
+  const uploadPhotosById = useMemo(() => new Map((uploadTask?.photos || [])
+    .map(photo => [photo.id, photo])), [uploadTask]);
+  function uploadMarkingRefFor(workItemId: string) {
+    const marking = uploadMarkingByItem.get(workItemId);
+    const numbering = uploadNumbering.get(workItemId);
+    if (!marking || !numbering) return null;
+    return { marking, photo: uploadPhotosById.get(marking.survey_photo_id) || null,
+      number: numbering.number, total: numbering.total };
+  }
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  const [uploadMustRefresh, setUploadMustRefresh] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const [productionTask, setProductionTask] = useState<DesignTaskRow | null>(null);
@@ -678,13 +702,26 @@ export default function DesignerPage() {
     mutationFn: async ({
       row, status, assignedTo, versions,
     }: { row: DesignTaskRow; status: string; assignedTo?: string; versions?: DesignVersion[]; advance?: boolean }) => {
+      if (status === 'in_review') {
+        if (!(canApprove || (isDesigner && row.designer_id === profile?.id))) {
+          throw new Error('Only the assigned Designer or Owner/Admin may submit this design for review.');
+        }
+        const liveDetail = await fetchShopDetail(row.shop_id, row.design_task_id);
+        const coverage = designCoverage(liveDetail.items, liveDetail.versions, liveDetail.versionItems, []);
+        if (!coverage.ready) {
+          throw new Error('Cannot submit for review: some boards have no mapped artwork. Open Upload to link the correct design file to each marking.');
+        }
+      }
+      if ((status === 'approved' || status === 'ready_for_production') && !canApprove) {
+        throw new Error('Only Owner/Admin may approve designs or send them to Production.');
+      }
       if (status === 'ready_for_production') {
         if (!assignedTo) throw new Error('Pick a production person to assign this order to first.');
         await sendDesignTaskToProduction(row, assignedTo);
         return;
       }
 
-      const { error: taskError } = await supabase.from('design_tasks').update({
+      const { data: updatedTask, error: taskError } = await supabase.from('design_tasks').update({
         status,
         // v_team_workload (Owner Console → Team Workload/Performance)
         // scores a design task as "completed" the moment it reaches
@@ -693,8 +730,10 @@ export default function DesignerPage() {
         // silently stayed at zero forever. Fixed here at the one place a
         // single design task is approved.
         ...(status === 'approved' ? { completed_at: new Date().toISOString() } : {}),
-      }).eq('id', row.design_task_id).select('id');
+      }).eq('id', row.design_task_id).eq('organization_id', row.organization_id)
+        .eq('status', row.status).select('id');
       if (taskError) throw new Error(`Could not update design task: ${taskError.message}`);
+      if (!updatedTask?.length) throw new Error('This design changed in another session. Refresh before continuing.');
 
       if (status === 'approved') {
         const { error: shopError } = await supabase.from('shops').update({ status: 'design_approved' }).eq('id', row.shop_id).select('id');
@@ -714,7 +753,7 @@ export default function DesignerPage() {
 
       // Designer just sent this shop's design up for a decision — the
       // people who need to hear about it are whoever can actually approve
-      // a design (agency_owner/admin/demo), not the whole org.
+      // a design (agency_owner/admin), not the whole org.
       if (status === 'in_review') {
         await notifyDesignReviewers(row.organization_id, row.shop_name);
       }
@@ -811,8 +850,12 @@ export default function DesignerPage() {
     mutationFn: (selected: DesignTaskRow[]) => runBoundedWorkflowBatch(selected, async (row) => {
       // The current company approval trigger still validates each task individually.
       const d = await fetchShopDetail(row.shop_id, row.design_task_id);
-      const { error: taskError } = await supabase.from('design_tasks').update({ status: 'approved', completed_at: new Date().toISOString() }).eq('id', row.design_task_id).select('id');
+      if (!canApprove) throw new Error('Only Owner/Admin may approve designs.');
+      const { data: updatedTask, error: taskError } = await supabase.from('design_tasks')
+        .update({ status: 'approved', completed_at: new Date().toISOString() })
+        .eq('id', row.design_task_id).eq('organization_id', row.organization_id).eq('status', 'in_review').select('id');
       if (taskError) throw new Error(taskError.message);
+      if (!updatedTask?.length) throw new Error('This design is no longer awaiting review. Refresh to see its current status.');
       const { error: shopError } = await supabase.from('shops').update({ status: 'design_approved' }).eq('id', row.shop_id).select('id');
       if (shopError) throw new Error(shopError.message);
       const latestVersion = d.versions.slice().sort((a, b) => b.version_number - a.version_number)[0];
@@ -850,10 +893,25 @@ export default function DesignerPage() {
 
   const bulkSendForReviewMutation = useMutation({
     mutationFn: (selected: DesignTaskRow[]) => runBoundedWorkflowBatch(selected, async row => {
-      const { error } = await supabase.from('design_tasks').update({ status: 'in_review' }).eq('id', row.design_task_id).select('id');
+      if (!(canApprove || (isDesigner && row.designer_id === profile?.id))) {
+        throw new Error('This design is not assigned to your account.');
+      }
+      if (row.status !== 'design_ready') throw new Error('Only saved designs can be sent for review.');
+      // Same evidence-coverage rule as single task submit. A bulk action is
+      // a speed shortcut, never a way around marking/board verification.
+      const liveDetail = await fetchShopDetail(row.shop_id, row.design_task_id);
+      if (!designCoverage(liveDetail.items, liveDetail.versions, liveDetail.versionItems, []).ready) {
+        throw new Error('Some boards lack mapped artwork. Open the shop and complete the missing markings.');
+      }
+      const { data: updatedTask, error } = await supabase.from('design_tasks')
+        .update({ status: 'in_review' }).eq('id', row.design_task_id)
+        .eq('organization_id', row.organization_id).eq('status', 'design_ready').select('id');
       if (error) throw new Error(error.message);
-      await notifyDesignReviewers(row.organization_id, row.shop_name);
-      await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, 'in_review', `Design task status changed to in_review for ${row.shop_name} (bulk send)`);
+      if (!updatedTask?.length) throw new Error('This design changed in another session; refresh before retrying.');
+      try { await notifyDesignReviewers(row.organization_id, row.shop_name); }
+      catch (notificationError) { console.warn('Design sent for review; notification failed.', notificationError); }
+      try { await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, 'in_review', `Design task status changed to in_review for ${row.shop_name} (bulk send)`); }
+      catch (auditError) { console.warn('Design sent for review; audit notification failed.', auditError); }
     }, designBatchProgressCallback),
     onSuccess: (result) => {
       setDesignBatchResult(summarizeWorkflowBatch(result, 'sent for review', row => row.shop_name));
@@ -890,17 +948,18 @@ export default function DesignerPage() {
   }
 
   function openUploadModal(row: DesignTaskRow, loadedDetail: ShopDesignDetail) {
+    if (!canEditArtwork || (isDesigner && row.designer_id !== profile?.id)) {
+      setExportError('Only the assigned Designer or Agency Owner/Admin can edit this artwork.');
+      return;
+    }
     setUploadTask({ ...row, ...loadedDetail });
+    setUploadMustRefresh(false);
     setBatchNotes('');
     setBatchSource('agency_designed');
     setShowDesignOptions(false);
     setStagingError('');
-    setSubmitAfterUpload(true);
     setStagedFiles([]);
-    const pending = loadedDetail.items.filter(
-      (i) => !BOARD_DONE_STATUSES.includes(i.status) && !NOT_READY_STATUSES.includes(i.status)
-    );
-    setSelectedItemIds(new Set(pending.map((i) => i.id)));
+    // Marking mapping is always explicit for multi-board tasks.
   }
 
   // Row-level quick actions — "Upload" (designer) and "Review" (owner)
@@ -953,10 +1012,10 @@ export default function DesignerPage() {
   function closeUploadModal() {
     stagedFiles.forEach((f) => f.previewUrl && URL.revokeObjectURL(f.previewUrl));
     setUploadTask(null);
+    setUploadMustRefresh(false);
     setStagedFiles([]);
     setBatchNotes('');
     setBatchSource('agency_designed');
-    setSelectedItemIds(new Set());
     setUploadProgress(null);
   }
 
@@ -967,20 +1026,30 @@ export default function DesignerPage() {
 
   // Browse and drag-and-drop use exactly the same evidence upload path.
   // Duplicate files are ignored so repeated drops cannot create extra design versions.
-  function stageDesignFiles(files: File[]) {
-    const accepted = files.filter(file => file.type.startsWith('image/') || file.type === 'application/pdf' || /\.pdf$/i.test(file.name));
-    setStagingError(accepted.length !== files.length ? 'Only images and PDF artwork can be uploaded. Unsupported files were skipped.' : '');
+  function stageDesignFiles(files: File[], workItemId?: string) {
+    const accepted = files.filter(file =>
+      ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(file.type) && file.size <= 20 * 1024 * 1024
+    );
+    setStagingError(accepted.length !== files.length
+      ? 'Only JPG, PNG, WebP or PDF files up to 20 MB are supported. Unsupported files were skipped.' : '');
     setStagedFiles(previous => {
-      const seen = new Set(previous.map(entry => `${entry.file.name}:${entry.file.size}:${entry.file.lastModified}`));
       const next = [...previous];
       for (const file of accepted) {
         const key = `${file.name}:${file.size}:${file.lastModified}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
+        const already = next.findIndex(entry => `${entry.file.name}:${entry.file.size}:${entry.file.lastModified}` === key);
+        if (already >= 0) {
+          // Adding the same shared artwork from another marking card must
+          // extend its mapping, rather than silently discarding that action.
+          if (workItemId && !next[already].workItemIds.includes(workItemId)) {
+            next[already] = { ...next[already], workItemIds: [...next[already].workItemIds, workItemId] };
+          }
+          continue;
+        }
         next.push({
           id: `${file.name}-${file.size}-${Math.random().toString(36).slice(2)}`,
           file,
-          previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
+          previewUrl: URL.createObjectURL(file),
+          workItemIds: workItemId ? [workItemId] : uploadEditableItems.length === 1 ? [uploadEditableItems[0].id] : [],
         });
       }
       return next;
@@ -993,32 +1062,48 @@ export default function DesignerPage() {
   }
 
   function removeStaged(id: string) {
-    setStagedFiles((prev) => {
-      const target = prev.find((f) => f.id === id);
+    setStagedFiles(prev => {
+      const target = prev.find(f => f.id === id);
       if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
-      return prev.filter((f) => f.id !== id);
+      return prev.filter(f => f.id !== id);
     });
   }
 
-  function toggleSelectedItem(id: string) {
-    setSelectedItemIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  function toggleFileMarking(fileId: string, workItemId: string) {
+    setStagedFiles(prev => prev.map(entry => {
+      if (entry.id !== fileId) return entry;
+      const ids = entry.workItemIds.includes(workItemId)
+        ? entry.workItemIds.filter(id => id !== workItemId)
+        : [...entry.workItemIds, workItemId];
+      return { ...entry, workItemIds: ids };
+    }));
+  }
+
+  function assignFilesByMarkingOrder() {
+    // The designer deliberately opts into one-file-per-board order and can
+    // inspect/change each mapping before the save button is enabled.
+    if (stagedFiles.length !== uploadEditableItems.length) return;
+    setStagedFiles(prev => prev.map((entry, index) => ({ ...entry, workItemIds: [uploadEditableItems[index].id] })));
   }
 
   const uploadMutation = useMutation({
-    mutationFn: async () => {
-      if (!uploadTask || !profile) return;
+    mutationFn: async ({ submitAfterUpload }: { submitAfterUpload: boolean }) => {
+      if (!uploadTask || !profile) throw new Error('Sign in to continue.');
+      if (!canEditArtwork || profile.organization_id !== uploadTask.organization_id) {
+        throw new Error('This account cannot upload artwork for this agency.');
+      }
+      if (uploadMustRefresh) throw new Error('Reload the shop before attempting another upload.');
       if (stagedFiles.length === 0) throw new Error('Add at least one file before uploading.');
       // Avoid uploading orphaned versions when a reviewer already finished the task.
       const { data: currentTask, error: currentTaskError } = await supabase.from('design_tasks')
-        .select('status').eq('id', uploadTask.design_task_id).maybeSingle();
+        .select('status, designer_id, organization_id, shop_id').eq('id', uploadTask.design_task_id).maybeSingle();
       if (currentTaskError) throw new Error(`Could not verify design state: ${currentTaskError.message}`);
-      if (!currentTask || !['assigned', 'designing', 'design_ready', 'in_review'].includes(currentTask.status)) {
-        throw new Error('This design moved to the next stage. Refresh before uploading new artwork.');
+      if (!currentTask || currentTask.organization_id !== orgId || currentTask.shop_id !== uploadTask.shop_id ||
+          !['assigned', 'designing', 'design_ready', 'in_review'].includes(currentTask.status)) {
+        throw new Error('This design moved or changed ownership. Refresh before uploading new artwork.');
+      }
+      if (isDesigner && currentTask.designer_id !== profile.id) {
+        throw new Error('This design is no longer assigned to you. Refresh your work queue.');
       }
       // Section 5 — "every design upload must be unambiguously tagged to
       // shop + survey + work item ... never a bare file-upload with a
@@ -1027,19 +1112,42 @@ export default function DesignerPage() {
       // work-item half of that rule — a batch can't go up covering zero
       // boards, unless this shop genuinely has no recorded boards at all
       // (a pre-existing data edge case — see the empty state below).
-      if ((uploadTask.items?.length || 0) > 0 && selectedItemIds.size === 0) {
-        throw new Error('Select at least one board this upload covers before uploading.');
+      const mappingError = validateArtworkMappings(uploadTask.items, stagedFiles);
+      if (mappingError) throw new Error(mappingError);
+      const mappedItemIds = Array.from(new Set(stagedFiles.flatMap(entry => entry.workItemIds)));
+      const { data: liveItems, error: liveItemsError } = await supabase.from('work_items')
+        .select('id,shop_id,status').eq('shop_id', uploadTask.shop_id).in('id', mappedItemIds);
+      if (liveItemsError) throw new Error(`Could not verify linked boards: ${liveItemsError.message}`);
+      if (liveItems?.length !== mappedItemIds.length ||
+          validateArtworkMappings(liveItems || [], stagedFiles)) {
+        throw new Error('One or more mapped boards changed or belong to another shop. Reload the shop before uploading.');
       }
 
-      const startVersion = uploadTask.versions?.length || 0;
-      const newVersionIds: string[] = [];
 
+      // Use the actual latest version number, not array length (deleted
+      // versions and historical gaps can otherwise collide).
+      const { data: latestVersion, error: latestVersionError } = await supabase
+        .from('design_versions').select('version_number')
+        .eq('design_task_id', uploadTask.design_task_id)
+        .order('version_number', { ascending: false }).limit(1).maybeSingle();
+      if (latestVersionError) throw new Error(`Could not determine design version: ${latestVersionError.message}`);
+      const startVersion = latestVersion?.version_number || 0;
+      const newVersionIds: string[] = [];
+      const uploadedPaths: string[] = [];
+      let statusWritesStarted = false;
+      try {
       for (let i = 0; i < stagedFiles.length; i++) {
         const versionNum = startVersion + i + 1;
-        const file = stagedFiles[i].file;
-        const path = `${orgId}/${uploadTask.design_task_id}/v${versionNum}-${file.name}`;
+        const entry = stagedFiles[i];
+        const file = entry.file;
+        // Storage object keys may reject whitespace/unicode/special characters.
+        // Keep the original user-facing filename in design_versions.file_name.
+        const storageStem = designArtworkStorageStem(entry.workItemIds, uploadTask.items);
+        const fileExtension = (file.name.match(/\.(png|jpe?g|webp|pdf)$/i)?.[0] || '.file').toLowerCase();
+        const path = `${orgId}/${uploadTask.design_task_id}/v${versionNum}-${Date.now()}-${i}-${storageStem}${fileExtension}`;
         const { error: uploadError } = await supabase.storage.from('design-files').upload(path, file);
         if (uploadError) throw new Error(`Could not upload ${file.name}: ${uploadError.message}`);
+        uploadedPaths.push(path);
         const { data: urlData } = supabase.storage.from('design-files').getPublicUrl(path);
         const { data: versionRow, error: versionError } = await supabase
           .from('design_versions')
@@ -1059,30 +1167,27 @@ export default function DesignerPage() {
           .single();
         if (versionError) throw new Error(`Could not save design version for ${file.name}: ${versionError.message}`);
         newVersionIds.push(versionRow.id);
+        // Persist the *specific* marking(s) assigned to this file, not a
+        // Cartesian join of all files and all boards.
+        const links = entry.workItemIds.map(workItemId => ({
+          organization_id: orgId, design_version_id: versionRow.id, work_item_id: workItemId,
+        }));
+        const { error: linkError } = await supabase.from('design_version_items').insert(links);
+        if (linkError) throw new Error(`Could not link ${file.name} to its marking(s): ${linkError.message}`);
         setUploadProgress({ done: i + 1, total: stagedFiles.length });
       }
 
-      // Mark the boards this batch covers — this is the actual "which
-      // board is designed" system: every selected board gets linked to
-      // every file in this batch, then flipped to 'designed', unless it's
-      // already moved further along the pipeline than that.
-      if (selectedItemIds.size > 0) {
-        const links = newVersionIds.flatMap((versionId) =>
-          Array.from(selectedItemIds).map((workItemId) => ({
-            organization_id: orgId,
-            design_version_id: versionId,
-            work_item_id: workItemId,
-          }))
-        );
-        const { error: linkError } = await supabase.from('design_version_items').insert(links);
-        if (linkError) throw new Error(`Could not mark covered boards: ${linkError.message}`);
-
-        const { error: itemsError } = await supabase
-          .from('work_items')
+      // Advance only boards actually covered by these files. All IDs were
+      // checked against this shop's editable Work Items before storage writes.
+      const mappedIds = Array.from(new Set(stagedFiles.flatMap(entry => entry.workItemIds)));
+      statusWritesStarted = true;
+      if (mappedIds.length) {
+        const { error: itemsError } = await supabase.from('work_items')
           .update({ status: 'designed' })
-          .in('id', Array.from(selectedItemIds))
+          .eq('shop_id', uploadTask.shop_id)
+          .in('id', mappedIds)
           .in('status', ['approved', 'designing']);
-        if (itemsError) throw new Error(`Could not update board status: ${itemsError.message}`);
+        if (itemsError) throw new Error(`Could not update mapped board status: ${itemsError.message}`);
       }
 
       // One save, one next-stage handoff: never send a partially covered shop for review.
@@ -1102,19 +1207,40 @@ export default function DesignerPage() {
         catch (notificationError) { console.warn('Design saved for review; reviewer notification failed.', notificationError); }
       }
 
-      await logAudit(
-        'design_versions',
-        null,
-        'upload',
-        null,
-        null,
-        null,
-        `Uploaded ${stagedFiles.length} design file(s) for ${uploadTask.shop_name}, covering ${selectedItemIds.size} board(s)`
-      );
+      try {
+        await logAudit(
+          'design_versions', null, 'upload', null, null, null,
+          `Uploaded ${stagedFiles.length} mapped artwork file(s) for ${uploadTask.shop_name}, covering ${new Set(stagedFiles.flatMap(entry => entry.workItemIds)).size} board(s)`
+        );
+      } catch (auditError) {
+        // Do not offer a second save for an already completed upload just
+        // because its best-effort client audit request failed.
+        console.warn('Artwork saved, but audit notification failed.', auditError);
+      }
+      } catch (err) {
+        // Before any work-item/task status change, all records created by this
+        // attempt can be rolled back. Never leave unlinked design versions.
+        if (!statusWritesStarted) {
+          const cleanupErrors: string[] = [];
+          if (newVersionIds.length) {
+            const { error } = await supabase.from('design_versions').delete().in('id', newVersionIds);
+            if (error) cleanupErrors.push(error.message);
+          }
+          if (uploadedPaths.length) {
+            const { error } = await supabase.storage.from('design-files').remove(uploadedPaths);
+            if (error) cleanupErrors.push(error.message);
+          }
+          if (!cleanupErrors.length) throw err;
+          throw new Error(`Some artwork may have saved, and cleanup failed. Close and reopen this shop before retrying. ${cleanupErrors.join('; ')}`);
+        }
+        // A network failure after the final database write may mean the save
+        // succeeded remotely. Never encourage blind retries/duplicate versions.
+        throw new Error(`Artwork may already be saved. Close and reopen this shop to verify its versions before retrying. ${(err as Error).message}`);
+      }
     },
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       const completedTaskId = uploadTask?.design_task_id;
-      const sentForReview = submitAfterUpload && canSubmitUploadForReview;
+      const sentForReview = variables.submitAfterUpload && canSubmitUploadForReview;
       // A designer proceeds immediately to the next assigned shop after a
       // successful completed handoff. Partial drafts stay on the current task.
       const nextTask = sentForReview && isDesigner
@@ -1126,6 +1252,10 @@ export default function DesignerPage() {
       queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
       closeUploadModal();
       if (nextTask) void quickUpload(nextTask);
+    },
+    onError: error => {
+      if (/close and reopen|may already be saved/i.test((error as Error).message)) setUploadMustRefresh(true);
+      queryClient.invalidateQueries({ queryKey: ['design-task-detail'] });
     },
     onSettled: () => setUploadProgress(null),
   });
@@ -1582,17 +1712,17 @@ export default function DesignerPage() {
                         <PackageCheck className="w-3.5 h-3.5" /> Design Not Required — Send
                       </button>
                     )}
-                    {isDesigner && ['assigned', 'designing', 'design_ready'].includes(row.status) && (
+                    {canEditArtwork && (!isDesigner || row.designer_id === profile?.id) && !row.requires_design_all_false && ['assigned', 'designing', 'design_ready'].includes(row.status) && (
                       <button
                         onClick={() => quickUpload(row)}
                         disabled={quickActionLoadingId === row.design_task_id}
                         className="flex items-center gap-1 bg-blue-600 hover:bg-blue-700 text-white px-2.5 py-1.5 rounded-lg text-xs font-medium disabled:opacity-60"
                       >
                         {quickActionLoadingId === row.design_task_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
-                        Upload
+                        Map artwork
                       </button>
                     )}
-                    {isDesigner && row.status === 'design_ready' && (
+                    {canEditArtwork && row.status === 'design_ready' && (
                       <button
                         onClick={() => updateStatusMutation.mutate({ row, status: 'in_review' })}
                         disabled={updateStatusMutation.isPending && updateStatusMutation.variables?.row?.design_task_id === row.design_task_id}
@@ -1755,16 +1885,14 @@ export default function DesignerPage() {
                             client) already sees, so nothing looks different or
                             missing here specifically for the designer. */}
                         {(detail?.photos.length || 0) > 0 && (
-                          <div className="mb-3 border border-slate-200 rounded-lg overflow-hidden bg-white">
-                            <div className="px-3 py-2 bg-slate-50 border-b border-slate-100">
-                              <span className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
-                                <Camera className="w-3.5 h-3.5" /> Survey photos ({detail!.photos.length})
-                              </span>
-                            </div>
+                          <details className="mb-3 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                            <summary className="cursor-pointer bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100">
+                              Full survey photo gallery ({detail!.photos.length}) · expand only if needed
+                            </summary>
                             <div className="p-3">
                               <MarkedPhotoGrid photos={detail!.photos} markings={detail!.markings} workItems={detail!.items} />
                             </div>
-                          </div>
+                          </details>
                         )}
 
                         {/* Uploaded design versions — each annotated with exactly
@@ -1792,8 +1920,9 @@ export default function DesignerPage() {
                                       <div className="flex items-center gap-2 flex-wrap">
                                         <span className="text-slate-500 font-medium">v{v.version_number}</span>
                                         <a href={v.file_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline flex items-center gap-1">
-                                          <FileImage className="w-3.5 h-3.5" /> {v.file_name || 'View'}
+                                          <FileImage className="w-3.5 h-3.5" /> {coveredItems.length ? designArtworkDisplayName(coveredItems.map(item => item.id), detail!.items, markingRefFor) : 'Artwork'}
                                         </a>
+                                        <span className="text-[11px] text-slate-500" title={v.file_name || ''}>{v.file_name || 'Original filename unavailable'}</span>
                                         <StatusBadge status={v.status} />
                                         <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${v.source === 'client_provided' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'}`}>
                                           {v.source === 'client_provided' ? 'Client-supplied' : 'Agency-designed'}
@@ -1854,12 +1983,12 @@ export default function DesignerPage() {
                               Design Not Required — Send to Production
                             </button>
                           )}
-                          {isDesigner && ['assigned', 'designing', 'design_ready', 'in_review'].includes(row.status) && (
+                          {canEditArtwork && (!isDesigner || row.designer_id === profile?.id) && !row.requires_design_all_false && ['assigned', 'designing', 'design_ready', 'in_review'].includes(row.status) && (
                             <button onClick={() => detail && openUploadModal(row, detail)} className="flex items-center gap-1 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium">
                               <Upload className="w-4 h-4" /> Upload Designs
                             </button>
                           )}
-                          {row.status === 'design_ready' && (
+                          {canEditArtwork && row.status === 'design_ready' && (
                             <button onClick={() => updateStatusMutation.mutate({ row, status: 'in_review' })} className="bg-amber-50 text-amber-700 border border-amber-200 px-3 py-1.5 rounded-lg text-sm font-medium">
                               Send for Review
                             </button>
@@ -1998,7 +2127,7 @@ export default function DesignerPage() {
                       photoUrl={photo?.photo_url}
                       points={marking?.points}
                       label={numbering ? `#${numbering.number} — ${item.work_type_name || 'Board'}` : item.work_type_name}
-                      className="w-20 h-20"
+                      className="w-16 h-16"
                       onClick={setLightbox}
                     />
                     <ChevronRight className="w-3.5 h-3.5 text-slate-300 shrink-0" />
@@ -2010,9 +2139,9 @@ export default function DesignerPage() {
                       </div>
                     )}
                     <div className="min-w-0 flex-1">
-                      <p className="font-medium text-slate-800 truncate">{item.work_type_name || 'Board'} <span className="text-slate-400 font-normal">{dims}</span></p>
-                      <p className="text-[11px] text-slate-400 truncate">
-                        {latestDesign ? `v${latestDesign.version_number} · ${latestDesign.source === 'client_provided' ? 'Client-supplied' : 'Agency-designed'}` : 'No design uploaded yet'}
+                      <p className="text-sm font-bold text-slate-800">{item.work_type_name || 'Work item'} <span className="font-semibold text-blue-700">· {dims || 'Size not recorded'}</span></p>
+                      <p className="text-[11px] text-slate-500 truncate">
+                        {latestDesign ? `v${latestDesign.version_number} · ${latestDesign.source === 'client_provided' ? 'Company artwork' : 'Agency artwork'} · ${latestDesign.file_name || 'Artwork'}` : 'Artwork missing'}
                       </p>
                     </div>
                     <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${isDone ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
@@ -2068,133 +2197,203 @@ export default function DesignerPage() {
         )}
       </Modal>
 
-      {/* Multi-file upload with review-before-submit */}
-      <Modal open={!!uploadTask} onClose={closeUploadModal} title="Upload Design(s)" size="lg">
+      {/* Marking-first artwork mapping: each file gets an explicit work item. */}
+      <Modal open={!!uploadTask} onClose={() => { if (!uploadMutation.isPending) closeUploadModal(); }} title="Design artwork · Work & size" size="lg">
         <div className="space-y-4">
-          <p className="text-sm text-slate-600">Shop: <span className="font-medium text-slate-900">{uploadTask?.shop_name}</span></p>
-
-          {(uploadTask?.items?.length || 0) > 0 && (
-            <div>
-              <p className="text-sm font-medium text-slate-700 mb-2">Which boards does this batch cover?</p>
-              <p className="text-xs text-slate-400 mb-2">
-                Each board below shows the exact survey marking it was measured from — check the outline and size before uploading, since sizes differ per marking.
-              </p>
-              <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-64 overflow-y-auto">
-                {uploadTask!.items
-                  .filter((i) => !NOT_READY_STATUSES.includes(i.status))
-                  .map((item) => {
-                    const { dims, qty } = boardLabel(item);
-                    const checked = selectedItemIds.has(item.id);
-                    const ref = markingRefFor(item.id);
-                    return (
-                      <label key={item.id} className="flex items-start gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-slate-50">
-                        <input type="checkbox" checked={checked} onChange={() => toggleSelectedItem(item.id)} className="rounded border-slate-300 mt-0.5" />
-                        <DesignMarkingPreview
-                          photoUrl={ref?.photo?.photo_url}
-                          points={ref?.marking.points}
-                          label={boardCaption(item, ref)}
-                          className="w-10 h-10"
-                          onClick={setLightbox}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-medium text-slate-800">{item.work_type_name || 'Board'}</span>
-                            <span className="text-slate-400">{[item.material, dims, qty ? `×${qty}` : null].filter(Boolean).join(' · ')}</span>
-                          </div>
-                          {ref ? (
-                            <span className="inline-flex items-center gap-1 text-[10px] text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5 mt-1">
-                              <Hash className="w-2.5 h-2.5" /> Marking #{ref.number} of {ref.total} on this photo
-                            </span>
-                          ) : (
-                            <span className="text-[10px] text-slate-400">No survey marking on record</span>
-                          )}
-                        </div>
-                        {BOARD_DONE_STATUSES.includes(item.status) && <span className="ml-auto text-xs text-green-600 shrink-0">already designed</span>}
-                      </label>
-                    );
-                  })}
-              </div>
-              <p className="text-xs text-slate-400 mt-1">Checked boards will be marked "Designed" once this batch uploads, and this upload will be recorded against each marking shown above. Required — at least one board must be selected.</p>
-            </div>
-          )}
-
-          <button type="button" onClick={() => setShowDesignOptions(previous => !previous)}
-            aria-expanded={showDesignOptions}
-            className="text-sm text-blue-700 font-semibold flex items-center gap-1 hover:underline">
-            <ChevronDown className={`w-4 h-4 transition-transform ${showDesignOptions ? 'rotate-180' : ''}`} />
-            Artwork source & notes {batchSource === 'client_provided' ? '· Company artwork' : '· Agency artwork'}
-          </button>
-          {showDesignOptions && <div className="space-y-3 rounded-lg bg-slate-50 border border-slate-200 p-3">
-            <Select label="Artwork Source" value={batchSource}
-              onChange={(v) => setBatchSource(v as 'agency_designed' | 'client_provided')}
-              options={[{ value: 'agency_designed', label: 'Agency artwork' }, { value: 'client_provided', label: 'Company-provided artwork' }]} />
-            <Textarea label="Optional Notes" value={batchNotes} onChange={setBatchNotes} rows={2} placeholder="Version notes or instructions…" />
-          </div>}
-          {canSubmitUploadForReview ? (
-            <div className="flex flex-wrap justify-between items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-sm">
-              <div className="min-w-0"><strong className="text-blue-900">{submitAfterUpload ? 'Ready: upload and send for review' : 'Save artwork as draft'}</strong>
-                <p className="text-xs text-blue-700 mt-0.5">{submitAfterUpload ? 'No separate handoff step. Next assigned design opens after success.' : 'Review will not start until you send it.'}</p>
-              </div>
-              <button type="button" onClick={() => setSubmitAfterUpload(previous => !previous)} className="shrink-0 rounded-lg border border-blue-200 bg-white px-3 py-1.5 font-medium text-xs text-blue-700 hover:bg-blue-100">
-                {submitAfterUpload ? 'Save draft instead' : 'Send for review instead'}
-              </button>
-            </div>
-          ) : (
-            <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-              Incomplete board coverage — save draft first. Only fully covered shops can be sent for review.
-            </p>
-          )}
-
-          <input ref={fileRef} type="file" accept="image/*,.pdf" multiple onChange={handleFilesSelected} className="hidden" />
-          {stagingError && <p role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">{stagingError}</p>}
-          <div onDragOver={event => { event.preventDefault(); setFileDragOver(true); }}
-            onDragLeave={event => { event.preventDefault(); setFileDragOver(false); }}
-            onDrop={event => { event.preventDefault(); setFileDragOver(false); stageDesignFiles(Array.from(event.dataTransfer.files)); }}
-            className={`rounded-lg border-2 border-dashed transition ${fileDragOver ? 'border-blue-600 bg-blue-50' : 'border-slate-300 bg-slate-50/30'}`}>
-            <button type="button" disabled={uploadMutation.isPending}
-              onClick={() => fileRef.current?.click()}
-              className="w-full flex items-center justify-center gap-2 text-slate-700 font-medium py-4 rounded-lg hover:text-blue-700 disabled:opacity-50">
-              <Plus className="w-5 h-5" /> Drop artwork here or browse files
-            </button>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+            <p className="text-sm font-semibold text-slate-900">{uploadTask?.shop_name} <span className="font-normal text-slate-500">· {uploadTask?.po_number || 'Direct work'}</span></p>
+            <p className="mt-0.5 text-xs text-slate-600">Match the Work Type and Size, then add artwork beside that survey marking. Complete mapping sends directly to Review.</p>
           </div>
 
-          {stagedFiles.length > 0 && (
-            <div>
-              <p className="text-sm font-medium text-slate-700 mb-2">Review before uploading ({stagedFiles.length} file{stagedFiles.length > 1 ? 's' : ''})</p>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {stagedFiles.map((f) => (
-                  <div key={f.id} className="relative border border-slate-200 rounded-lg overflow-hidden group">
-                    <button onClick={() => removeStaged(f.id)} className="absolute top-1 right-1 bg-black/60 hover:bg-black/80 text-white rounded-full p-0.5 z-10">
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                    {f.previewUrl ? (
-                      <img src={f.previewUrl} alt={f.file.name} className="w-full h-24 object-cover" />
-                    ) : (
-                      <div className="w-full h-24 flex items-center justify-center bg-slate-50">
-                        <FileText className="w-8 h-8 text-slate-400" />
-                      </div>
-                    )}
-                    <p className="text-[11px] text-slate-600 px-1.5 py-1 truncate bg-white">{f.file.name}</p>
-                  </div>
-                ))}
+          <section aria-label="Work items and mapped artwork" className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">Work & size · artwork mapping</h3>
+                <p className="text-xs text-slate-500">One row per Work Item. Survey photo and artwork appear together.</p>
               </div>
+              <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
+                {uploadCoverage.covered.size}/{uploadTask?.items.length || 0} mapped
+              </span>
             </div>
-          )}
+            {!uploadTask?.items.length ? (
+              <p role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">No Work Items are recorded for this shop. Add the work scope before uploading artwork.</p>
+            ) : (
+              <div className="space-y-2" data-testid="design-work-mapping-list">
+                {uploadTask.items.map((item, index) => {
+                  const ref = uploadMarkingRefFor(item.id);
+                  const canEdit = uploadEditableItems.some(board => board.id === item.id);
+                  const display = designWorkDisplay(item);
+                  const staged = stagedFiles.filter(entry => entry.workItemIds.includes(item.id));
+                  const latestDesign = uploadTask.versionItems
+                    .filter(link => link.work_item_id === item.id)
+                    .map(link => uploadTask.versions.find(version => version.id === link.design_version_id))
+                    .filter((version): version is DesignVersion => !!version && !['deleted','rejected'].includes(version.status))
+                    .sort((a, b) => b.version_number - a.version_number)[0];
+                  const preview = staged.find(entry => entry.previewUrl) || staged[0];
+                  const artworkUrl = preview ? preview.previewUrl : latestDesign?.file_url || null;
+                  const isImageArtwork = preview ? preview.file.type.startsWith('image/') : !!latestDesign?.file_name && /\.(png|jpe?g|webp)$/i.test(latestDesign.file_name);
+                  const mapped = staged.length > 0 || uploadCoverage.covered.has(item.id);
+                  return (
+                    <article key={item.id} data-work-item-id={item.id} className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                            <h4 className="text-sm font-bold text-slate-900">{display.work}</h4>
+                            <strong className="text-sm font-semibold text-blue-700">{display.size}</strong>
+                            {ref && <span className="text-xs text-slate-500">Marking #{ref.number}</span>}
+                            {!ref && <span className="text-xs text-slate-400">Item {index + 1} · no survey marking</span>}
+                          </div>
+                          <p className="mt-0.5 text-xs text-slate-500">{display.meta}</p>
+                        </div>
+                        <span className={`rounded-full px-2 py-1 text-[11px] font-semibold ${mapped ? 'bg-emerald-50 text-emerald-700' : canEdit ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>
+                          {mapped ? (staged.length ? 'New artwork mapped' : 'Saved artwork') : canEdit ? 'Artwork needed' : 'Locked'}
+                        </span>
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <figure className="flex shrink-0 flex-col items-center gap-0.5">
+                          <DesignMarkingPreview photoUrl={ref?.photo?.photo_url} points={ref?.marking.points}
+                            label={boardCaption(item, ref)} className="h-14 w-16" onClick={setLightbox} />
+                          <figcaption className="text-[10px] text-slate-500">Survey</figcaption>
+                        </figure>
+                        <ChevronRight className="h-4 w-4 shrink-0 text-slate-300" aria-hidden="true" />
+                        <figure className="flex shrink-0 flex-col items-center gap-0.5">
+                          {artworkUrl && isImageArtwork ? (
+                            <button type="button" className="h-14 w-20 overflow-hidden rounded-md border border-slate-200 bg-slate-50" onClick={() => setLightbox(artworkUrl)} aria-label={`Preview artwork for ${display.work}, ${display.size}`}>
+                              <img src={artworkUrl} alt={`Artwork for ${display.work} ${display.size}`} className="h-full w-full object-contain" loading="lazy" />
+                            </button>
+                          ) : artworkUrl ? (
+                            <a href={artworkUrl} target="_blank" rel="noopener noreferrer" className="flex h-14 w-20 items-center justify-center rounded-md border border-blue-200 bg-blue-50 text-blue-700" aria-label={`Open artwork file for ${display.work}`}><FileText className="h-5 w-5" /></a>
+                          ) : (
+                            <div className="flex h-14 w-20 items-center justify-center rounded-md border border-dashed border-slate-200 bg-slate-50"><ImagePlus className="h-5 w-5 text-slate-300" /></div>
+                          )}
+                          <figcaption className="text-[10px] text-slate-500">Artwork</figcaption>
+                        </figure>
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <p className="text-xs font-medium text-slate-700">{staged.length ? designArtworkDisplayName(staged[0].workItemIds, uploadTask.items, uploadMarkingRefFor) : latestDesign ? designArtworkDisplayName([item.id], uploadTask.items, uploadMarkingRefFor) : 'No artwork uploaded'}</p>
+                          {(staged.length || latestDesign) && <p className="truncate text-[11px] text-slate-500" title={staged[0]?.file.name || latestDesign?.file_name || ''}>
+                            {staged[0]?.file.name || latestDesign?.file_name}{staged.length > 1 ? ` · +${staged.length - 1} files` : ''}
+                          </p>}
+                        </div>
+                        {canEdit && <label className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100 focus-within:ring-2 focus-within:ring-blue-500">
+                          <Upload className="h-3.5 w-3.5" /> {mapped ? 'Add / revise' : 'Add artwork'}
+                          <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" multiple className="sr-only"
+                            disabled={uploadMutation.isPending} onChange={event => { stageDesignFiles(Array.from(event.target.files || []), item.id); event.target.value = ''; }} />
+                        </label>}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
 
-          {uploadMutation.isError && <p className="text-sm text-red-600">{(uploadMutation.error as Error).message}</p>}
+          <section className="rounded-xl border border-slate-200 bg-slate-50/60 p-3 space-y-2" aria-label="New artwork files">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold text-slate-800">New artwork · exact assignment</h3>
+              <span className="text-xs text-slate-500">{stagedFiles.length} file(s)</span>
+            </div>
+            <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp,application/pdf" multiple onChange={handleFilesSelected} className="hidden" />
+            <div onDragOver={event => { event.preventDefault(); setFileDragOver(true); }}
+              onDragLeave={event => { event.preventDefault(); setFileDragOver(false); }}
+              onDrop={event => { event.preventDefault(); setFileDragOver(false); stageDesignFiles(Array.from(event.dataTransfer.files)); }}
+              className={`rounded-lg border border-dashed ${fileDragOver ? 'border-blue-400 bg-blue-50' : 'border-slate-300 bg-white'}`}>
+              <button type="button" disabled={uploadMutation.isPending || uploadEditableItems.length === 0}
+                onClick={() => fileRef.current?.click()}
+                className="flex w-full items-center justify-center gap-2 p-2.5 text-sm font-semibold text-blue-700 disabled:opacity-50">
+                <Upload className="h-4 w-4" /> Add multiple files / drop here
+              </button>
+            </div>
+            {stagingError && <p role="alert" className="text-xs text-amber-700">{stagingError}</p>}
+            {stagedFiles.length === uploadEditableItems.length && stagedFiles.length > 1 && (
+              <button type="button" disabled={uploadMutation.isPending} onClick={assignFilesByMarkingOrder}
+                className="rounded-md border border-blue-200 bg-white px-2.5 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50">
+                Assign files in Work Item order · verify below
+              </button>
+            )}
+            <div className="space-y-2">
+              {stagedFiles.map(entry => (
+                <div key={entry.id} className={`rounded-lg border p-2.5 ${entry.workItemIds.length ? 'border-slate-200 bg-white' : 'border-amber-300 bg-amber-50'}`}>
+                  <div className="flex items-center gap-2">
+                    {entry.previewUrl && entry.file.type.startsWith('image/') ? <img src={entry.previewUrl} alt={`New artwork ${entry.file.name}`} className="h-12 w-12 shrink-0 rounded-md border border-slate-200 object-contain" />
+                      : <FileText className="h-7 w-7 shrink-0 text-slate-400" />}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-slate-800">{designArtworkDisplayName(entry.workItemIds, uploadTask?.items || [], uploadMarkingRefFor)}</p>
+                      <p className="truncate text-xs text-slate-500" title={entry.file.name}>Source: {entry.file.name}</p>
+                    </div>
+                    <button type="button" aria-label={`Remove ${entry.file.name}`} disabled={uploadMutation.isPending}
+                      onClick={() => removeStaged(entry.id)} className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100"><X className="h-4 w-4" /></button>
+                  </div>
+                  {uncoveredEditableItemIds.length > 0 && (
+                    <button type="button" disabled={uploadMutation.isPending}
+                      onClick={() => { const remaining = uncoveredEditableItemIds; setStagedFiles(previous => previous.map(file => file.id === entry.id ? { ...file, workItemIds: [...new Set([...file.workItemIds, ...remaining])] } : file)); }}
+                      className="mt-1.5 rounded-md px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50">
+                      Apply to {uncoveredEditableItemIds.length} unmapped item(s)
+                    </button>
+                  )}
+                  <div className="mt-1.5 flex flex-wrap gap-1.5" role="group" aria-label={`Work items for ${entry.file.name}`}>
+                    {uploadEditableItems.map(item => {
+                      const ref = uploadMarkingRefFor(item.id);
+                      const checked = entry.workItemIds.includes(item.id);
+                      const display = designWorkDisplay(item);
+                      return <label key={item.id} className={`flex cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-xs ${checked ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}>
+                        <input type="checkbox" checked={checked} disabled={uploadMutation.isPending} onChange={() => toggleFileMarking(entry.id, item.id)} className="rounded" />
+                        {display.work} · {display.size}{ref ? ` · M${ref.number}` : ''}
+                      </label>;
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
 
-          <button
-            onClick={() => uploadMutation.mutate()}
-            disabled={uploadMutation.isPending || stagedFiles.length === 0 || ((uploadTask?.items?.length || 0) > 0 && selectedItemIds.size === 0)}
-            className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white font-medium py-3 rounded-lg disabled:opacity-50"
-          >
-            <Upload className="w-5 h-5" />
-            {uploadMutation.isPending
-              ? `Uploading ${uploadProgress ? `${uploadProgress.done}/${uploadProgress.total}` : '...'}`
-              : submitAfterUpload && canSubmitUploadForReview
-                ? `Upload ${stagedFiles.length || ''} & Send for Review`
-                : `Save ${stagedFiles.length || ''} Design File${stagedFiles.length === 1 ? '' : 's'}`}
+          <button type="button" onClick={() => setShowDesignOptions(previous => !previous)} aria-expanded={showDesignOptions}
+            className="flex items-center gap-1 text-sm font-semibold text-blue-700 hover:underline">
+            <ChevronDown className={`h-4 w-4 ${showDesignOptions ? 'rotate-180' : ''}`} /> Artwork source & notes
           </button>
+          {showDesignOptions && <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <Select label="Artwork Source" value={batchSource} onChange={v => setBatchSource(v as 'agency_designed' | 'client_provided')}
+              options={[{ value: 'agency_designed', label: 'Agency artwork' }, { value: 'client_provided', label: 'Company-provided artwork' }]} />
+            <Textarea label="Optional Notes" value={batchNotes} onChange={setBatchNotes} rows={2} placeholder="Revision notes…" />
+          </div>}
+
+          <div className={`rounded-lg border p-3 text-xs ${canSubmitUploadForReview ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+            {stagedFiles.length === 0 && uploadCoverage.ready
+              ? (uploadTask?.status === 'in_review' ? 'All required artwork is mapped and already awaiting review.' : 'All required artwork is already saved. Submit the existing designs without uploading them again.')
+              : uploadMappingError && stagedFiles.length > 0
+                ? uploadMappingError
+                : canSubmitUploadForReview
+                  ? 'All required markings are covered. Upload will submit this shop for review in one action.'
+                  : `${uploadCoverage.missing.length} marking(s) still need artwork. Incomplete work will be saved as a draft.`}
+          </div>
+          {/* No second checkbox or redundant confirmation. The primary action submits
+              only when all required markings have valid artwork coverage; Draft is
+              deliberately available for incomplete or in-progress designs. */}
+          {uploadCoverage.ready && stagedFiles.length === 0 &&
+           uploadTask && ['assigned', 'designing', 'design_ready'].includes(uploadTask.status) && (
+            <button type="button" disabled={updateStatusMutation.isPending}
+              onClick={() => updateStatusMutation.mutate({ row: uploadTask, status: 'in_review' }, { onSuccess: closeUploadModal })}
+              className="w-full rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2.5 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50">
+              <Send className="inline h-4 w-4 mr-1" /> Send existing mapped artwork for review
+            </button>
+          )}
+          {uploadMutation.isError && <p role="alert" className="text-sm text-red-600">{(uploadMutation.error as Error).message}</p>}
+          {uploadMustRefresh && <button type="button" onClick={closeUploadModal} className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700">Close & reload shop</button>}
+          {stagedFiles.length > 0 && <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center">
+            {canSubmitUploadForReview && (
+              <button type="button" onClick={() => uploadMutation.mutate({ submitAfterUpload: false })}
+                disabled={uploadMutation.isPending || uploadMustRefresh || !!uploadMappingError}
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 sm:w-auto">
+                Save draft only
+              </button>
+            )}
+            <button type="button" onClick={() => uploadMutation.mutate({ submitAfterUpload: canSubmitUploadForReview })}
+              disabled={uploadMutation.isPending || uploadMustRefresh || !!uploadMappingError}
+              className="flex w-full flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-3 font-semibold text-white hover:bg-blue-700 disabled:opacity-50">
+              <Upload className="h-4 w-4" /> {uploadMutation.isPending
+                ? `Uploading ${uploadProgress ? `${uploadProgress.done}/${uploadProgress.total}` : '…'}`
+                : canSubmitUploadForReview ? `Upload & Send for Review` : `Save ${stagedFiles.length} mapped artwork file(s) as draft`}
+            </button>
+          </div>}
         </div>
       </Modal>
 

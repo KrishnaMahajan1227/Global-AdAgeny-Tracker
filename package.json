@@ -8,7 +8,8 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.app.json"
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "verify:production-completion": "node scripts/verify-production-completion-fix.mjs"
   },
   "dependencies": {
     "@googlemaps/markerclusterer": "^2.6.2",

@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, ImageOff, Loader2, RotateCcw, ZoomIn } from 'lucide-react';
@@ -34,7 +35,7 @@ function MarkedTile({ photo, markings, items, wide }: { photo: SurveyPhoto; mark
   const hasMarkings = markings.some(m => Array.isArray(m.points) && m.points.length >= 3);
   return <div className="min-w-0">
     <button type="button" className="relative block w-full rounded-lg border border-slate-200 bg-slate-100 overflow-hidden focus-visible:ring-2 focus-visible:ring-blue-500" onClick={() => setExpanded(true)} aria-label="Inspect marked survey photo">
-      <img src={src || photo.photo_url} alt={src ? 'Survey photo with marked boards and dimensions' : 'Survey photo'} className={`w-full ${wide ? 'h-64 sm:h-72' : 'h-48 sm:h-52'} object-contain`} />
+      <SecureImage src={src || photo.photo_url} alt={src ? 'Survey photo with marked boards and dimensions' : 'Survey photo'} className={`w-full ${wide ? 'h-64 sm:h-72' : 'h-48 sm:h-52'} object-contain`} />
       {hasMarkings && !src && !failed && <span className="absolute top-2 left-2 flex items-center gap-1 rounded bg-slate-900/80 px-2 py-1 text-[11px] text-white"><Loader2 className="w-3 h-3 animate-spin" />Rendering markings</span>}
       {failed && <span className="absolute bottom-2 left-2 rounded bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-900">Marked preview unavailable; original shown</span>}
       {src && <span className="absolute top-2 left-2 rounded bg-blue-700 px-2 py-1 text-[11px] font-medium text-white">Marked</span>}
@@ -42,7 +43,7 @@ function MarkedTile({ photo, markings, items, wide }: { photo: SurveyPhoto; mark
     </button>
     {expanded && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 p-4" role="dialog" aria-modal="true" aria-label="Survey photo preview" onClick={() => setExpanded(false)}>
       <button type="button" className="absolute right-4 top-4 rounded bg-white px-3 py-1.5 text-sm font-medium text-slate-900" onClick={() => setExpanded(false)}>Close</button>
-      <img src={src || photo.photo_url} alt="Survey evidence" className="max-h-[85vh] max-w-full object-contain" onClick={e => e.stopPropagation()} />
+      <SecureImage src={src || photo.photo_url} alt="Survey evidence" className="max-h-[85vh] max-w-full object-contain" onClick={e => e.stopPropagation()} />
     </div>}
   </div>;
 }

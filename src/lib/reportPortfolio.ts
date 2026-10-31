@@ -8,6 +8,7 @@ import ExcelJS from 'exceljs';
 import pptxgen from 'pptxgenjs';
 import { itemSizeLabel } from './units';
 import { prepareEvidenceImage, type EvidenceMark, type PreparedEvidence } from './reportImage';
+import { isPrivateStorageUrl } from './secureMedia';
 
 export type PortfolioFormat = 'PDF' | 'PPTX' | 'XLSX';
 export interface PortfolioSources {
@@ -35,6 +36,22 @@ interface ReadySection extends Section { ready: ReadyImage[] }
 
 const val = (v: unknown) => v == null || v === '' ? '—' : String(v);
 const positive = (v: unknown) => Number.isFinite(Number(v)) ? Number(v) : 0;
+/** Unique database rows, preserving the first occurrence and original order. */
+export function uniqueRecords<T extends { id?: string | null }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  return rows.filter((row, index) => {
+    const key = row.id || `no-id:${index}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+/** Never let user-entered text become an executable Excel formula. */
+export function safeWorkbookText(v: unknown): string {
+  const text = val(v);
+  return /^[\s\u0000-\u001f]*[=+@\-]/.test(text) ? `’${text}` : text;
+}
+
 const slug = (v: string) => v.replace(/[^a-z0-9-_]+/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 85);
 const asFilename = (prefix: string, label: string, extension: string) => `${slug(prefix)}-${slug(label)}.${extension}`;
 const itemText = (it: any, stage: 'survey' | 'approved' | 'installed' = 'survey') => {
@@ -44,36 +61,74 @@ const itemText = (it: any, stage: 'survey' | 'approved' | 'installed' = 'survey'
   return `${val(it.work_type_name)} | ${display} | Qty ${val(qty ?? 1)} | ${area == null ? 'Area not recorded' : `${positive(area).toFixed(2)} sq.ft`}${it.material ? ` | ${it.material}` : ''}`;
 };
 const isRaster = (url: string) => !/\.(pdf|docx?|xlsx?|pptx?|zip)(\?|$)/i.test(url);
+function safeExternalUrl(url: string): boolean {
+  try { const parsed = new URL(url); return ['http:','https:'].includes(parsed.protocol) && !parsed.username && !parsed.password; }
+  catch { return false; }
+}
 
 export function buildSections(src: PortfolioSources, kind: string): Section[] {
-  if (kind === 'invoice') return src.invoices.map(inv => ({
-    title: `Invoice ${val(inv.invoice_number)}`, context: [`Client: ${val(inv.clients?.name)}`, `Date: ${val(inv.invoice_date)}`, `Status: ${val(inv.status)}`],
-    evidence: [], links: [], rows: (inv.invoice_items || []).map((it: any) => ({
-      Item: val(it.description), Quantity: positive(it.quantity), Rate: positive(it.rate), Amount: positive(it.amount),
+  if (kind === 'invoice') return uniqueRecords(src.invoices).map(inv => ({
+    title: `Invoice ${val(inv.invoice_number)}`,
+    context: [
+      `Client: ${val(inv.bill_to_name || inv.clients?.name)}`,
+      `Invoice date: ${val(inv.invoice_date)} | Due: ${val(inv.due_date)}`,
+      `Payment: ${val(inv.payment_status)}`,
+      `Subtotal: INR ${positive(inv.subtotal).toFixed(2)} | GST: INR ${positive(inv.tax_amount).toFixed(2)} | Total: INR ${positive(inv.total).toFixed(2)}`,
+      ...(positive(inv.igst_amount) ? [`IGST: INR ${positive(inv.igst_amount).toFixed(2)}`] : [
+        `CGST: INR ${positive(inv.cgst_amount).toFixed(2)} | SGST: INR ${positive(inv.sgst_amount).toFixed(2)}`]),
+    ],
+    evidence: [], links: [], rows: uniqueRecords(inv.invoice_items || []).map((it: any) => ({
+      Item: val(it.description), Quantity: positive(it.quantity), 'Area (sq.ft)': positive(it.area),
+      Rate: positive(it.rate), Amount: positive(it.amount),
     })),
   }));
-  if (kind === 'po-utilization') return [{ title: 'Work Order Utilization', context: [], evidence: [], links: [],
-    rows: src.utilization.map(r => ({ 'Work Order': val(r.po_name || r.po_number), 'Work Type': val(r.work_type_name),
-      Budget: positive(r.budget_quantity), Surveyed: positive(r.surveyed_quantity), Approved: positive(r.approved_quantity), Installed: positive(r.installed_quantity),
-    })) }];
+  if (kind === 'po-utilization') {
+    const seen = new Set<string>();
+    const rows = src.utilization.filter(r=>{
+      const id = String(r.po_line_item_id || r.id || '');
+      if (!id || seen.has(id)) return false;
+      seen.add(id);return true;
+    }).map(r => {
+      const areaBased=r.uom==='sqft';
+      const budget=areaBased ? r.budgeted_area : r.budgeted_qty;
+      const surveyed=areaBased ? r.surveyed_area : r.surveyed_qty;
+      const approved=areaBased ? r.approved_area : r.approved_qty;
+      const installed=areaBased ? r.installed_area : r.installed_qty;
+      const finalized=r.fulfillment_type==='supply_only' ? positive(r.produced_qty) : positive(installed);
+      const billed=positive(r.invoiced_amount);
+      const budgetAmount=budget == null || r.rate == null ? null : positive(budget)*positive(r.rate);
+      return {
+        'Work Order':val(r.po_number), Client:val(r.client_name), 'Work type':val(r.work_type_name || r.description),
+        UOM:val(r.uom), 'Budgeted units':budget == null ? 'Not set' : positive(budget),
+        'Surveyed units':positive(surveyed), 'Approved units':positive(approved),
+        'Produced pieces':positive(r.produced_qty), 'Installed units':positive(installed),
+        'Finalized units':finalized, 'PO rate':r.rate == null ? 'Not set' : positive(r.rate),
+        'Budget value':budgetAmount ?? 'Not set', 'Invoiced value':billed,
+        'Remaining budget value':budgetAmount == null ? 'Not set' : Number((budgetAmount-billed).toFixed(2)),
+        'Variance units':budget == null ? 'Not set' : Number((finalized-positive(budget)).toFixed(2)),
+      };
+    });
+    return [{title:'Work Order Utilization',context:['Budget vs actual work and invoiced amounts; no planned quantity counted as completed.'],evidence:[],links:[],rows}];
+  }
   if (kind === 'vehicle-load-log') return [{ title: 'Vehicle Load Log', context: [], evidence: [], links: [],
-    rows: src.vehicleRows.map(r => ({ Vehicle: val(r.vehicle_number), Driver: val(r.driver_name), Shop: val(r.shop_name),
+    rows: uniqueRecords(src.vehicleRows).map(r => ({ Vehicle: val(r.vehicle_number), Driver: val(r.driver_name), Shop: val(r.shop_name),
       Material: val(r.material), Loaded: positive(r.qty_loaded), Date: val(r.loaded_at),
     })) }];
-  return src.shops.map(shop => {
-    const items = src.workItems.filter(w => w.shop_id === shop.id);
+  return uniqueRecords(src.shops).map(shop => {
+    const items = uniqueRecords(src.workItems.filter(w => w.shop_id === shop.id));
     const byId = new Map<string, any>(items.map(it => [it.id, it]));
     const evidence: Evidence[] = [];
     const linkedItems = new Set<string>();
     const links: { label: string; url: string }[] = [];
-    const includeSurvey = !['installation','ppt-final'].includes(kind);
+    // Final installation decks need both before (survey) and after evidence.
+    const includeSurvey = kind !== 'installation';
     const includeInstall = ['installation','final-report','ppt-final','excel','excel-multi'].includes(kind);
     const includeDesign = ['design-approval','final-report','excel','excel-multi'].includes(kind);
 
     if (includeSurvey) {
-      for (const photo of src.surveyPhotos.filter(p => p.shop_id === shop.id)) {
+      for (const photo of uniqueRecords(src.surveyPhotos.filter(p => p.shop_id === shop.id))) {
         if (!photo.photo_url) throw new Error(`Survey image URL missing for ${shop.name}. Verify the original survey record.`);
-        const marks = src.markings.filter(m => m.survey_photo_id === photo.id && Array.isArray(m.points) && m.points.length >= 3);
+        const marks = uniqueRecords(src.markings.filter(m => m.survey_photo_id === photo.id && Array.isArray(m.points) && m.points.length >= 3));
         const linked = new Set<string>();
         for (const marking of marks) if (marking.work_item_id && byId.has(marking.work_item_id)) linked.add(marking.work_item_id);
         for (const link of src.surveyPhotoItems || []) if (link.survey_photo_id === photo.id && byId.has(link.work_item_id)) linked.add(link.work_item_id);
@@ -97,8 +152,11 @@ export function buildSections(src: PortfolioSources, kind: string): Section[] {
     }
 
     if (includeInstall) {
-      for (const job of src.installations.filter(j => j.shop_id === shop.id)) {
-        for (const proof of job.installation_proofs || []) {
+      const seenProofs = new Set<string>();
+      for (const job of uniqueRecords(src.installations.filter(j => j.shop_id === shop.id))) {
+        for (const proof of uniqueRecords(job.installation_proofs || [])) {
+          if (proof.id && seenProofs.has(proof.id)) continue;
+          if (proof.id) seenProofs.add(proof.id);
           if (!proof.photo_url) throw new Error(`Installation proof image URL missing for ${shop.name}. Verify the original installation record.`);
           const linked = proof.work_item_id && byId.get(proof.work_item_id);
           if (linked) linkedItems.add(proof.work_item_id);
@@ -115,7 +173,7 @@ export function buildSections(src: PortfolioSources, kind: string): Section[] {
 
     if (includeDesign) {
       const itemIds = new Set(items.map(it => it.id));
-      for (const design of src.designVersions) {
+      for (const design of uniqueRecords(src.designVersions)) {
         const related = src.designVersionItems.filter(link => link.design_version_id === design.id && itemIds.has(link.work_item_id));
         if (!related.length || !design.file_url) continue;
         if (!isRaster(design.file_url)) {
@@ -213,7 +271,7 @@ function writeEvidencePdf(pdf: jsPDF, section: ReadySection, opts: PortfolioOpti
     }
   }
   y += 4;
-  if (!section.ready.length && !section.rows.length) {
+  if (!section.ready.length && !section.rows.length && !section.links.length) {
     pdfLabel(pdf, 'No evidence or line items are recorded for this section.', margin, y, 9);
     return;
   }
@@ -268,8 +326,10 @@ function writeEvidencePdf(pdf: jsPDF, section: ReadySection, opts: PortfolioOpti
     for (const link of section.links) {
       if (y + 7 > bottom) header(true);
       const text = link.label.slice(0, 95);
-      pdfLabel(pdf, text, margin + 2, y, 8);
-      pdf.link(margin, y - 4, printableWidth, 5, { url: link.url });
+      pdfLabel(pdf, isPrivateStorageUrl(link.url) ? `${text} - available in AdRoute` : text, margin + 2, y, 8);
+      // A private Supabase URL is not a durable share link. Avoid a broken
+      // or unauthorized click target in offline client documents.
+      if (!isPrivateStorageUrl(link.url) && safeExternalUrl(link.url)) pdf.link(margin, y - 4, printableWidth, 5, { url: link.url });
       y += 5.5;
     }
   }
@@ -285,25 +345,32 @@ async function writeExcel(data: ReadySection[], fileName: string, opts: Portfoli
   const wb = new ExcelJS.Workbook(); wb.creator=opts.organization; wb.created=new Date();
   const summary=wb.addWorksheet('Summary', {views:[{state:'frozen',ySplit:1}]});
   summary.columns=[{header:'Shop / section',key:'shop',width:32},{header:'Client / Scope',key:'context',width:65},{header:'Work items',key:'items',width:14},{header:'Evidence',key:'evidence',width:13}];
-  for(const s of data)summary.addRow({shop:s.title,context:s.context.join(' | '),items:s.rows.length,evidence:s.ready.length});
+  for(const s of data)summary.addRow({shop:safeWorkbookText(s.title),context:safeWorkbookText(s.context.join(' | ')),items:s.rows.length,evidence:s.ready.length});
   const details=wb.addWorksheet('Work items',{views:[{state:'frozen',ySplit:1}]});
   const headings=Array.from(new Set(data.flatMap(s=>s.rows.flatMap(r=>Object.keys(r)))));
   details.columns=[{header:'Shop',key:'Shop',width:30},...headings.map(k=>({header:k,key:k,width:k==='Measurements'?28:22}))];
-  for(const s of data)for(const row of s.rows)details.addRow({Shop:s.title,...row});
+  for(const s of data)for(const row of s.rows)details.addRow(Object.fromEntries(Object.entries({Shop:s.title,...row}).map(([k,v])=>[k,typeof v==='string'?safeWorkbookText(v):v])));
   const ev=wb.addWorksheet('Evidence',{views:[{state:'frozen',ySplit:1}]});
   ev.columns=[{header:'Shop',key:'shop',width:28},{header:'Evidence type',key:'type',width:30},{header:'Marked photo / proof',key:'picture',width:57},{header:'Linked measurements and work item',key:'details',width:72},{header:'Open full-size image',key:'url',width:32}];
   for(const s of data) for(const e of s.ready){
-    const row=ev.addRow({shop:s.title,type:e.entry.type,details:e.entry.lines.join('\n') || 'No linked measurement',url:'Open image'});
+    const privateFile = isPrivateStorageUrl(e.entry.url);
+    const row=ev.addRow({shop:safeWorkbookText(s.title),type:safeWorkbookText(e.entry.type),details:safeWorkbookText(e.entry.lines.join('\n') || 'No linked measurement'),url:privateFile?'Embedded image (private source)':'Open image'});
     row.height=185; row.getCell(4).alignment={wrapText:true,vertical:'middle'};
-    row.getCell(5).value={text:'View full-size source image',hyperlink:e.entry.url};
-    row.getCell(5).font={color:{argb:'FF1762AA'},underline:true};
+    if (!privateFile && safeExternalUrl(e.entry.url)) {
+      row.getCell(5).value={text:'Open original image',hyperlink:e.entry.url};
+      row.getCell(5).font={color:{argb:'FF1762AA'},underline:true};
+    }
     const imageId=wb.addImage({base64:e.image.dataUrl.split(',')[1],extension:'jpeg'});
     // One embedded marked image for every evidence row — links are supplementary.
     ev.addImage(imageId,{tl:{col:2.05,row:row.number-0.92},br:{col:2.93,row:row.number-0.03},editAs:'oneCell'});
   }
   const design=wb.addWorksheet('Linked design files');
   design.columns=[{header:'Shop',key:'shop',width:35},{header:'File',key:'file',width:45},{header:'Open',key:'link',width:45}];
-  for(const s of data)for(const link of s.links){const row=design.addRow({shop:s.title,file:link.label,link:'Open design file'});row.getCell(3).value={text:'Open design file',hyperlink:link.url};}
+  for(const s of data)for(const link of s.links){
+    const privateFile=isPrivateStorageUrl(link.url);
+    const row=design.addRow({shop:safeWorkbookText(s.title),file:safeWorkbookText(link.label),link:privateFile?'Private — open in AdRoute':'Open design file'});
+    if (!privateFile && safeExternalUrl(link.url)) row.getCell(3).value={text:'Open design file',hyperlink:link.url};
+  }
   for(const sheet of [summary,details,ev,design]){
     sheet.getRow(1).font={bold:true,color:{argb:'FFFFFFFF'}};
     sheet.getRow(1).fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF223B61'}};
@@ -341,9 +408,13 @@ async function writePpt(data: ReadySection[], fileName: string, opts: PortfolioO
     overview.addText(`${opts.kind.replace(/-/g,' ')}  |  ${opts.period}`,{x:8,y:.2,w:4.9,h:.3,fontSize:9,color:'E2E8F0',align:'right'});
     overview.addText(sec.title,{x:.5,y:1,w:12.3,h:.55,fontSize:24,bold:true,color:'172B4D'});
     overview.addText(sec.context.join('    |    '),{x:.5,y:1.68,w:12.2,h:.8,fontSize:12,color:'52657B',breakLine:false});
+    if(sec.links.length) {
+      const descriptions=sec.links.map(link=>isPrivateStorageUrl(link.url) ? `${link.label} — open from authorized AdRoute account` : `${link.label} — external file`);
+      overview.addText(descriptions.join('\n').slice(0,1200),{x:.5,y:2.28,w:12.2,h:.35,fontSize:9,color:'52657B',breakLine:false,fit:'shrink'} as any);
+    }
     if(sec.rows.length){
       const headers=Object.keys(sec.rows[0]);
-      const perSlide=13;
+      const perSlide=9;
       for(let start=0;start<sec.rows.length;start+=perSlide){
         const slide=start?ppt.addSlide():overview;
         if(start){slide.addText(`${sec.title} — items (continued)`,{x:.5,y:.4,w:12.4,h:.45,fontSize:19,bold:true,color:'172B4D'});}
@@ -364,7 +435,7 @@ async function writePpt(data: ReadySection[], fileName: string, opts: PortfolioO
         const frame=contain(card.image,x+.22,1.76,5.58,3.42);
         slide.addImage({data:card.image.dataUrl,...frame});
         const details=card.entry.lines.join('\n')||'No linked measurements recorded';
-        slide.addText(details,{x:x+.18,y:5.32,w:5.65,h:1.45,fontSize:10,color:'364B62',margin:.02,
+        slide.addText(details,{x:x+.18,y:5.32,w:5.65,h:1.55,fontSize:9,color:'364B62',margin:.02,
           valign:'top',breakLine:false,fit:'shrink'} as any);
       }
     }

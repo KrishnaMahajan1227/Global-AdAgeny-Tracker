@@ -98,7 +98,7 @@ export default function AdminLayout() {
     { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts || isClientManager, badge: pendingCounts?.clientRequests },
     { to: '/survey-review', label: 'Survey Review', icon: FileCheck, show: isAdmin, badge: pendingCounts?.survey },
     { to: '/design', label: 'Design Queue', icon: Palette, show: isOwner || profile?.role === 'admin' || isDesigner, badge: (isOwner || profile?.role === 'admin' || isDesigner) ? pendingCounts?.design : undefined },
-    { to: '/production', label: 'Production', icon: Printer, show: isAdmin || isProduction, badge: (isAdmin || isProduction) ? pendingCounts?.production : undefined },
+    { to: '/production', label: 'Production', icon: Printer, show: isOwner || profile?.role === 'admin' || isProduction, badge: (isOwner || profile?.role === 'admin' || isProduction) ? pendingCounts?.production : undefined },
     { to: '/installation-review', label: 'Installation Review', icon: ClipboardCheck, show: isAdmin, badge: pendingCounts?.installation },
     { to: '/field-map', label: 'Live Field Map', icon: MapIcon, show: isAdmin },
     { to: '/route-planning', label: 'Route Planning', icon: RouteIcon, show: isAdmin },
@@ -125,7 +125,11 @@ export default function AdminLayout() {
     try {
       const parsed = JSON.parse(sessionStorage.getItem(key) || '[]');
       if (Array.isArray(parsed)) previous = parsed.filter((p: any) =>
-        typeof p?.path === 'string' && p.path.startsWith('/') && !/^\/(campaigns|projects)(\/|\?|$)/.test(p.path) && typeof p.label === 'string');
+        typeof p?.path === 'string' && p.path.startsWith('/') &&
+        !/^\/(campaigns|projects)(\/|\?|$)/.test(p.path) &&
+        (navItems.some(item => p.path.split('?')[0] === item.to) ||
+          (p.path.startsWith('/shops') && navItems.some(item => item.to==='/purchase-orders'))) &&
+        typeof p.label === 'string');
     } catch { /* Storage may be unavailable; navigation still works. */ }
     const next = [...previous.filter(p => p.path.split('?')[0] !== location.pathname),
       { path: currentPath, label }].slice(-3);

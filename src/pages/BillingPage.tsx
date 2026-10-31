@@ -1,3 +1,4 @@
+import { SecureAnchor } from '@/lib/secureMedia';
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { fetchAllPages } from '@/lib/paginatedQuery';
@@ -78,6 +79,7 @@ function inferBasis(item: { quantity: number; area: number | null; rate: number;
 export default function BillingPage() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
+  const canPostInvoices = ['agency_owner', 'admin', 'accounts'].includes(profile?.role || '');
   const queryClient = useQueryClient();
   const [billingUrlParams, setBillingUrlParams] = useSearchParams();
   const [billingDeepLinkError, setBillingDeepLinkError] = useState('');
@@ -412,64 +414,26 @@ export default function BillingPage() {
       }
       const { subtotal, taxRate, taxAmount, total, cgstRate, cgstAmount, sgstRate, sgstAmount, igstRate, igstAmount } = computeTotals(items);
 
-      const invNumber = `INV-${Date.now().toString().slice(-6)}`;
-
-      const { data: inv, error } = await supabase.from('invoices').insert({
-        organization_id: orgId,
-        client_id: form.client_id,
-        project_id: form.project_id || null,
-        purchase_order_id: form.purchase_order_id || null,
-        invoice_number: invNumber,
-        invoice_date: form.invoice_date,
-        due_date: form.due_date || null,
-        subtotal,
-        tax_rate: taxRate,
-        tax_amount: taxAmount,
-        cgst_rate: cgstRate,
-        cgst_amount: cgstAmount,
-        sgst_rate: sgstRate,
-        sgst_amount: sgstAmount,
-        igst_rate: igstRate,
-        igst_amount: igstAmount,
-        total,
-        payment_status: 'unpaid',
-        notes: form.notes || null,
-        terms: form.terms || null,
-        bill_to_name: form.bill_to_name || null,
+      // Single PostgreSQL transaction. The server locks this Work Order,
+      // revalidates all work-item allocations and generates a collision-safe
+      // invoice number. No orphan headers, partial lines or double billing.
+      const header = {
+        client_id: form.client_id, project_id: form.project_id || null,
+        purchase_order_id: form.purchase_order_id,
+        invoice_date: form.invoice_date, due_date: form.due_date || null,
+        subtotal, cgst_rate: cgstRate, sgst_rate: sgstRate,
+        igst_rate: igstRate, total, notes: form.notes || null,
+        terms: form.terms || null, bill_to_name: form.bill_to_name || null,
         bill_to_address: form.bill_to_address || null,
-        bill_to_city: form.bill_to_city || null,
-        bill_to_state: form.bill_to_state || null,
+        bill_to_city: form.bill_to_city || null, bill_to_state: form.bill_to_state || null,
         bill_to_gst: form.bill_to_gst || null,
-      }).select().single();
+      };
+      const { data: invoiceId, error: saveError } = await supabase.rpc('billing_save_invoice', {
+        p_header: header, p_items: items, p_existing_invoice: null,
+      });
+      if (saveError || !invoiceId) throw saveError || new Error('Invoice was not saved.');
+      return { id: invoiceId };
 
-      if (error) throw error;
-
-      // Insert all invoice lines with their original shop and work-item links.
-      // Roll back only this newly-created invoice if the line insert fails.
-      const { error: itemError } = await supabase.from('invoice_items').insert(items.map(item => ({
-        organization_id: orgId,
-        invoice_id: inv.id,
-        description: item.description,
-        quantity: item.quantity,
-        area: item.area,
-        rate: item.rate,
-        amount: item.amount,
-        po_line_item_id: item.po_line_item_id,
-        shop_id: item.shop_id,
-        work_item_id: item.work_item_id,
-        hsn_code: item.hsn_code,
-        notes: item.notes,
-      })));
-      if (itemError) {
-        await supabase.from('invoices').delete().eq('id', inv.id).eq('organization_id', orgId);
-        throw itemError;
-      }
-      // Do not change a shop's operational stage to "billed". Installation
-      // and dispatch status remain authoritative; invoice_items track billing.
-      // Historical shop statuses are left untouched.
-
-      await logAudit('invoices', inv.id, 'insert', null, null, null, `Created invoice ${invNumber} for ${total}`);
-      return inv;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['invoices', orgId] });
@@ -504,54 +468,27 @@ export default function BillingPage() {
       if (items.length === 0) throw new Error('Add at least one line item with a description and rate.');
       const { subtotal, taxRate, taxAmount, total, cgstRate, cgstAmount, sgstRate, sgstAmount, igstRate, igstAmount } = computeTotals(items);
 
-      const { error: updateError } = await supabase.from('invoices').update({
-        client_id: form.client_id,
-        project_id: form.project_id || null,
-        purchase_order_id: form.purchase_order_id || null,
-        invoice_date: form.invoice_date,
-        due_date: form.due_date || null,
-        subtotal,
-        tax_rate: taxRate,
-        tax_amount: taxAmount,
-        cgst_rate: cgstRate,
-        cgst_amount: cgstAmount,
-        sgst_rate: sgstRate,
-        sgst_amount: sgstAmount,
-        igst_rate: igstRate,
-        igst_amount: igstAmount,
-        total,
-        notes: form.notes || null,
-        terms: form.terms || null,
-        bill_to_name: form.bill_to_name || null,
-        bill_to_address: form.bill_to_address || null,
-        bill_to_city: form.bill_to_city || null,
-        bill_to_state: form.bill_to_state || null,
-        bill_to_gst: form.bill_to_gst || null,
-      }).eq('id', editingInvoiceId);
-      if (updateError) throw updateError;
-
-      const { error: deleteError } = await supabase.from('invoice_items').delete().eq('invoice_id', editingInvoiceId);
-      if (deleteError) throw deleteError;
-
-      for (const item of items) {
-        const { error: itemError } = await supabase.from('invoice_items').insert({
-          organization_id: orgId,
-          invoice_id: editingInvoiceId,
-          description: item.description,
-          quantity: item.quantity,
-          area: item.area,
-          rate: item.rate,
-          amount: item.amount,
-          po_line_item_id: item.po_line_item_id,
-          shop_id: item.shop_id,
-          work_item_id: item.work_item_id,
-          hsn_code: item.hsn_code,
-          notes: item.notes,
-        });
-        if (itemError) throw itemError;
+      // Update header and ALL lines atomically. The server refuses edits to
+      // paid/part-paid invoices and prevents moving a bill to another PO.
+      if (editingSourceInvoice?.payment_status !== 'unpaid') {
+        throw new Error('Only unpaid invoices can be revised. Use accounting reconciliation for settled/part-paid invoices.');
       }
-
-      await logAudit('invoices', editingInvoiceId, 'update', null, null, null, `Edited invoice — new total ${total}`);
+      const { error: saveError } = await supabase.rpc('billing_save_invoice', {
+        p_existing_invoice: editingInvoiceId,
+        p_header: {
+          client_id: form.client_id, project_id: form.project_id || null,
+          purchase_order_id: form.purchase_order_id,
+          invoice_date: form.invoice_date, due_date: form.due_date || null,
+          subtotal, cgst_rate: cgstRate, sgst_rate: sgstRate,
+          igst_rate: igstRate, total, notes: form.notes || null,
+          terms: form.terms || null, bill_to_name: form.bill_to_name || null,
+          bill_to_address: form.bill_to_address || null,
+          bill_to_city: form.bill_to_city || null, bill_to_state: form.bill_to_state || null,
+          bill_to_gst: form.bill_to_gst || null,
+        },
+        p_items: items,
+      });
+      if (saveError) throw saveError;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['invoices', orgId] });
@@ -589,9 +526,8 @@ export default function BillingPage() {
 
   const updatePaymentStatus = useMutation({
     mutationFn: async ({ inv, status }: { inv: Invoice; status: string }) => {
-      const { error: paymentError } = await supabase.from('invoices').update({ payment_status: status }).eq('id', inv.id).eq('organization_id', orgId);
+      const { error: paymentError } = await supabase.rpc('billing_set_payment_status', { p_invoice_id: inv.id, p_status: status });
       if (paymentError) throw paymentError;
-      await logAudit('invoices', inv.id, 'update', 'payment_status', inv.payment_status, status, `Payment status changed to ${status}`);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['invoices', orgId] });
@@ -682,7 +618,13 @@ export default function BillingPage() {
   // completed work automatically. Never post an invoice without review.
   useEffect(() => {
     const deepLinkPoId = billingUrlParams.get('po');
-    if (billingUrlParams.get('create') !== '1' || !deepLinkPoId || !purchaseOrders || !clients) return;
+    if (billingUrlParams.get('create') !== '1') return;
+    if (!canPostInvoices) {
+      setBillingDeepLinkError('Your role can view permitted billing records but cannot create invoices.');
+      setBillingUrlParams(current => { const next = new URLSearchParams(current); next.delete('create'); return next; }, { replace: true });
+      return;
+    }
+    if (!deepLinkPoId || !purchaseOrders || !clients) return;
     const po = purchaseOrders.find(row => row.id === deepLinkPoId);
     if (po) {
       const client = clients.find(row => row.id === po.client_id);
@@ -703,7 +645,7 @@ export default function BillingPage() {
       setBillingDeepLinkError('This Work Order is no longer available for invoicing.');
     }
     setBillingUrlParams(current => { const next = new URLSearchParams(current); next.delete('create'); return next; }, { replace: true });
-  }, [billingUrlParams, setBillingUrlParams, purchaseOrders, clients]);
+  }, [billingUrlParams, setBillingUrlParams, purchaseOrders, clients, canPostInvoices]);
 
   // Picking a PO line item autofills description + rate + HSN code from
   // the budget row (owner can still edit all three after) and remembers
@@ -738,6 +680,7 @@ export default function BillingPage() {
   }
 
   function openCreateModal() {
+    if (!canPostInvoices) { setBillingDeepLinkError('You do not have permission to post invoices.'); return; }
     setConfirmPost(false);
     setSelectedShopIds([]);
     setInitializedPO('');
@@ -748,6 +691,9 @@ export default function BillingPage() {
   }
 
   function openEditModal(inv: any) {
+    if (!canPostInvoices || inv.payment_status !== 'unpaid') {
+      setBillingDeepLinkError('Only authorized accounts staff may revise an unpaid invoice.'); return;
+    }
     setEditingInvoiceId(inv.id);
     setForm({
       client_id: inv.client_id || '',
@@ -858,9 +804,9 @@ export default function BillingPage() {
           <h1 className="text-lg font-semibold tracking-tight text-slate-900">Billing</h1>
           <p className="text-xs text-slate-500">Work Order invoices · completed work only</p>
         </div>
-        <button type="button" onClick={openCreateModal} className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600">
+        {canPostInvoices && <button type="button" onClick={openCreateModal} className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600">
           <Plus className="h-3.5 w-3.5" /> New invoice
-        </button>
+        </button>}
       </div>
 
       {billingDeepLinkError && <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900"><span>{billingDeepLinkError}</span><button type="button" onClick={() => setBillingDeepLinkError('')} className="rounded border border-amber-300 px-2 py-1 font-medium">Dismiss</button></div>}
@@ -917,7 +863,7 @@ export default function BillingPage() {
               <div className="min-w-0"><p className="truncate text-xs font-medium text-slate-800">{inv.purchase_orders?.name || inv.purchase_orders?.po_number || 'No Work Order'}</p><p className="truncate text-[11px] text-slate-500">{inv.purchase_orders?.po_number && inv.purchase_orders?.name ? `${inv.purchase_orders.po_number} · ` : ''}{inv.bill_to_name || inv.clients?.name || 'Client'}</p></div>
               <span className="hidden text-xs text-slate-500 lg:block">{new Date(inv.invoice_date).toLocaleDateString('en-IN')}</span>
               <span className="text-xs font-semibold tabular-nums text-slate-900 lg:text-right">₹{Number(inv.total || 0).toLocaleString('en-IN')}</span>
-              <select aria-label={`Payment status for ${inv.invoice_number}`} value={inv.payment_status} disabled={updatePaymentStatus.isPending} onChange={e=>updatePaymentStatus.mutate({inv,status:e.target.value})} className="w-fit max-w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700">
+              <select aria-label={`Payment status for ${inv.invoice_number}`} value={inv.payment_status} disabled={updatePaymentStatus.isPending || !canPostInvoices || inv.payment_status === 'paid'} onChange={e=> { const status=e.target.value; if ((status==='paid' || status==='partial') && !window.confirm(`Set ${inv.invoice_number} to ${status}? This change is audit-logged and paid invoices are locked.`)) { e.currentTarget.value=inv.payment_status; return; } updatePaymentStatus.mutate({inv,status}); }} className="w-fit max-w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700">
                 <option value="unpaid">Unpaid</option><option value="partial">Partial</option><option value="paid">Paid</option><option value="overdue">Overdue</option>
               </select>
               <div className="flex items-center justify-end gap-1.5">
@@ -926,7 +872,7 @@ export default function BillingPage() {
                 <details className="relative group open:z-30">
                   <summary className="flex cursor-pointer list-none items-center rounded-md border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-blue-500" aria-label={`More actions for ${inv.invoice_number}`}><MoreHorizontal className="h-3.5 w-3.5" /></summary>
                   <div className="absolute right-0 top-full z-20 mt-1 min-w-[168px] rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
-                    <button type="button" disabled={inv.payment_status === 'paid'} onClick={()=>openEditModal(inv)} className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-40"><Pencil className="h-3.5 w-3.5"/> Edit invoice</button>
+                    <button type="button" disabled={inv.payment_status !== 'unpaid' || !canPostInvoices} onClick={()=>openEditModal(inv)} className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-40"><Pencil className="h-3.5 w-3.5"/> Edit invoice</button>
                     {canArchiveInvoice && inv.payment_status === 'unpaid' && <button type="button" onClick={()=>{setDeleteConfirmation('');deleteInvoiceMutation.reset();setDeleteTarget(inv);}} className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-red-700 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" /> Archive & remove</button>}
                     {inv.payment_status !== 'unpaid' && <p className="px-2.5 py-1 text-[11px] text-slate-500">Issued/settled invoices require accounts review.</p>}
                   </div>
@@ -945,10 +891,10 @@ export default function BillingPage() {
       {/* Create / Edit Invoice Modal */}
       <Modal open={modalOpen} onClose={() => { setModalOpen(false); setEditingInvoiceId(null); }} title={isEditing ? `Edit Invoice ${editingSourceInvoice?.invoice_number || ''}` : 'Create Invoice'} size="xl">
         <div className="space-y-4">
-          {isEditing && editingSourceInvoice?.payment_status === 'paid' && (
+          {isEditing && editingSourceInvoice?.payment_status !== 'unpaid' && (
             <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
               <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>This invoice is already marked <strong>Paid</strong>. You can still edit it, but double-check with accounts before changing amounts on a settled invoice.</span>
+              <span>This invoice has payments or has been settled. Financial line edits are locked; use accounting reconciliation instead.</span>
             </div>
           )}
 
@@ -980,7 +926,7 @@ export default function BillingPage() {
                     <div role="status" className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                       <p className="font-semibold">{needsReconciliation.length} completed shop(s) require measurement / Work Order linkage verification.</p>
                       <p className="mt-1">A completed shop counts toward delivery progress, but its quantity is not invented for billing. Record the finished PO work item and its installed quantity or area before invoicing.</p>
-                      <a className="mt-1.5 inline-flex rounded-md px-2 py-1 font-semibold text-blue-700 underline hover:bg-white focus-visible:ring-2 focus-visible:ring-blue-500" href={`/shops?po=${encodeURIComponent(selectedPO.id)}`}>Review these shops in existing Shops screen →</a>
+                      <SecureAnchor className="mt-1.5 inline-flex rounded-md px-2 py-1 font-semibold text-blue-700 underline hover:bg-white focus-visible:ring-2 focus-visible:ring-blue-500" href={`/shops?po=${encodeURIComponent(selectedPO.id)}`}>Review these shops in existing Shops screen →</SecureAnchor>
                     </div>
                   )}
                   {!poRatesLoading && !poRatesError && poRates.length === 0 &&
@@ -1345,9 +1291,9 @@ export default function BillingPage() {
           )}
           {viewInvoice && (
             <div className="flex gap-2">
-              <button onClick={() => openEditModal(viewInvoice)} className="flex-1 flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-lg">
+              {canPostInvoices && viewInvoice.payment_status === 'unpaid' && <button onClick={() => openEditModal(viewInvoice)} className="flex-1 flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-lg">
                 <Pencil className="w-4 h-4" /> Edit
-              </button>
+              </button>}
               <button onClick={() => downloadInvoice(viewInvoice)} className="flex-1 flex items-center justify-center gap-2 bg-slate-900 text-white font-medium py-2.5 rounded-lg">
                 <Download className="w-4 h-4" /> Download PDF
               </button>

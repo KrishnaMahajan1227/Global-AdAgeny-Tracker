@@ -17,6 +17,7 @@ const m={exports:{}};
 const fakeRequire=(name)=>{
   if(name==='./units')return {itemSizeLabel:(item)=>item.size||'10 ft x 6 in'};
   if(name==='./reportImage')return {prepareEvidenceImage:async()=>({dataUrl:'data:image/jpeg;base64,YQ==',width:100,height:50})};
+  if(name==='./secureMedia')return {isPrivateStorageUrl:(url)=>String(url).includes('/storage/v1/object/')};
   if(name==='jspdf')return {jsPDF:class{}};
   if(name==='jspdf-autotable')return {default:()=>{}};
   if(name==='exceljs')return {default:class{}};

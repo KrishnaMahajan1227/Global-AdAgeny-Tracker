@@ -1,8 +1,15 @@
 /** Evidence loading for document exports. Never silently drop photographic proof. */
 import { supabase } from './supabase';
+import { isPrivateStorageUrl } from './secureMedia';
 import { renderMarkedImage, toJpegDataUrl, type MarkPoint } from './markingUtils';
 
 const blobCache = new Map<string, Promise<string>>();
+// Clear all decrypted evidence when a session ends or switches identities.
+let lastIdentity: string | null = null;
+supabase.auth.onAuthStateChange((_event, session) => {
+  const next = session?.user?.id || null;
+  if (next !== lastIdentity) { blobCache.clear(); lastIdentity = next; }
+});
 const STORAGE_PATTERN = /\/storage\/v1\/object\/(?:public|sign|authenticated)\/([^/?#]+)\/([^?#]+)/;
 
 async function toDataUrl(blob: Blob): Promise<string> {
@@ -19,7 +26,15 @@ async function toDataUrl(blob: Blob): Promise<string> {
  */
 export async function loadEvidenceDataUrl(src: string): Promise<string> {
   if (!src) throw new Error('Missing evidence URL');
-  const cached = blobCache.get(src);
+  // Isolate in-memory proof bytes by authenticated identity: switching account
+  // in the same browser must never reuse a prior user's private image cache.
+  let cacheKey = src;
+  if (isPrivateStorageUrl(src)) {
+    const { data: identity, error: authError } = await supabase.auth.getUser();
+    if (authError || !identity.user) throw new Error('Sign in to export private evidence');
+    cacheKey = `${identity.user.id}:${src}`;
+  }
+  const cached = blobCache.get(cacheKey);
   if (cached) return cached;
   const p = (async () => {
     if (src.startsWith('data:image/')) return src;
@@ -40,8 +55,8 @@ export async function loadEvidenceDataUrl(src: string): Promise<string> {
       return toDataUrl(data);
     }
   })();
-  blobCache.set(src, p);
-  try { return await p; } catch (error) { blobCache.delete(src); throw error; }
+  blobCache.set(cacheKey, p);
+  try { return await p; } catch (error) { blobCache.delete(cacheKey); throw error; }
 }
 
 export type EvidenceMark = { points: MarkPoint[]; label: string };

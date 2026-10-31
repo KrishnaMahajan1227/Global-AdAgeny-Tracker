@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useRef, useState } from 'react';
 import { Undo2, RotateCcw } from 'lucide-react';
 import type { MarkPoint } from '@/lib/markingUtils';
@@ -92,7 +93,7 @@ export function BoardMarkerCanvas({ photoUrl, points, onChange, label, polygonLa
         // the edge doesn't also fight the page into scrolling underneath it.
         style={{ touchAction: dragIndex !== null ? 'none' : 'pan-y' }}
       >
-        <img src={photoUrl} alt="Mark board" className="w-full pointer-events-none" draggable={false} />
+        <SecureImage src={photoUrl} alt="Mark board" className="w-full pointer-events-none" draggable={false} />
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 w-full h-full pointer-events-none">
           {otherPointsSets.filter((set) => set.length >= 3).map((set, index) => (
             <polygon key={`other-${index}`} points={set.map((p) => `${p.x},${p.y}`).join(' ')} fill="rgba(148,163,184,.12)" stroke="#64748b" strokeDasharray="2 1" strokeWidth="0.55" vectorEffect="non-scaling-stroke" />

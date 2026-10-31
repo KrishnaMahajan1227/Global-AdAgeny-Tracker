@@ -5,19 +5,20 @@
 // what size the image is later rendered/exported at.
 
 import { formatDim } from './units';
+import { resolveSecureUrl } from './secureMedia';
 
 export type MarkPoint = { x: number; y: number };
 
 export function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
+  return resolveSecureUrl(src).then(safeSrc => new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image();
     // Needed so canvas.toDataURL() doesn't throw for cross-origin Supabase
     // Storage URLs (the buckets are public, so this just enables canvas read).
     img.crossOrigin = 'anonymous';
     img.onload = () => resolve(img);
     img.onerror = reject;
-    img.src = src;
-  });
+    img.src = safeSrc;
+  }));
 }
 
 const POLYGON_COLORS = ['#2563eb', '#16a34a', '#d97706', '#db2777', '#7c3aed', '#0891b2'];
@@ -232,7 +233,9 @@ export function numberMarkingsByPhoto<T extends MarkingRef>(
 /** Fetches any image URL (remote or data URL) and returns it as a data URL — needed because jsPDF/pptxgenjs need base64, not remote URLs. */
 export async function toDataUrl(src: string): Promise<string> {
   if (src.startsWith('data:')) return src;
-  const res = await fetch(src);
+  const safeSrc = await resolveSecureUrl(src);
+  const res = await fetch(safeSrc);
+  if (!res.ok) throw new Error('Unable to load authorized evidence');
   const blob = await res.blob();
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

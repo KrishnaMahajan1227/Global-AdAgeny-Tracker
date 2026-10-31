@@ -12,7 +12,8 @@
     "verify:production-completion": "node scripts/verify-production-completion-fix.mjs && node scripts/verify-owner-dashboard-demo.cjs",
     "verify:release": "node scripts/check-syntax.cjs && node scripts/verify-runtime-jsx-symbols.cjs && node scripts/verify-campaign-removal.cjs && node scripts/verify-production-completion-fix.mjs && node scripts/verify-owner-dashboard-demo.cjs",
     "verify:deployment": "node scripts/verify-live-release.cjs",
-    "verify:dist": "node scripts/verify-dist-release.cjs"
+    "verify:dist": "node scripts/verify-dist-release.cjs",
+    "verify:security": "node scripts/check-syntax.cjs && node scripts/verify-security-release.cjs && node scripts/verify-phase7-security.cjs"
   },
   "dependencies": {
     "@googlemaps/markerclusterer": "^2.6.2",

@@ -1,3 +1,4 @@
+import { SecureImage, SecureAnchor } from '@/lib/secureMedia';
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
@@ -652,12 +653,12 @@ function KpiTile({ icon: Icon, label, value, iconClass, color }: { icon: LucideI
 function ProofThumb({ url, shopName, shopCity }: { url: string; shopName?: string; shopCity?: string | null }) {
   const [failed, setFailed] = useState(false);
   return (
-    <a href={url} target="_blank" rel="noreferrer" className="group block">
+    <SecureAnchor href={url} target="_blank" rel="noreferrer" className="group block">
       <div className="aspect-square rounded-lg overflow-hidden border border-slate-200 bg-slate-50 flex items-center justify-center">
         {failed ? (
           <ImageOff className="w-5 h-5 text-slate-300" />
         ) : (
-          <img
+          <SecureImage
             src={url}
             alt={shopName || 'Installed site'}
             className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
@@ -667,7 +668,7 @@ function ProofThumb({ url, shopName, shopCity }: { url: string; shopName?: strin
       </div>
       <p className="text-[11px] font-medium text-slate-700 truncate mt-1.5">{shopName || 'Site'}</p>
       <p className="text-[10px] text-slate-400 truncate mt-0.5">{shopCity || '—'}</p>
-    </a>
+    </SecureAnchor>
   );
 }
 

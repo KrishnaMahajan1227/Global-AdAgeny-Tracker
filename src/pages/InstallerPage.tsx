@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { FieldNavigation } from '@/components/FieldNavigation';
 import { offlineDb, pendingInstallationPhotos, newLocalId, type PendingInstallationPhoto } from '@/lib/offlineDb';
 import { syncInstallationPhoto, syncInstallationPhotos, isInstallationPhotoSyncing, loadInstallationProofs } from '@/lib/installationSync';
@@ -167,7 +168,7 @@ function InstallationSubmissionViewer({ shopId, onExit }: { shopId: string; onEx
                   <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">{itemProofs.length} photo{itemProofs.length === 1 ? '' : 's'}</span>
                 </div>
                 {!!item.notes && <p className="mt-2 text-xs text-slate-600">{item.notes}</p>}
-                {itemProofs.length > 0 && <div className="mt-3 grid grid-cols-3 gap-2">{itemProofs.map((p) => <div key={p.id} className="aspect-[4/3] overflow-hidden rounded-xl bg-slate-100"><img src={p.photo_url} alt="Installation proof" className="h-full w-full object-contain" /></div>)}</div>}
+                {itemProofs.length > 0 && <div className="mt-3 grid grid-cols-3 gap-2">{itemProofs.map((p) => <div key={p.id} className="aspect-[4/3] overflow-hidden rounded-xl bg-slate-100"><SecureImage src={p.photo_url} alt="Installation proof" className="h-full w-full object-contain" /></div>)}</div>}
               </div>;
             })}
           </div>
@@ -1247,8 +1248,8 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
             <div className="flex items-start justify-between gap-2"><div className="min-w-0"><h2 className="text-sm font-semibold text-slate-900">{index + 1}. {item?.work_type_name || item?.material || 'Installation proof'}</h2><p className="mt-1 text-xs text-slate-500">{item ? `${itemSizeLabel(item)} · Qty ${item.approved_quantity || 1}` : 'Submitted installation evidence'}</p></div><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${saved ? 'bg-emerald-50 text-emerald-700' : local ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-800'}`}>{saved ? 'Saved' : local ? 'Queued' : 'Redo'}</span></div>
             {c.note && <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900"><strong>Reviewer feedback:</strong> {c.note}</p>}
             {refPhotos.length > 0 && <div className="mt-3"><p className="mb-2 text-xs font-semibold text-slate-600">Approved marked survey reference</p><MarkedPhotoGrid photos={refPhotos} markings={refMarks} workItems={approvedItems} /></div>}
-            {originalProof?.url && <div className="mt-3"><p className="mb-2 text-xs font-semibold text-slate-600">Previous installation proof</p><img src={originalProof.url} alt="Previously submitted installation proof" className="h-40 w-full rounded-lg bg-slate-100 object-contain" /></div>}
-            {local && <div className="mt-3"><p className="mb-2 text-xs font-semibold text-blue-700">Replacement waiting to sync</p><img src={String(local.payload.dataUrl)} alt="Saved replacement proof" className="h-40 w-full rounded-lg bg-slate-100 object-contain" /></div>}
+            {originalProof?.url && <div className="mt-3"><p className="mb-2 text-xs font-semibold text-slate-600">Previous installation proof</p><SecureImage src={originalProof.url} alt="Previously submitted installation proof" className="h-40 w-full rounded-lg bg-slate-100 object-contain" /></div>}
+            {local && <div className="mt-3"><p className="mb-2 text-xs font-semibold text-blue-700">Replacement waiting to sync</p><SecureImage src={String(local.payload.dataUrl)} alt="Saved replacement proof" className="h-40 w-full rounded-lg bg-slate-100 object-contain" /></div>}
             {!saved && <div className="mt-3 flex items-center gap-2"><button onClick={() => setCameraFor(`redo:${c.id}`)} className="flex-1 rounded-xl bg-blue-700 px-3 py-2.5 text-sm font-semibold text-white">Take replacement photo</button><label className="cursor-pointer rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-semibold text-slate-700">Gallery<input type="file" accept="image/*" className="sr-only" onChange={(e) => { const f = e.target.files?.[0]; if (f) void chooseRedoImage(c, f); e.currentTarget.value = ''; }} /></label></div>}
             {local && <button disabled={!online || redoBusy===c.id} onClick={() => void uploadSavedRedo(local)} className="mt-2 text-xs font-semibold text-blue-700 disabled:opacity-40">{redoBusy===c.id ? 'Syncing…' : 'Retry upload'}</button>}
           </section>;
@@ -1393,7 +1394,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
                 <div className="grid grid-cols-4 gap-2">
                   {proofPhotos.map((p, i) => (
                     <div key={`${p.url}-${i}`} className="relative rounded-lg overflow-hidden bg-slate-100 aspect-[4/3]">
-                      <img src={p.url} alt="Installation proof" className="w-full h-full object-contain bg-slate-100" />
+                      <SecureImage src={p.url} alt="Installation proof" className="w-full h-full object-contain bg-slate-100" />
                       
                     </div>
                   ))}
@@ -1551,7 +1552,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <div className="grid grid-cols-3 gap-2">
                 {proofPhotos.map((p, i) => (
                   <div key={i} className="relative rounded-lg overflow-hidden">
-                    <img src={p.url} alt={`${p.angle} installation`} className="w-full h-24 object-contain bg-slate-100" />
+                    <SecureImage src={p.url} alt={`${p.angle} installation`} className="w-full h-24 object-contain bg-slate-100" />
                     <span className="absolute bottom-1 left-1 bg-black/60 text-white text-[9px] font-medium px-1 py-0.5 rounded capitalize">{p.angle}</span>
                     
                   </div>
@@ -1608,7 +1609,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <p className="text-xs text-slate-400 mt-2">These are the measurements approved by your Admin/Owner during survey review — installed as-is, no need to re-enter them.</p>
               <div className="mt-4 border-t border-slate-100 pt-4">
                 <div className="flex items-center justify-between mb-3"><p className="text-sm font-semibold text-slate-900">Installation Photo Review</p><span className="text-xs font-semibold text-blue-600">{proofPhotos.length} photos</span></div>
-                <div className="space-y-3">{approvedItems.map((it, idx) => { const ps = proofPhotos.filter((p) => p.workItemId === it.id); if (!ps.length) return null; return <div key={it.id}><p className="text-xs font-semibold text-slate-600 mb-1.5">{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {ps.length} photo{ps.length > 1 ? 's' : ''}</p><div className="grid grid-cols-3 gap-2">{ps.map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt="Installation proof" className="w-full h-full object-contain bg-slate-100"/>{p.queued && <span className="absolute bottom-0 inset-x-0 bg-amber-700 px-1 py-0.5 text-center text-[10px] text-white">Upload pending</span>}</div>)}</div></div>; })}</div>
+                <div className="space-y-3">{approvedItems.map((it, idx) => { const ps = proofPhotos.filter((p) => p.workItemId === it.id); if (!ps.length) return null; return <div key={it.id}><p className="text-xs font-semibold text-slate-600 mb-1.5">{it.work_type_name || it.material || `Work Item ${idx + 1}`} · {ps.length} photo{ps.length > 1 ? 's' : ''}</p><div className="grid grid-cols-3 gap-2">{ps.map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><SecureImage src={p.url} alt="Installation proof" className="w-full h-full object-contain bg-slate-100"/>{p.queued && <span className="absolute bottom-0 inset-x-0 bg-amber-700 px-1 py-0.5 text-center text-[10px] text-white">Upload pending</span>}</div>)}</div></div>; })}</div>
               </div>
               <div className="mt-3">
                 <Textarea label="Note for reviewer (optional)" value={installNotes} onChange={setInstallNotes} rows={2} />
@@ -1780,7 +1781,7 @@ function ApprovedSpecsCard({
                     )}
                   </div>
 
-                  {installedCount > 0 && <div className="rounded-xl bg-white border border-slate-200 p-3"><div className="flex items-center justify-between mb-2"><p className="text-[11px] font-bold tracking-wide text-slate-500 uppercase">Installation photos</p><span className="text-[10px] font-semibold text-emerald-700">{installedCount} added</span></div><div className="grid grid-cols-3 gap-2">{proofPhotos.filter((p) => p.workItemId === it.id).map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><img src={p.url} alt={`${label} installation`} className="w-full h-full object-contain bg-slate-100"/></div>)}</div></div>}
+                  {installedCount > 0 && <div className="rounded-xl bg-white border border-slate-200 p-3"><div className="flex items-center justify-between mb-2"><p className="text-[11px] font-bold tracking-wide text-slate-500 uppercase">Installation photos</p><span className="text-[10px] font-semibold text-emerald-700">{installedCount} added</span></div><div className="grid grid-cols-3 gap-2">{proofPhotos.filter((p) => p.workItemId === it.id).map((p, pi) => <div key={`${p.url}-${pi}`} className="relative aspect-[4/3] rounded-lg overflow-hidden bg-slate-100"><SecureImage src={p.url} alt={`${label} installation`} className="w-full h-full object-contain bg-slate-100"/></div>)}</div></div>}
 
                   <div className="grid grid-cols-2 gap-2">
                     <button type="button" onClick={() => onTakePhoto(it.id)} className="flex items-center justify-center gap-2 bg-blue-600 active:bg-blue-700 text-white font-semibold py-3 rounded-xl text-sm">
@@ -2346,7 +2347,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
             <div className="grid grid-cols-3 gap-2">
               {photos.map((p) => (
                 <div key={p.storagePath} className="relative aspect-square rounded-lg overflow-hidden border border-slate-200">
-                  <img src={p.url} alt={p.angle} className="w-full h-full object-contain bg-slate-100" />
+                  <SecureImage src={p.url} alt={p.angle} className="w-full h-full object-contain bg-slate-100" />
                   <span className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-[10px] text-center py-0.5 capitalize">{p.angle}{p.queued ? ' · waiting to sync' : ''}</span>
                   <button onClick={() => removePhoto(p)} className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-0.5">
                     <Trash2 className="w-3 h-3" />

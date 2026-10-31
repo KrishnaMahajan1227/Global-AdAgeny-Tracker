@@ -65,7 +65,7 @@ function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode;
     );
   }
 
-  if (!session || !profile) {
+  if (!session || !profile || !profile.is_active) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
@@ -103,7 +103,7 @@ function LegacyClientPoRedirect() {
 
 function RoleRedirect() {
   const { profile } = useAuth();
-  if (!profile) return <Navigate to="/login" replace />;
+  if (!profile || !profile.is_active) return <Navigate to="/login" replace />;
   return <Navigate to={homeRouteForRole(profile.role)} replace />;
 }
 
@@ -210,11 +210,11 @@ function AppRoutes() {
         <Route path="/progress" element={
           <Navigate to="/dashboard" replace />
         } />
-        <Route path="/survey-review" element={<SurveyReviewPage />} />
+        <Route path="/survey-review" element={<ProtectedRoute allowedRoles={['agency_owner','admin','demo']}><SurveyReviewPage /></ProtectedRoute>} />
         <Route path="/design" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'designer']}><DesignerPage /></ProtectedRoute>} />
         <Route path="/production" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'printing']}><ProductionPage /></ProtectedRoute>} />
-        <Route path="/installation-review" element={<InstallationReviewPage />} />
-        <Route path="/field-map" element={<FieldMapPage />} />
+        <Route path="/installation-review" element={<ProtectedRoute allowedRoles={['agency_owner','admin','demo']}><InstallationReviewPage /></ProtectedRoute>} />
+        <Route path="/field-map" element={<ProtectedRoute allowedRoles={['agency_owner','admin','demo']}><FieldMapPage /></ProtectedRoute>} />
         <Route path="/route-planning" element={
           <ProtectedRoute allowedRoles={['agency_owner', 'admin', 'demo']}><RoutePlanningPage /></ProtectedRoute>
         } />
@@ -239,6 +239,7 @@ function AppRoutes() {
 
 function MobileRouter() {
   const { profile } = useAuth();
+  if (!profile?.is_active) return <Navigate to="/login" replace />;
   if (profile?.role === 'surveyor') return <SurveyorPage />;
   if (profile?.role === 'installer') return <InstallerPage />;
   return <Navigate to="/login" replace />;

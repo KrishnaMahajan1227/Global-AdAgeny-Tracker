@@ -1,3 +1,4 @@
+import { SecureImage, SecureAnchor } from '@/lib/secureMedia';
 import { fetchWorkflowFolderPages } from '@/lib/workflowFolderPages';
 import { runBoundedWorkflowBatch, summarizeWorkflowBatch } from '@/lib/workflowBatch';
 import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
@@ -1690,15 +1691,15 @@ export default function ProductionPage() {
                   <div className="px-4 pb-4 border-t border-slate-100 bg-slate-50/50">
                     <div className="flex flex-wrap gap-x-4 gap-y-1 pt-3 pb-3 text-xs text-slate-500">
                       {row.shop_address && (
-                        <a href={mapsHref(row.shop_address)} target="_blank" rel="noreferrer" className="flex items-center gap-1 hover:text-blue-600 hover:underline">
+                        <SecureAnchor href={mapsHref(row.shop_address)} target="_blank" rel="noreferrer" className="flex items-center gap-1 hover:text-blue-600 hover:underline">
                           <MapPin className="w-3.5 h-3.5" /> {row.shop_address}
-                        </a>
+                        </SecureAnchor>
                       )}
                       {row.shop_owner_name && <span className="flex items-center gap-1"><User className="w-3.5 h-3.5" /> {row.shop_owner_name}</span>}
                       {row.shop_contact_phone && (
-                        <a href={telHref(row.shop_contact_phone)} className="flex items-center gap-1 font-medium text-blue-600 hover:underline">
+                        <SecureAnchor href={telHref(row.shop_contact_phone)} className="flex items-center gap-1 font-medium text-blue-600 hover:underline">
                           <Phone className="w-3.5 h-3.5" /> {row.shop_contact_phone}
-                        </a>
+                        </SecureAnchor>
                       )}
                     </div>
 
@@ -1988,16 +1989,16 @@ export default function ProductionPage() {
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto] gap-3 items-center">
                     <div className="flex items-center gap-3 min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-2 py-2">
-                      {design && artworkIsImage(design) ? <img src={design.file_url} alt={`Approved artwork for ${board.item.work_type_name || 'work item'} ${dimension}`} loading="lazy" className="w-14 h-12 object-contain bg-white rounded border border-slate-200 shrink-0" /> :
+                      {design && artworkIsImage(design) ? <SecureImage src={design.file_url} alt={`Approved artwork for ${board.item.work_type_name || 'work item'} ${dimension}`} loading="lazy" className="w-14 h-12 object-contain bg-white rounded border border-slate-200 shrink-0" /> :
                         <div className="w-14 h-12 shrink-0 flex items-center justify-center rounded bg-white border border-slate-200 text-slate-400"><Layers className="w-5 h-5" /></div>}
                       <div className="min-w-0 flex-1">
                         {design ? <>
-                          <a href={design.file_url} target="_blank" rel="noopener noreferrer" className="text-xs font-medium text-blue-700 hover:underline break-all line-clamp-2" title={design.file_name || 'View approved design'}>{design.file_name || `Approved artwork v${design.version_number}`}</a>
+                          <SecureAnchor href={design.file_url} target="_blank" rel="noopener noreferrer" className="text-xs font-medium text-blue-700 hover:underline break-all line-clamp-2" title={design.file_name || 'View approved design'}>{design.file_name || `Approved artwork v${design.version_number}`}</SecureAnchor>
                           <p className="text-[11px] text-emerald-700">Approved design{mappedArtwork.length > 1 ? ` · ${mappedArtwork.length} linked` : ''}</p>
                           {mappedArtwork.length > 1 && <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
-                            {mappedArtwork.slice(1, 4).map((file, fileIndex) => <a key={file.id} href={file.file_url} target="_blank" rel="noopener noreferrer" className="text-[11px] text-blue-700 underline" title={file.file_name || 'Approved design'}>
+                            {mappedArtwork.slice(1, 4).map((file, fileIndex) => <SecureAnchor key={file.id} href={file.file_url} target="_blank" rel="noopener noreferrer" className="text-[11px] text-blue-700 underline" title={file.file_name || 'Approved design'}>
                               {file.file_name || `Other artwork ${fileIndex + 2}`}
-                            </a>)}
+                            </SecureAnchor>)}
                             {mappedArtwork.length > 4 && <span className="text-[11px] text-slate-500">+{mappedArtwork.length - 4} more in Design Studio</span>}
                           </div>}
                         </> : <>

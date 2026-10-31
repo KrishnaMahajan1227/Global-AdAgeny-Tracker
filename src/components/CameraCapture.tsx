@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useEffect, useRef, useState } from 'react';
 import { Camera, X, RotateCcw, Check, Loader2, ImageIcon } from 'lucide-react';
 
@@ -204,7 +205,7 @@ export function CameraCapture({ open, onClose, onCapture, title, autoUsePhoto = 
         {!shot && (
           <video ref={videoRef} playsInline muted className={`w-full h-full object-contain bg-black ${status === 'live' ? 'block' : 'hidden'}`} />
         )}
-        {shot && <img src={shot} alt="Captured" className="w-full h-full object-contain bg-black" />}
+        {shot && <SecureImage src={shot} alt="Captured" className="w-full h-full object-contain bg-black" />}
       </div>
 
       <div className="px-4 py-4 pb-[max(1rem,env(safe-area-inset-bottom))] flex items-center justify-center gap-8 bg-black">

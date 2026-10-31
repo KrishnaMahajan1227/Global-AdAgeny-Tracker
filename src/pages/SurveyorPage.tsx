@@ -1,3 +1,4 @@
+import { SecureImage, SecureAnchor } from '@/lib/secureMedia';
 import { FieldNavigation } from '@/components/FieldNavigation';
 import { fieldNotice, fieldConfirm } from '@/lib/fieldDialogs';
 import { loadFieldAssignments, loadAssignedFieldShop } from '@/lib/fieldAssignments';
@@ -283,7 +284,7 @@ function ReviewPhotoThumb({ src, boardPointSets, boardLabels, index }: { src: st
 
   return (
     <div className="relative">
-      <img src={renderedSrc || src} alt={`Photo ${index + 1}`} className="w-full h-24 object-contain bg-slate-100 rounded-lg" />
+      <SecureImage src={renderedSrc || src} alt={`Photo ${index + 1}`} className="w-full h-24 object-contain bg-slate-100 rounded-lg" />
       {boardPointSets.length > 0 && (
         <span className="absolute top-1 right-1 bg-blue-600 text-white text-[9px] font-medium px-1 py-0.5 rounded">Marked</span>
       )}
@@ -1332,7 +1333,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                       onClick={() => { setActiveMarkingIndex(0); setCurrentPhotoLocalId(p.localId); }}
                       className={`relative flex-shrink-0 rounded-lg overflow-hidden border-2 ${currentPhotoLocalId === p.localId ? 'border-blue-600' : 'border-transparent'}`}
                     >
-                      <img src={p.photoUrl || p.dataUrl} alt={`Photo ${i + 1}`} className="w-16 h-16 object-contain bg-slate-100" />
+                      <SecureImage src={p.photoUrl || p.dataUrl} alt={`Photo ${i + 1}`} className="w-16 h-16 object-contain bg-slate-100" />
                       <span className="absolute bottom-0 inset-x-0 bg-black/60 text-white text-[9px] text-center py-0.5">Photo {i + 1}</span>
                       {boardCount > 0 && (
                         <span className={`absolute top-0.5 right-0.5 text-white text-[9px] font-medium px-1 rounded ${markedCount === boardCount ? 'bg-green-600' : 'bg-amber-500'}`}>
@@ -1742,12 +1743,12 @@ function MyRoutePanel() {
       </ol>
 
       {navUrl && (
-        <a
+        <SecureAnchor
           href={navUrl} target="_blank" rel="noreferrer"
           className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white text-sm font-medium py-2.5 rounded-lg"
         >
           <Navigation className="w-4 h-4" /> Start turn-by-turn navigation
-        </a>
+        </SecureAnchor>
       )}
     </Card>
   );

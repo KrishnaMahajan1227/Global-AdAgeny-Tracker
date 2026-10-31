@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useQuery } from '@tanstack/react-query';
 import { useParams } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
@@ -43,7 +44,7 @@ export default function PublicShopSharePage() {
         ) : (
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
             {data.photo_url ? (
-              <img src={data.photo_url} alt={data.shop_name} className="w-full h-56 object-cover" />
+              <SecureImage src={data.photo_url} alt={data.shop_name} className="w-full h-56 object-cover" />
             ) : (
               <div className="w-full h-32 bg-slate-100 flex items-center justify-center">
                 <p className="text-sm text-slate-400">No photo yet</p>

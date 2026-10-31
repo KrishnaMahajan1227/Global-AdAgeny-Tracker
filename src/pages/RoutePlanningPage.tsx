@@ -1,3 +1,4 @@
+import { SecureAnchor } from '@/lib/secureMedia';
 import { fetchAllPages, validCoordinates } from '@/lib/paginatedQuery';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -549,13 +550,13 @@ export default function RoutePlanningPage() {
                   {saveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
                   Save route
                 </button>
-                <a
+                <SecureAnchor
                   href={buildMultiStopNavigationUrl(optimized.orderedStops, resolvedOrigin, travelMode === 'WALKING' ? 'walking' : travelMode === 'TWO_WHEELER' ? 'two-wheeler' : 'driving')}
                   target="_blank" rel="noreferrer"
                   className="flex items-center justify-center gap-2 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium py-2.5 rounded-lg transition text-sm"
                 >
                   <Navigation className="w-4 h-4" /> Preview
-                </a>
+                </SecureAnchor>
               </div>
             </Card>
           )}
@@ -626,7 +627,7 @@ export default function RoutePlanningPage() {
                       ))}
                     </ol>
                     {route.route_stops?.length > 0 && (
-                      <a
+                      <SecureAnchor
                         href={buildMultiStopNavigationUrl(
                           (route.route_stops || []).sort((a: any, b: any) => a.stop_order - b.stop_order)
                             .map((s: any) => ({ id: s.shop_id, name: s.shops?.name || '', lat: s.shops?.latitude, lng: s.shops?.longitude })),
@@ -636,7 +637,7 @@ export default function RoutePlanningPage() {
                         className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-700 mt-1"
                       >
                         <Navigation className="w-3.5 h-3.5" /> Open turn-by-turn in Google Maps
-                      </a>
+                      </SecureAnchor>
                     )}
                   </Card>
                 ))}

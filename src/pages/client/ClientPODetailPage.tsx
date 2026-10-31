@@ -1,3 +1,4 @@
+import { SecureAnchor } from '@/lib/secureMedia';
 import { useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -770,9 +771,9 @@ export default function ClientPODetailPage() {
                 {po.payment_terms && <div className="flex justify-between gap-3"><dt className="text-slate-400 shrink-0">Payment Terms</dt><dd className="text-slate-700 text-right">{po.payment_terms}</dd></div>}
                 {po.file_url && (
                   <div className="pt-2">
-                    <a href={po.file_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline flex items-center gap-1">
+                    <SecureAnchor href={po.file_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline flex items-center gap-1">
                       <FileText className="w-3.5 h-3.5" /> View Work Order Document
-                    </a>
+                    </SecureAnchor>
                   </div>
                 )}
               </dl>

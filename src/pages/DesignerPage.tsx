@@ -1,3 +1,4 @@
+import { SecureImage, SecureAnchor } from '@/lib/secureMedia';
 import { fetchWorkflowFolderPages } from '@/lib/workflowFolderPages';
 import { runBoundedWorkflowBatch, summarizeWorkflowBatch } from '@/lib/workflowBatch';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -1874,9 +1875,9 @@ export default function DesignerPage() {
                                     <div key={v.id} className="px-3 py-2 text-sm">
                                       <div className="flex items-center gap-2 flex-wrap">
                                         <span className="text-slate-500 font-medium">v{v.version_number}</span>
-                                        <a href={v.file_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline flex items-center gap-1">
+                                        <SecureAnchor href={v.file_url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline flex items-center gap-1">
                                           <FileImage className="w-3.5 h-3.5" /> {coveredItems.length ? designArtworkDisplayName(coveredItems.map(item => item.id), detail!.items, markingRefFor) : 'Artwork'}
-                                        </a>
+                                        </SecureAnchor>
                                         <span className="text-[11px] text-slate-500" title={v.file_name || ''}>{v.file_name || 'Original filename unavailable'}</span>
                                         <StatusBadge status={v.status} />
                                         <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${v.source === 'client_provided' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'}`}>
@@ -2021,7 +2022,7 @@ export default function DesignerPage() {
       {/* Lightbox for the marked survey image */}
       {lightbox && (
         <div onClick={() => setLightbox(null)} className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4 cursor-zoom-out">
-          <img src={lightbox} alt="Marked board" className="max-w-full max-h-full rounded-lg" />
+          <SecureImage src={lightbox} alt="Marked board" className="max-w-full max-h-full rounded-lg" />
         </div>
       )}
 
@@ -2214,10 +2215,10 @@ export default function DesignerPage() {
                         <figure className="flex shrink-0 flex-col items-center gap-0.5">
                           {artworkUrl && isImageArtwork ? (
                             <button type="button" className="h-14 w-20 overflow-hidden rounded-md border border-slate-200 bg-slate-50" onClick={() => setLightbox(artworkUrl)} aria-label={`Preview artwork for ${display.work}, ${display.size}`}>
-                              <img src={artworkUrl} alt={`Artwork for ${display.work} ${display.size}`} className="h-full w-full object-contain" loading="lazy" />
+                              <SecureImage src={artworkUrl} alt={`Artwork for ${display.work} ${display.size}`} className="h-full w-full object-contain" loading="lazy" />
                             </button>
                           ) : artworkUrl ? (
-                            <a href={artworkUrl} target="_blank" rel="noopener noreferrer" className="flex h-14 w-20 items-center justify-center rounded-md border border-blue-200 bg-blue-50 text-blue-700" aria-label={`Open artwork file for ${display.work}`}><FileText className="h-5 w-5" /></a>
+                            <SecureAnchor href={artworkUrl} target="_blank" rel="noopener noreferrer" className="flex h-14 w-20 items-center justify-center rounded-md border border-blue-200 bg-blue-50 text-blue-700" aria-label={`Open artwork file for ${display.work}`}><FileText className="h-5 w-5" /></SecureAnchor>
                           ) : (
                             <div className="flex h-14 w-20 items-center justify-center rounded-md border border-dashed border-slate-200 bg-slate-50"><ImagePlus className="h-5 w-5 text-slate-300" /></div>
                           )}
@@ -2269,7 +2270,7 @@ export default function DesignerPage() {
               {stagedFiles.map(entry => (
                 <div key={entry.id} className={`rounded-lg border p-2.5 ${entry.workItemIds.length ? 'border-slate-200 bg-white' : 'border-amber-300 bg-amber-50'}`}>
                   <div className="flex items-center gap-2">
-                    {entry.previewUrl && entry.file.type.startsWith('image/') ? <img src={entry.previewUrl} alt={`New artwork ${entry.file.name}`} className="h-12 w-12 shrink-0 rounded-md border border-slate-200 object-contain" />
+                    {entry.previewUrl && entry.file.type.startsWith('image/') ? <SecureImage src={entry.previewUrl} alt={`New artwork ${entry.file.name}`} className="h-12 w-12 shrink-0 rounded-md border border-slate-200 object-contain" />
                       : <FileText className="h-7 w-7 shrink-0 text-slate-400" />}
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-semibold text-slate-800">{designArtworkDisplayName(entry.workItemIds, uploadTask?.items || [], uploadMarkingRefFor)}</p>
@@ -2468,7 +2469,7 @@ function DesignFilePreview({ url, onClick }: { url: string; onClick?: (src: stri
   }
   return (
     <button type="button" onClick={() => onClick?.(url)} className="shrink-0 w-20 h-20 rounded-lg overflow-hidden border border-slate-200 bg-slate-100">
-      <img src={url} alt="Design" onError={() => setFailed(true)} className="w-full h-full object-cover" />
+      <SecureImage src={url} alt="Design" onError={() => setFailed(true)} className="w-full h-full object-cover" />
     </button>
   );
 }

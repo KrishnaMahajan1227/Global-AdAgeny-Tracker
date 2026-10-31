@@ -1,3 +1,4 @@
+import { SecureAnchor } from '@/lib/secureMedia';
 import { useState, useRef, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams, Link } from 'react-router-dom';
@@ -625,7 +626,7 @@ function WorkOrdersList() {
         <div className="mb-4 flex items-center gap-2 text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
           <ListChecks className="w-4 h-4" />
           Showing linked historical Work Orders.
-          <a href="/purchase-orders" className="ml-1 underline hover:no-underline">Clear filter</a>
+          <SecureAnchor href="/purchase-orders" className="ml-1 underline hover:no-underline">Clear filter</SecureAnchor>
         </div>
       )}
 
@@ -954,9 +955,9 @@ function WorkOrdersList() {
               {file ? file.name : editPo?.file_url ? 'Replace uploaded file' : 'Upload PO file'}
             </button>
             {editPo?.file_url && !file && (
-              <a href={editPo.file_url} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline mt-1 inline-block">
+              <SecureAnchor href={editPo.file_url} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline mt-1 inline-block">
                 View currently uploaded file
-              </a>
+              </SecureAnchor>
             )}
           </div>
 
@@ -1469,9 +1470,9 @@ function WorkOrderDetailDrawer({
         )}
 
         {po.file_url && (
-          <a href={po.file_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline">
+          <SecureAnchor href={po.file_url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline">
             <FileText className="w-4 h-4" /> View source PO document
-          </a>
+          </SecureAnchor>
         )}
         </div>
       </section>

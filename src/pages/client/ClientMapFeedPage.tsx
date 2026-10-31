@@ -1,3 +1,4 @@
+import { SecureImage, SecureAnchor } from '@/lib/secureMedia';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { MarkerClusterer } from '@googlemaps/markerclusterer';
@@ -299,14 +300,14 @@ export default function ClientMapFeedPage() {
                             <ImageOff className="w-3.5 h-3.5 text-slate-300" />
                           </div>
                         ) : (
-                          <a key={p.id} href={p.photo_url} target="_blank" rel="noopener noreferrer" className="block aspect-square rounded overflow-hidden bg-slate-100">
-                            <img
+                          <SecureAnchor key={p.id} href={p.photo_url} target="_blank" rel="noopener noreferrer" className="block aspect-square rounded overflow-hidden bg-slate-100">
+                            <SecureImage
                               src={p.photo_url}
                               alt={p.caption || p.photo_type}
                               className="w-full h-full object-cover"
                               onError={() => setFailedPhotoIds((prev) => ({ ...prev, [p.id]: true }))}
                             />
-                          </a>
+                          </SecureAnchor>
                         )
                       )}
                       {!photosLoading && (selectedPhotos?.survey.length || 0) + (selectedPhotos?.installation.length || 0) === 0 && (

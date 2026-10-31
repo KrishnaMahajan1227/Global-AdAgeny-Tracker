@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useEffect, useState } from 'react';
 import { ImageIcon } from 'lucide-react';
 import { renderMarkedImage, type MarkPoint } from '@/lib/markingUtils';
@@ -20,11 +21,11 @@ const cache = new Map<string, string>();
  * version is computed in the background and swapped in once ready, which
  * is what makes this reliable: if the canvas render is slow (large photo),
  * blocked (a storage bucket without permissive CORS, which breaks
- * `crossOrigin="anonymous"` canvas reads specifically, not plain <img>
+ * `crossOrigin="anonymous"` canvas reads specifically, not plain <SecureImage>
  * display), or fails outright, the designer still sees a real photo
  * immediately instead of a spinner that can hang indefinitely. The only
  * case this ever shows a placeholder icon is a genuinely broken photo URL
- * (the <img> itself fails to load).
+ * (the <SecureImage> itself fails to load).
  */
 export function DesignMarkingPreview({
   photoUrl,
@@ -96,7 +97,7 @@ export function DesignMarkingPreview({
       onClick={() => onClick?.(shown)}
       className={`shrink-0 rounded-lg overflow-hidden border border-slate-200 bg-slate-100 ${className} ${onClick ? 'cursor-zoom-in' : 'cursor-default'}`}
     >
-      <img src={shown} alt={label || 'Survey marking'} onError={() => setPhotoFailed(true)} className="w-full h-full object-cover" />
+      <SecureImage src={shown} alt={label || 'Survey marking'} onError={() => setPhotoFailed(true)} className="w-full h-full object-cover" />
     </button>
   );
 }

@@ -1,0 +1,329 @@
+{
+  "run": "2026-10-31",
+  "runtime": "node isolated source workspace; no live DB",
+  "summary": {
+    "PASS": 37,
+    "FAIL": 16,
+    "TIMEOUT": 0
+  },
+  "results": [
+    {
+      "name": "verify-agency-progress.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS: agency site delivery, stage grouping, cancellations, PO separation, financial reconciliation and no invented quantities\n\n"
+    },
+    {
+      "name": "verify-applied.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS src/lib/workCompletion.ts\nPASS src/pages/PurchaseOrdersPage.tsx\nPASS src/pages/WorkProgressPage.tsx\nPASS src/pages/DesignerPage.tsx\nPASS src/pages/ProductionPage.tsx\nPASS src/pages/SupplyOrdersPage.tsx\nCurrent workflow source markers present. Full build and browser/database tests remain separate release gates.\n\n"
+    },
+    {
+      "name": "verify-billing-safe-ui.mjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS One canonical Billing screen\nPASS Work Order filter always visible\nPASS Visible client filter\nPASS Visible payment filter\nPASS Visible date period\nPASS Pagination for many invoices\nPASS No direct destructive row button\nPASS Typed invoice number required\nPASS Safe server archive RPC\nPASS Server role enforcement\nPASS Server confirms invoice number\nPASS Nonpaid deletion denied\nPASS Private archive storage\nPASS Audit server-side deletion\nPASS Bulk reset transactional\nPASS Bulk reset explicit confirmation\nPASS Bulk reset no operational table purge\nPASS PO-first creation retained\nPASS Previous invoice subtraction retained\n19 checks passed\n\n"
+    },
+    {
+      "name": "verify-campaign-removal.cjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "rders avoid fetching all shops\nPASS Reports and Work Order lists paginate past 1,000 rows\nPASS Designer folders are Client -> Work Order -> Zone\nPASS Production folders are Client -> Work Order -> Zone\nPASS Client exports no longer expose retired Campaign columns/titles\nPASS Production completion migration retained\nPASS No destructive campaign database migration introduced\nPASS Shop Detail checks linked PO for survey gate, not undefined list\nPASS No user-facing Campaign text in marketing\nPASS Release marker is visible to agency and client logins\nPASS Deploy manifest declares direct Work Orders without the retired UI\nPASS Old screenshot page is absent from active source\nCampaign-removal/workflow release: 22/25 checks passed.\n\nFAIL No agency Campaign creation screen or component imported Expected values to be strictly equal:\n\ntrue !== false\n\nFAIL Legacy client campaign screens removed Expected values to be strictly equal:\n\ntrue !== false\n\nFAIL Deployment verification checks have been provided The expression evaluated to a falsy value:\n\n  assert.ok(fs.existsSync(path.join(root,file)))\n\n"
+    },
+    {
+      "name": "verify-completed-work.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS: legacy and receipt-gated completion cases; 4 TS/TSX syntax parses\n\n"
+    },
+    {
+      "name": "verify-design-production-dispatch-v5.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "ubset independently retryable\nPASS Summary communicates partial success and retry count\nPASS Empty batch is a safe no-op\nPASS Folder data correctly includes 1000+ entries\nPASS Folder pagination uses stable bounded windows\nPASS Invalid page sizes are rejected\nPASS Direct Client \u2192 Work Order \u2192 Zone folder hierarchy retained\nPASS Design and Production folder sources page beyond PostgREST 1000-row default\nPASS Design and Production can process up to 100 rows per page\nPASS Every bulk handoff retains failures for retry\nPASS Company approval gate still active on design handoff\nPASS Production installer/packing handoff keeps atomic server RPC\nPASS Dispatch uses atomic server RPC and receipt server gate\nPASS Dispatch ready shops use full paginated fetching\nPASS Dispatch search and selection never auto-confirm delivery\nPASS Delivery bulk action explicitly identifies same-recipient constraint\nPASS Receipt batch progress and partial failure handling provided\nPASS Dispatch retry ID resets when scope changes\nPASS All three edited screens transpile with TypeScript\nALL 23 WORKFLOW V5 CHECKS PASSED\n\n"
+    },
+    {
+      "name": "verify-design-production-oneclick.cjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "ew in same save\n\nnode:internal/assert/utils:281\n    throw err;\n    ^\n\nAssertionError [ERR_ASSERTION]: Missing source contract: /useState\\(true\\);\\n  const \\[selectedItemIds/\n    at has (/mnt/data/adroute_reporting_revision/scripts/verify-design-production-oneclick.cjs:10:48)\n    at /mnt/data/adroute_reporting_revision/scripts/verify-design-production-oneclick.cjs:18:49\n    at test (/mnt/data/adroute_reporting_revision/scripts/verify-design-production-oneclick.cjs:9:27)\n    at Object.<anonymous> (/mnt/data/adroute_reporting_revision/scripts/verify-design-production-oneclick.cjs:18:1)\n    at Module._compile (node:internal/modules/cjs/loader:1730:14)\n    at Object..js (node:internal/modules/cjs/loader:1895:10)\n    at Module.load (node:internal/modules/cjs/loader:1465:32)\n    at Function._load (node:internal/modules/cjs/loader:1282:12)\n    at TracingChannel.traceSync (node:diagnostics_channel:322:14)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24) {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '=='\n}\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-design-production-workbench-v7.cjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": " for review\n\nnode:internal/assert/utils:281\n    throw err;\n    ^\n\nAssertionError [ERR_ASSERTION]: Missing: Incomplete board coverage \u2014 save draft first\n    at includes (/mnt/data/adroute_reporting_revision/scripts/verify-design-production-workbench-v7.cjs:10:39)\n    at /mnt/data/adroute_reporting_revision/scripts/verify-design-production-workbench-v7.cjs:18:64\n    at check (/mnt/data/adroute_reporting_revision/scripts/verify-design-production-workbench-v7.cjs:9:29)\n    at Object.<anonymous> (/mnt/data/adroute_reporting_revision/scripts/verify-design-production-workbench-v7.cjs:18:1)\n    at Module._compile (node:internal/modules/cjs/loader:1730:14)\n    at Object..js (node:internal/modules/cjs/loader:1895:10)\n    at Module.load (node:internal/modules/cjs/loader:1465:32)\n    at Function._load (node:internal/modules/cjs/loader:1282:12)\n    at TracingChannel.traceSync (node:diagnostics_channel:322:14)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24) {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '=='\n}\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-designer-fastflow-v9.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "r blindly maps to all boards\nPASS all new versions linked file-by-file\nPASS partial changes do not cause premature review\nPASS company/agency design source stays tracked\nPASS bulk send review reuses full marking coverage validation\nPASS bulk send review checks stale design status\nPASS single reviewer actions use stale-status compare-and-swap\nPASS uploaded files verified against live shop items\nPASS wrong shop mapping rejected\nPASS missing work items block\nPASS unmapped selected file blocked\nPASS single item mapped automatically\nPASS many items map independently\nPASS one explicit artwork can cover many items\nPASS partially mapped design stays draft\nPASS earlier valid version fulfills completed board without re-upload\nPASS review can use all valid existing artwork\nPASS rejected old design cannot satisfy review\nPASS unapproved survey work item never bypasses approval\nPASS production locked item cannot be remapped\nPASS locked item not included in uncovered editable shortcut\nPASS explicit duplicate marking blocked\n\n44 Designer V9 source/logic checks passed (live staging still required).\n\n"
+    },
+    {
+      "name": "verify-designer-marking-upload-v8.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": " linked boards\n  PASS previous draft coverage counts towards handoff\n  PASS rejected prior design cannot cover a board\n  PASS legacy approved/produced board does not require new artwork\n  PASS unapproved board blocks review even if mapped\n  PASS invalid work item status blocks review\n  PASS all cancelled is not review ready\n  PASS editable status includes designed for revisions\n  PASS TSX parses: DesignerPage.tsx\n  PASS TSX parses: DesignMarkingPreview.tsx\n  PASS TS parses: designArtworkMapping.ts\n  PASS visible add-artwork control on each board\n  PASS modal uses own shop markings instead of expanded row\n  PASS file-by-file mapping inserted in loop\n  PASS no legacy global selectedItemIds Cartesian mapping\n  PASS live board status and shop ownership reverified\n  PASS review send checks already mapped existing drafts\n  PASS design metadata preserves company/agency source\n  PASS no premature review on partial coverage\n  PASS modal blocks accidental close while upload in progress\n  PASS marking preview never shows previous shop rendered image\n\n35 designer artwork/mapping checks passed.\n\n"
+    },
+    {
+      "name": "verify-designer-size-first-v10.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": " dimensions displays size\nPASS shared artwork with different dimensions warns of mixed sizes\nPASS unknown foreign mapping cannot be labelled as valid\nPASS no mapping asks for exact work item\nPASS storage filename has work and size but no unsafe symbols\nPASS survey and artwork appear alongside each work item\nPASS small thumbnails with original artwork preview\nPASS new PDF does not display old saved image\nPASS original filenames retained while storage path readable\nPASS per-item mapping is editable only for same shop\nPASS single/collection mapping remain explicit\nPASS company approval and handoff preserved\nPASS direct design route only allowed three roles\nPASS demo access absent from design nav\nPASS designer assignment protected at modal entrance and upload submit\nPASS only owner/admin notified for review\nPASS Supabase art/version write roles and task assignment restricted\nPASS Supabase mapping enforces same shop\nPASS Storage writes enforce org + design task\nPASS production/reporting remains read-only capable\n\n28 Designer V10 checks passed. Browser/RLS staging testing still required.\n\n"
+    },
+    {
+      "name": "verify-dist-release.cjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "\nnode:internal/assert/utils:281\n    throw err;\n    ^\n\nAssertionError [ERR_ASSERTION]: dist/index.html missing. First run npm run build.\n    at Object.<anonymous> (/mnt/data/adroute_reporting_revision/scripts/verify-dist-release.cjs:4:8)\n    at Module._compile (node:internal/modules/cjs/loader:1730:14)\n    at Object..js (node:internal/modules/cjs/loader:1895:10)\n    at Module.load (node:internal/modules/cjs/loader:1465:32)\n    at Function._load (node:internal/modules/cjs/loader:1282:12)\n    at TracingChannel.traceSync (node:diagnostics_channel:322:14)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)\n    at Function.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:171:5)\n    at node:internal/main/run_main_module:36:49 {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: false,\n  expected: true,\n  operator: '=='\n}\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-fast-review-workspace.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "em correction\nPASS Installation shows all linked survey photos\nPASS Installation batch requires linked evidence\nPASS Installation single review remounts item selection per job\nPASS Installation single review opens next pending job\nPASS Installation inline approvals reject missing linked proofs\nPASS Both review queues use same focused navigation\nPASS Stepper offers accessible previous/next navigation and compact shop jump\nPASS Navigation alone never counts as reviewing evidence\nPASS One queued decision action per current shop\nPASS Evidence readiness gates queued approval\nPASS No giant numbered button strip for 250 shops\nPASS Large batches have 250 item page option\nPASS Batch modal uses one vertical scroller, not nested scrollbars\nPASS Survey pending items automatically selected on load\nPASS Installation pending Work Items automatically selected on load\nPASS Parse src/components/ReviewBatchStepper.tsx\nPASS Parse src/components/SurveyReviewGallery.tsx\nPASS Parse src/pages/SurveyReviewPage.tsx\nPASS Parse src/pages/InstallationReviewPage.tsx\nALL 35 FOCUSED REVIEW WORKSPACE CHECKS PASSED\n\n"
+    },
+    {
+      "name": "verify-field-units.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "\nnode:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'typescript' imported from /mnt/data/adroute_reporting_revision/scripts/verify-field-units.mjs\nDid you mean to import \"typescript/lib/typescript.js\"?\n    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:256:9)\n    at packageResolve (node:internal/modules/esm/resolve:768:81)\n    at moduleResolve (node:internal/modules/esm/resolve:854:18)\n    at defaultResolve (node:internal/modules/esm/resolve:984:11)\n    at ModuleLoader.defaultResolve (node:internal/modules/esm/loader:780:12)\n    at #cachedDefaultResolve (node:internal/modules/esm/loader:704:25)\n    at ModuleLoader.resolve (node:internal/modules/esm/loader:687:38)\n    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:305:38)\n    at ModuleJob._link (node:internal/modules/esm/module_job:137:49) {\n  code: 'ERR_MODULE_NOT_FOUND'\n}\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-installer-runtime.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "\nnode:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'typescript' imported from /mnt/data/adroute_reporting_revision/scripts/verify-installer-runtime.mjs\nDid you mean to import \"typescript/lib/typescript.js\"?\n    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:256:9)\n    at packageResolve (node:internal/modules/esm/resolve:768:81)\n    at moduleResolve (node:internal/modules/esm/resolve:854:18)\n    at defaultResolve (node:internal/modules/esm/resolve:984:11)\n    at ModuleLoader.defaultResolve (node:internal/modules/esm/loader:780:12)\n    at #cachedDefaultResolve (node:internal/modules/esm/loader:704:25)\n    at ModuleLoader.resolve (node:internal/modules/esm/loader:687:38)\n    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:305:38)\n    at ModuleJob._link (node:internal/modules/esm/module_job:137:49) {\n  code: 'ERR_MODULE_NOT_FOUND'\n}\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-live-release.cjs",
+      "status": "FAIL",
+      "return_code": 2,
+      "output": "\nUsage: node scripts/verify-live-release.cjs https://your-deployed-domain.com\n"
+    },
+    {
+      "name": "verify-owner-billing-readiness.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "sured quantities\nPASS Custom survey-only completion uses surveyed measured quantities\nPASS Mixed custom scope cannot finish before its required installation\nPASS Installed but no measurements is not invoice-ready\nPASS Completed and unbilled work becomes invoice-ready by rate x quantity\nPASS Owner financial line breakdown reconciles exactly with total readiness\nPASS Part-invoiced works subtract historical billed unit quantity\nPASS A partially ready shop stays flagged when another work item has missing measurements\nPASS Fully invoiced shops do not appear ready or needing reconciliation\nPASS Supply dispatch bills produced units without pretending installation\nPASS No ready value before direct installation is completed\nPASS Missing rate and scope blocks financial percentage\nPASS Old unlinked invoice allocations are flagged instead of double billed\nPASS Cancelled shops cannot inflate stage completion\nPASS Square-foot invoices use measured actual area and subtract billed area\nPASS Custom survey-only stage cannot bill without surveyed measurements\nALL 23 OWNER READINESS REGRESSIONS PASSED\n\n"
+    },
+    {
+      "name": "verify-owner-dashboard-compact.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS No tall unmatched dashboard columns\nPASS Dashboard retains compact work overview without duplicate nav quick links\nPASS Client PO tracker includes site, next stage, actual links\nPASS Search, Needs action and concise direct routes remain available\nPASS Financial values stay out of work view until owner selects private mode\nPASS Sidebar flex layout has reachable footer and nav scroller\nPASS Scrollbar hidden but scrolling available on touch/keyboard\nPASS Inferred historical milestones link to full site list, not empty current-stage filter\nALL 8 OWNER DASHBOARD & NAVIGATION TESTS PASSED\n\n"
+    },
+    {
+      "name": "verify-owner-dashboard-demo.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS No Attention required panel, Site pipeline card or repeated navigation links\nPASS Keeps approved compact Work Orders and Client delivery sections\nPASS Four independent KPI cards are linked, accessible and accurate in scope\nPASS Needs action filter remains, with direct next-stage link and search\nPASS Client delivery is aggregate-only, without the same Work Orders repeated below\nPASS Privacy: financial amounts require owner opt-in, operational view does not load amounts\nPASS Old Campaign bookmarks safely redirect and Campaigns never render in agency navigation\nPASS Status and quantity remain distinct: mixed installation and supply-only orders\nPASS Delivery receipt requirement prevents falsely completing dispatched supply\nPASS Empty, excluded and fully delivered portfolios avoid divide-by-zero and false pending\nALL 10 OWNER DEMO DASHBOARD REGRESSIONS PASSED\n\n"
+    },
+    {
+      "name": "verify-owner-ux-stage-routing.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS Supply-only dispatched is final delivered, not open dispatch\nPASS Survey+install dispatched is dispatched and not complete\nPASS Installation orders finish at installed/billed; supply finishes at delivered/dispatched or billed\nPASS Field bucket matches pending and survey, not completed\nPASS All grouped status lists exactly match shopStage for each fulfillment\nPASS Owner priority shows installation review ahead of production\nPASS Action summary has an explicit no-site reconciliation state\nPASS Acceptance overrides all other steps\nPASS Default Work Order mode hides financial cards behind controlled toggle\nPASS List hides money unless owner opted in\nPASS Dashboard finances require explicit owner view, and amounts are fetched only then\nPASS Switching Work Orders resets financial mode\nPASS Work Order KPI links use PO and stage\nPASS Shop list deep links use server-side stage filtering\nPASS Dashboard links to exact Work Order and current PO stage without duplicate pipeline\nALL 15 OWNER UX / NAVIGATION CHECKS PASSED\n\n"
+    },
+    {
+      "name": "verify-phase1-fulfillment.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS Exactly four public workflow choices with unique IDs\nPASS Company or agency design is NOT another fulfillment type\nPASS Legacy custom is visible only when editing historical order\nPASS No-survey production/install preset uses design, production, installation\nPASS No survey or design for on-site execution\nPASS Only applicable stages shown for production+installation\nPASS Dispatch is not completion for installation PO\nPASS Installation infers prior milestones, not quantities\nPASS Supply-only legacy final-stage behavior unchanged\nPASS Direct-install and historical custom final-stage behavior retained\nPASS All labels correspond to public selections\nPASS Billing quantity measures installed for new installation workflow\nPASS Additive migration carries guard and initialization triggers\nPASS Bootstrap does not invent billable quantity or approvals\nPASS Client-supplied artwork does not force assigned designer\nPASS Supply entry still requires a design review record\nALL 16 PHASE 1 FULFILLMENT CHECKS PASSED\n\n"
+    },
+    {
+      "name": "verify-phase2-approvals.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS phase2 schema and RPCs are present\nPASS existing PO approvals are NOT backfilled\nPASS new PO company policy cannot be bypassed by explicit false\nPASS company policy cannot be disabled\nPASS owner/admin enforced on every approval action\nPASS no client, surveyor, designer, installer direct write\nPASS direct shop-status bypass is blocked\nPASS survey, design, installation stage DB guards\nPASS company consent must match exact PO, ref, shop and evidence\nPASS changed evidence invalidates approval\nPASS internal review precedes external confirmation\nPASS audit event emitted on stage transitions\nPASS screens share one component\nPASS pack exporter requires all images and caps export count\nPASS approval is explicitly confirmed by owner\nPASS approval component defaults to an explicit missing status\nPASS TSX syntax: src/lib/companyApproval.ts\nPASS TSX syntax: src/components/CompanyApprovalHandoff.tsx\nPASS TSX syntax: src/pages/SurveyReviewPage.tsx\nPASS TSX syntax: src/pages/DesignerPage.tsx\nPASS TSX syntax: src/pages/InstallationReviewPage.tsx\nALL 21 PHASE 2 SOURCE VALIDATIONS PASSED\n\n"
+    },
+    {
+      "name": "verify-phase3-handoffs.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "oduction\nPASS Assignees must be active, role-matched and same org\nPASS New orders cannot bypass server-side completion RPC\nPASS Company artwork approval cannot be bypassed\nPASS Single printer auto-assigns only on approved new PO\nPASS Production completion validates measured quantity and components\nPASS Owner override cannot be used by printing or silent empty scope\nPASS Idempotent production handoff does not overwrite started work\nPASS Retry completion sends no duplicate notification\nPASS Supply only packs without installer; installation types require installer\nPASS Legacy/custom modes retained\nPASS UI single and bulk design handoffs use one RPC\nPASS UI single and bulk production completion use same RPC\nPASS One-assignee automatic selection, multi-assignee explicit selection\nPASS No automatic invoice creation during handoff\nPASS Migration is additive and does not touch historic data rows\nPASS No account secrets packaged\nPASS TSX src/pages/SurveyReviewPage.tsx\nPASS TSX src/pages/DesignerPage.tsx\nPASS TSX src/pages/ProductionPage.tsx\nALL 21 PHASE 3 SOURCE CHECKS + 3 TSX PARSES PASSED\n\n"
+    },
+    {
+      "name": "verify-phase4-fulfillment.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "one delivered out of two\nPASS Legacy PO preserves two completed\nPASS Billing eligibility obeys receipt policy\nPASS New-order policy applies on insert, old rows not backfilled\nPASS Dispatch is atomic and retry keyed\nPASS Dispatch validates same-org staff, supply scope and stage\nPASS Receipt requires Owner/Admin and records receiver and audit\nPASS Atomic On-site Execution creates all linked records with one retry key\nPASS Database prevents direct final-stage bypass\nPASS Invoice line server gate requires receipt\nPASS Browser uses server RPCs, not piecemeal dispatch writes\nPASS UI supports zone select-all and delivery details\nPASS Billing page and readiness both use delivery receipt policy\nPASS Field wizard prevents duplicate rapid taps\nPASS TSX/TS src/pages/SupplyOrdersPage.tsx\nPASS TSX/TS src/pages/InstallerPage.tsx\nPASS TSX/TS src/pages/BillingPage.tsx\nPASS TSX/TS src/pages/DashboardPage.tsx\nPASS TSX/TS src/pages/client/ClientOverviewPage.tsx\nPASS TSX/TS src/pages/client/ClientMapFeedPage.tsx\nPASS TSX/TS src/lib/billingReadiness.ts\nALL 19 PHASE 4 REGRESSIONS + 7 SYNTAX CHECKS PASSED\n\n"
+    },
+    {
+      "name": "verify-phase5-billing-reconciliation.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "ched production\nPASS received new supply order becomes eligible only with measured work\nPASS allocation engine independently blocks a selected dispatched shop\nPASS selected supply work requires receipt evidence status\nPASS partial invoice within eligible quantity is permitted\nPASS over-billing quantity is rejected\nPASS wrong PO line is rejected even with equal amount\nPASS duplicate work item on the same invoice is rejected\nPASS changed rate or manipulated amount is rejected\nPASS historically billed quantity is deducted before a partial new invoice\nPASS legacy shop-level invoice without work-item ID blocks repeat billing\nPASS unapproved installation work item stays blocked despite a completed parent shop\nPASS square-foot pending area is not multiplied by unit count\nPASS fully invoiced item does not return in readiness queue\nPASS progress-reconciliation respects receipt requirement\nPASS source uses same receipt policy and history in preview and final save\nPASS history fetch additionally checks work-item and ambiguous shop-only invoices\nALL 18 PHASE 5 RECONCILIATION REGRESSIONS PASSED\n\n"
+    },
+    {
+      "name": "verify-phase6-role-ux.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "\nPASS Assignment and missing scope show exact Work Order detail\nPASS Survey status navigates exact PO shop stage\nPASS Designer and printing queue deep links preserve correct PO\nPASS Installation review navigates to evidence queue with PO filter\nPASS Supply dispatch navigates supply workflow dispatch step, not installation\nPASS Installation-required dispatch navigates incomplete sites, not supply module\nPASS Done work orders open details, not empty current-stage filter\nPASS Dashboard and Work Order detail use the same action resolver\nPASS Deep-linked work order filters exist in all four departments\nPASS Review/production routes truly filter queries by PO\nPASS Client manager is not trapped without allowed sidebar navigation\nPASS Mobile sidebar traps focus and restores it safely\nPASS Owner finances are opt-in; staff does not receive private toggle\nPASS Client overview offers direct Work Orders navigation and labels polling honestly\nPASS No new database migration in purely navigational Phase 6\nPASS Every changed TS/TSX source parses cleanly\nALL 17 PHASE 6 ROLE & NAVIGATION TESTS PASSED\n\n"
+    },
+    {
+      "name": "verify-phase7-security.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "annot overwrite a newer signed-in account\nPASS A stale session bootstrap cannot override a newer auth event\nPASS Sign out clears in-memory profile and sensitive query caches\nPASS Production error UI hides internal error messages and does not promise saved edits\nPASS PWA never caches Supabase Storage evidence\nPASS Previous private image cache is removed on app startup/service worker controller change\nPASS Field confirmation dialogs are cancelled on account switch\nPASS Dashboard only enables finance fetch for explicit agency owner opt-in\nPASS Protected routes are role-gated for Owner Console and money views\nPASS Company approval records require owner/admin and are audited at database level\nPASS Department handoffs have privileged RPC restrictions\nPASS Supply receipt, dispatch and direct-install RPCs exist\nPASS Supply receipt RLS and server invoice gate exist\nPASS No deploy credentials or actual local .env are part of source ZIP\n  Verified 127 TypeScript/TSX source files\nPASS All application TS/TSX sources parse with the TypeScript compiler\nALL 16 PHASE 7 SECURITY/SOURCE CHECKS PASSED\n\n"
+    },
+    {
+      "name": "verify-po-billing-final.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "\nevalmachine.<anonymous>:9\nconst workCompletion_1 = require(\"./workCompletion\");\n                         ^\n\nReferenceError: require is not defined\n    at evalmachine.<anonymous>:9:26\n    at Script.runInContext (node:vm:149:12)\n    at runInContext (node:vm:301:6)\n    at file:///mnt/data/adroute_reporting_revision/scripts/verify-po-billing-final.mjs:16:1\n    at ModuleJob.run (node:internal/modules/esm/module_job:274:25)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:644:26)\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-po-billing.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "\nevalmachine.<anonymous>:9\nconst workCompletion_1 = require(\"./workCompletion\");\n                         ^\n\nReferenceError: require is not defined\n    at evalmachine.<anonymous>:9:26\n    at Script.runInContext (node:vm:149:12)\n    at runInContext (node:vm:301:6)\n    at file:///mnt/data/adroute_reporting_revision/scripts/verify-po-billing.mjs:16:1\n    at ModuleJob.run (node:internal/modules/esm/module_job:274:25)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:644:26)\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-po-execution-reconciliation.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS shop stage alone does not imply 96 measured pieces\nPASS unlinked legacy item with measured qty and sole line is recovered once\nPASS explicit po line ID maps without recovery\nPASS no invented installed quantity from approved-only work\nPASS documented installed work may use approved quantity fallback\nPASS ambiguous matches with multiple lines are not guessed\nPASS wrong explicit PO line ID is not reassigned\nPASS excluded item and rejected shops excluded\nPASS supply only dispatch uses produced quantity, not installed count\nPASS custom production only can measure final without install\n10 reconciliation checks passed\nPASS No variance for missing survey quantity\nPASS per-line final evidence stage respects custom flags\n\n"
+    },
+    {
+      "name": "verify-po-progress.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "\nnode:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'typescript' imported from /mnt/data/adroute_reporting_revision/scripts/verify-po-progress.mjs\nDid you mean to import \"typescript/lib/typescript.js\"?\n    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:256:9)\n    at packageResolve (node:internal/modules/esm/resolve:768:81)\n    at moduleResolve (node:internal/modules/esm/resolve:854:18)\n    at defaultResolve (node:internal/modules/esm/resolve:984:11)\n    at ModuleLoader.defaultResolve (node:internal/modules/esm/loader:780:12)\n    at #cachedDefaultResolve (node:internal/modules/esm/loader:704:25)\n    at ModuleLoader.resolve (node:internal/modules/esm/loader:687:38)\n    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:305:38)\n    at ModuleJob._link (node:internal/modules/esm/module_job:137:49) {\n  code: 'ERR_MODULE_NOT_FOUND'\n}\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-production-completion-fix.mjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS Postgres view existing column order and names preserved\nPASS Completed production stage reaches 100 independent of quantity completeness\nPASS Completed orders have no false pending or BOM queue counts\nPASS Historical installed items remain readable and unavailable boards excluded\nPASS Closed production rows are readonly, avoid misleading 0/0\nPASS Completion stays atomic, role-checked and prevents reopen\nPASS Read view migration makes no work/quantity writes\nALL PRODUCTION COMPLETION STATIC REGRESSIONS PASSED. Live staging tests still required.\n\n"
+    },
+    {
+      "name": "verify-production-v11-sizefirst.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "\nPASS links scoped to displayed work items\nPASS production order/shop identity guard\nPASS on-demand artwork (not list-wide)\nPASS safe preview for image or document\nPASS quantity actual not automatic\nPASS integer production quantities\nPASS multi-board editable workbench\nPASS save and next\nPASS save and complete\nPASS server authoritative handoff\nPASS fresh detail before completion\nPASS material readiness gate\nPASS installer explicit when multiple\nPASS owner/admin privileged completion\nPASS assigned printing work filter\nPASS optimistic quantity comparison\nPASS retry same quantity after partial write\nPASS no upsert overwrite conflict\nPASS safe partial batch errors\nPASS realtime invalidate\nPASS no database schema alteration\nPASS image extension recognition\nPASS no task does not invent artwork\nPASS no design returns empty mappings\nPASS explicit 1:1 mapping\nPASS explicit 1:many shared artwork mapping\nPASS foreign shop board excluded\nPASS wrong-shop request refused\nPASS artwork fetch error surfaced, not hidden\nPASS missing approved versions never fabricated\nPRODUCTION V11: 35 checks passed\n\n"
+    },
+    {
+      "name": "verify-production-v12-workflow.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "-page next uses same filtered production fetch\nPASS Next-page select updates visible page\nPASS Next-page fetch scopes assigned role\nPASS Next-page query still paginates\nPASS Re-edit compares latest locally saved baseline\nPASS Compare-and-swap persistence retained\nPASS No automatic actual from plan\nPASS Approved artwork without valid mapping not invented\nPASS Single row quantity UI retains correct work and dimensions\nPASS Single sheet shows number of ready quantities\nPASS Primary button guides next shop\nPASS Partial failures preserved for retry\nPASS Double-save / hotkey race is synchronously guarded\nPASS Folder browser remains optional\nPASS Next from B goes to C, never restarts A\nPASS Current shop tracked as visited\nPASS Already visited C not reopened\nPASS No unvisited later shop cleanly ends workset\nPASS Across page moves to D skipping no-pending C\nPASS Cross-page cursor moves to visible page 2\nPASS Only one next page fetched when ready\nPASS Skips entire empty page and advances\nPASS No previous page reopened\nPASS TypeScript transpilation diagnostics\nPRODUCTION V12: 36 checks passed\n\n"
+    },
+    {
+      "name": "verify-production-v13-fast-worksets.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "planned confirmation\nPASS Selected workset primary action exists\nPASS Existing queue pagination remains\nPASS Selected B skips unselected C and opens selected D\nPASS Processed selected shop drops out of focus\nPASS Last selected closes without fetching unrelated pages\nPASS Unselected queue continues to next C normally\nPASS Explicit plan confirmation saves only blank A\nPASS Existing recorded B remains untouched\nPASS Successful quantity save advances only after save\nPASS Missing approved/survey plan refuses shortcut without a write\nPASS No automatic planned quantity without explicit click\nPASS Operator-entered partial/custom B never replaced by plan\nPASS Partial failed write blocks next shop\nPASS Partial failure retains A successful baseline for safe retry\nPASS Failed B stays unchanged in baseline\nPASS Independent board saves use bounded parallel processing\nPASS Server rechecks status and compare-and-swap actuals\nPASS Completion uses atomic RPC and materials gate\nPASS No automatic material or approval bypass\nPASS TSX transpiles without diagnostic errors\nPRODUCTION V13: 24 checks passed\n\n"
+    },
+    {
+      "name": "verify-report-billing.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "\nnode:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'typescript' imported from /mnt/data/adroute_reporting_revision/scripts/verify-report-billing.mjs\nDid you mean to import \"typescript/lib/typescript.js\"?\n    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:256:9)\n    at packageResolve (node:internal/modules/esm/resolve:768:81)\n    at moduleResolve (node:internal/modules/esm/resolve:854:18)\n    at defaultResolve (node:internal/modules/esm/resolve:984:11)\n    at ModuleLoader.defaultResolve (node:internal/modules/esm/loader:780:12)\n    at #cachedDefaultResolve (node:internal/modules/esm/loader:704:25)\n    at ModuleLoader.resolve (node:internal/modules/esm/loader:687:38)\n    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:305:38)\n    at ModuleJob._link (node:internal/modules/esm/module_job:137:49) {\n  code: 'ERR_MODULE_NOT_FOUND'\n}\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-reporting-billing-release.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "e scopes private URLs\nPASS Report photos cache scoped by user\nPASS Client Excel contains photo image embedding\nPASS Client PDF renders marked survey evidence\nPASS Client PDF fails rather than dropping sites beyond limit\nPASS Client PDF page breaks before two-column evidence\nPASS Client report fetches actual board markings\nPASS Client exported workbook awaits completion and catches failure\nPASS No invoice direct table writes in new billing create flow\nPASS Bill creation prevents unauthorized deep link\nPASS New invoice button restricted to accounting roles\nPASS Paid/partial invoices locked on server\nPASS Invoice server checks active profile and org\nPASS PO advisory lock serializes concurrent billing\nPASS Server trusts PO rate not user rate\nPASS Server rejects duplicate linked work item\nPASS Server cap derives from completed work\nPASS Atomic invoice saves lines in same function transaction\nPASS Direct authenticated invoice writes denied via restrictive RLS\nPASS Demo Production sidebar not shown\nPASS Production route guard matches nav role list\nREPORTING RELEASE CHECKS: 39 PASS, 0 FAIL\n\n"
+    },
+    {
+      "name": "verify-reports-evidence.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "\nfile:///mnt/data/adroute_reporting_revision/scripts/verify-reports-evidence.mjs:24\n  throw new Error(`Unexpected import ${name}`);\n  ^\n\nError: Unexpected import ./secureMedia\n    at fakeRequire (file:///mnt/data/adroute_reporting_revision/scripts/verify-reports-evidence.mjs:24:9)\n    at evalmachine.<anonymous>:17:23\n    at Script.runInContext (node:vm:149:12)\n    at Script.runInNewContext (node:vm:154:17)\n    at Object.runInNewContext (node:vm:310:38)\n    at file:///mnt/data/adroute_reporting_revision/scripts/verify-reports-evidence.mjs:26:4\n    at ModuleJob.run (node:internal/modules/esm/module_job:274:25)\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:644:26)\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-review-action-contract.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS Confirm state uses only backend-approved/redo values\nPASS Survey approval button queues approved (not approve)\nPASS Redo button still queues redo\nPASS Submission function accepts same canonical decision union\nPASS Confirmation forwards selected action without lossy mapping\nPASS Approval awaits existing server-validated reviewApply\nPASS Client RPC guards against unsupported actions\nPASS Database also accepts canonical actions\nPASS Installation review retains canonical decisions\nPASS Approval RPC sends approved and exact measurement\nPASS Redo RPC sends redo with correction note\nPASS Installation RPC keeps approved decision\nPASS Old invalid approve alias rejected locally without DB call\nPASS Unknown review stage rejected without DB call\nAll 14 review action contract checks passed.\n\n"
+    },
+    {
+      "name": "verify-review-v4-decisions.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "pproval queued\nPASS No implicit approval from browsing next shop\nPASS User may undo staged decision\nPASS Review queue requires clear reason on redo\nPASS Review queue visually distinguishes final reject\nPASS Photo-level survey correction scope still supported\nPASS Installation individual photo can be selected separately\nPASS Saved Installation item correction notes are shown\nPASS Survey photo correction notes shown\nPASS Realtime subscribes to review decisions (fallback polling retained)\nPASS Approval mutation uses existing audited RPC and never bypasses validation\nPASS Busy state freezes navigation while writes in flight\nPASS Per-shop failed reasons available for retries\nPASS Existing page sizes offer 250 page worksets\nPASS Installation final reject unavailable in decision bar\nPASS TypeScript parse reviewDecisionQueue.ts\nPASS TypeScript parse ReviewDecisionBar.tsx\nPASS TypeScript parse ReviewBatchStepper.tsx\nPASS TypeScript parse SurveyReviewPage.tsx\nPASS TypeScript parse InstallationReviewPage.tsx\nPASS TypeScript parse SurveyReviewGallery.tsx\nALL 43 REVIEW V4 DECISION CHECKS PASSED\n\n"
+    },
+    {
+      "name": "verify-review-workspace-v2.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "tion batch has one decision action per shop\nPASS Survey V4 batch only submits queued decisions\nPASS Installation V4 batch only submits queued decisions\nPASS Both Approval actions require loaded evidence\nPASS Survey change invalidates batch review and ready states\nPASS Installation change invalidates batch review and ready states\nPASS Pending Survey items preselected, partial corrections supported\nPASS Pending Installation work items preselected, targeted redo supported\nPASS Single modal scrollbar on both review screens\nPASS 250 selected shops supported per page on both screens\nPASS Auto-scroll to next shops without scrolling unrelated page\nPASS Batch modal cannot close during Installation write\nPASS Company approval handoff still available in both batch review screens\nPASS TypeScript parse: src/lib/reviewBatchSafety.ts\nPASS TypeScript parse: src/components/ReviewBatchStepper.tsx\nPASS TypeScript parse: src/components/SurveyReviewGallery.tsx\nPASS TypeScript parse: src/pages/SurveyReviewPage.tsx\nPASS TypeScript parse: src/pages/InstallationReviewPage.tsx\nALL 30 REVIEW V2 CHECKS PASSED\n\n"
+    },
+    {
+      "name": "verify-review-workspace-v3.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "ilures retained, successes distinct\nPASS Bounded parallelism avoids DB saturation\nPASS Results maintain original queue order\nPASS Exactly one progress update per attempted shop\nPASS 0 target pool finishes cleanly\nPASS Survey has one-click Review page entry\nPASS Installation has one-click Review page entry\nPASS Both submit only explicitly queued targets\nPASS Both report actual per-shop progress\nPASS Survey removes only confirmed successes\nPASS Installation removes only confirmed successes\nPASS No stale undefined modal callback remains\nPASS Both preserve company-approval interface\nPASS Batch navigator has search, pending-jump and flags\nPASS Both require loaded evidence before bulk approval\nPASS UI does not select all shops across pages\nPASS Installation thumbnails lazy-load\nPASS Navigation freezes while running database batch\nPASS Parse src/lib/reviewBatchSafety.ts\nPASS Parse src/components/ReviewBatchStepper.tsx\nPASS Parse src/pages/SurveyReviewPage.tsx\nPASS Parse src/pages/InstallationReviewPage.tsx\nPASS Parse src/components/CompanyApprovalHandoff.tsx\nALL 30 REVIEW V3 CHECKS PASSED\n\n"
+    },
+    {
+      "name": "verify-runtime-jsx-symbols.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS: 66 TSX files parse; all JSX component/ icon names resolve to local declarations/imports.\n\n"
+    },
+    {
+      "name": "verify-security-release.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "rpcs_and_platform_hardening.sql\nPASS Migration packaged 20261031130000_0111_financial_and_field_write_guards.sql\nPASS Migration packaged 20261031131000_0112_integrity_and_rpc_hardening.sql\nPASS Server blocks role/tenant profile edits\nPASS Server denies inactive direct API sessions\nPASS Field workers limited to assigned shops\nPASS Anonymous phone-to-email lookup revoked\nPASS Anonymous public RPC execution revoked\nPASS All four private buckets disabled\nPASS Storage file paths check org and role\nPASS Legacy public storage policies removed\nPASS Client links cannot self activate\nPASS Platform dashboard no longer REST-fetches customer rows\nPASS Known seed passwords invalidated if unchanged\nPASS New privileged users require 12 character password\nPASS Financial writes scoped to office roles\nPASS Worker location cannot impersonate another user\nPASS Tenant/customer foreign keys guarded\nPASS Route stops require belonging worker\nPASS Secure photo UI uses signed urls\nPASS No real environment file packaged\nPASS Direct sensitive React routes role protected\nSecurity static checks: 27 PASS / 0 FAIL\n\n"
+    },
+    {
+      "name": "verify-supply-workflow.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "PASS  No separate Supply Orders sidebar entry\nPASS  Existing Work Orders sidebar entry preserved\nPASS  Supply route retains role guard\nPASS  Old Supply URL redirects to existing Work Orders\nPASS  Supply workflow uses existing source component\nPASS  Work Orders default listing preserved\nPASS  Work Orders supports named fulfillment choices\nPASS  Selected Work Order filters are URL-aware\nPASS  Per-PO supply action available\nPASS  Inline supply can select an exact PO\nPASS  Supply workflow retains Design + Dispatch tabs\nPASS  Supply workflow steps persist in URL\nPASS  Supply queries org-scoped\nFAIL  Supply only fetch and dispatch retained\nPASS  Paginated Supply data fetch\n14/15 static regression checks passed\n\n"
+    },
+    {
+      "name": "verify-survey-review-gallery.mjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS Centered survey review modal\nPASS One canonical survey evidence gallery\nPASS No duplicate measurement table\nPASS No separate PO budget review\nPASS First-column checkbox always available for pending surveys\nPASS Server-scoped filters\nPASS Single gallery displays a photo once per card\nPASS Measurements and checkboxes accompany photos\nPASS Multiple markings reuse renderer\nPASS Full audit and approval data kept in RPC\nPASS Modal approvals and redo ask for confirmation\nPASS Review decisions use inline confirmation; only unsaved-batch close is guarded\nPASS Sidebar scroll flexible / footer fixed\nPASS Recently visited links next to notification\n\n"
+    },
+    {
+      "name": "verify-survey-review.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "\nnode:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'typescript' imported from /mnt/data/adroute_reporting_revision/scripts/verify-survey-review.mjs\nDid you mean to import \"typescript/lib/typescript.js\"?\n    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:256:9)\n    at packageResolve (node:internal/modules/esm/resolve:768:81)\n    at moduleResolve (node:internal/modules/esm/resolve:854:18)\n    at defaultResolve (node:internal/modules/esm/resolve:984:11)\n    at ModuleLoader.defaultResolve (node:internal/modules/esm/loader:780:12)\n    at #cachedDefaultResolve (node:internal/modules/esm/loader:704:25)\n    at ModuleLoader.resolve (node:internal/modules/esm/loader:687:38)\n    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:305:38)\n    at ModuleJob._link (node:internal/modules/esm/module_job:137:49) {\n  code: 'ERR_MODULE_NOT_FOUND'\n}\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-survey-selection.mjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS one item + one linked image = ONE selection and TWO server decisions\nPASS one work item with 2 linked photos = one checkbox; no duplicate target\nPASS shared photo two boards: partial approval must NOT also review other board\nPASS shared photo auto-decided when other board was already approved\nPASS orphan photo has exactly one independent selection\nPASS once all linked items have decisions, photo can be reviewed separately\nPASS already-reviewed photo never sent again\nPASS stale UI selection cannot approve unseen items\nPASS unrelated image never auto-included\nPASS explicit photo-to-item links work even without polygon rows\nPASS fully approved evidence is no longer selectable\nPASS different decision on other board never automatically redoes shared photo\nPASS gallery wiring checks\n\n"
+    },
+    {
+      "name": "verify-survey-supply.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "\nnode:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'typescript' imported from /mnt/data/adroute_reporting_revision/scripts/verify-survey-supply.mjs\nDid you mean to import \"typescript/lib/typescript.js\"?\n    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:256:9)\n    at packageResolve (node:internal/modules/esm/resolve:768:81)\n    at moduleResolve (node:internal/modules/esm/resolve:854:18)\n    at defaultResolve (node:internal/modules/esm/resolve:984:11)\n    at ModuleLoader.defaultResolve (node:internal/modules/esm/loader:780:12)\n    at #cachedDefaultResolve (node:internal/modules/esm/loader:704:25)\n    at ModuleLoader.resolve (node:internal/modules/esm/loader:687:38)\n    at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:305:38)\n    at ModuleJob._link (node:internal/modules/esm/module_job:137:49) {\n  code: 'ERR_MODULE_NOT_FOUND'\n}\n\nNode.js v22.16.0\n"
+    },
+    {
+      "name": "verify-taskfirst-design-production-dispatch.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "ner assignment\nPASS Single Designer preselected but multiple people require explicit choice\nPASS Supply entry is still associated to the original PO and line\nPASS One-click zone dispatch opens the existing confirmation modal, never auto-dispatches\nPASS Dispatch still limits server batch to 200\nPASS Large zone list renders at most 12 initially then increments in 50s\nPASS Route receipt cards are compact and expand per route\nPASS Pending receipt routes rank first without changing delivery status\nPASS Only Owner/Admin confirm actual delivery, through the existing atomic RPC\nPASS Delivery receipt realtime listener updates the shared app state\nPASS Single production status change uses compare-and-swap against stale row state\nPASS Bulk status change avoids stale-write overwrites with retryable failures\nPASS Company approval, production and delivery RPC gates remain unchanged\nPASS Batch helper still retains per-item failures for retry\nPASS TSX: src/pages/DesignerPage.tsx\nPASS TSX: src/pages/ProductionPage.tsx\nPASS TSX: src/pages/SupplyOrdersPage.tsx\nALL 27 TASK-FIRST WORKFLOW CHECKS PASSED\n\n"
+    },
+    {
+      "name": "verify-unified-progress.cjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS Survey+Install final stages\nPASS Pending installation is not completed\nPASS Direct installation final statuses\nPASS Supply Only dispatch completion\nPASS Cancelled and rejected excluded\nPASS Zero denominator safe\nPASS Review stays in review bucket\nPASS Supply dispatch is complete\nPASS Install PO dispatch is not complete\nPASS Per-PO grouping\nPASS Client/order weighted operational mean\nPASS Order done computation\nPASS Missing shops do not invent progress\nPASS 96 of 144 installed shops = 67 percent\nALL 14 REGRESSIONS PASSED\n\n"
+    },
+    {
+      "name": "verify-workorders-supply.mjs",
+      "status": "PASS",
+      "return_code": 0,
+      "output": "PASS No Supply Orders sidebar item\nPASS Work Orders remains in nav\nPASS Supply legacy route restricted\nPASS Legacy route redirects\nPASS Type filter directly visible\nPASS Type filter URL state\nPASS No duplicate fulfillment filter in drawer\nPASS Supply orders have Manage Supply link\nPASS Drawer delete tucked into More actions\nPASS Original delete confirmation retained\nPASS Embedded supply workflow\nPASS Supply scoping implemented\nPASS Production and Dispatch tabs preserved\n13 checks passed\n\n"
+    },
+    {
+      "name": "verify-zone-reports.mjs",
+      "status": "FAIL",
+      "return_code": 1,
+      "output": "cjs/loader:1401\n  const err = new Error(message);\n              ^\n\nError: Cannot find module 'exceljs'\nRequire stack:\n- /mnt/data/adroute_reporting_revision/scripts/verify-zone-reports.mjs\n    at Function._resolveFilename (node:internal/modules/cjs/loader:1401:15)\n    at defaultResolveImpl (node:internal/modules/cjs/loader:1057:19)\n    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1062:22)\n    at Function._load (node:internal/modules/cjs/loader:1211:37)\n    at TracingChannel.traceSync (node:diagnostics_channel:322:14)\n    at wrapModuleLoad (node:internal/modules/cjs/loader:235:24)\n    at Module.require (node:internal/modules/cjs/loader:1487:12)\n    at require (node:internal/modules/helpers:135:16)\n    at mockRequire (file:///mnt/data/adroute_reporting_revision/scripts/verify-zone-reports.mjs:15:49)\n    at eval (eval at load (file:///mnt/data/adroute_reporting_revision/scripts/verify-zone-reports.mjs:16:3), <anonymous>:15:19) {\n  code: 'MODULE_NOT_FOUND',\n  requireStack: [\n    '/mnt/data/adroute_reporting_revision/scripts/verify-zone-reports.mjs'\n  ]\n}\n\nNode.js v22.16.0\n"
+    }
+  ]
+}

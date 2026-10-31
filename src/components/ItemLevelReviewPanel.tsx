@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useMemo, useState } from 'react';
 import { itemSizeLabel } from '@/lib/units';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -277,7 +278,7 @@ export function ItemLevelReviewPanel(props: Props) {
                     <div className="mt-3 grid grid-cols-2 md:grid-cols-3 gap-2">
                       {r.relatedImages.map((img) => (
                         <button key={img.id} type="button" onClick={() => setLightbox(img.url)} className="text-left rounded-xl overflow-hidden border border-slate-200 bg-slate-50 hover:border-blue-300 transition">
-                          <img src={img.url} alt={img.label} className="w-full h-32 object-cover bg-slate-100" />
+                          <SecureImage src={img.url} alt={img.label} className="w-full h-32 object-cover bg-slate-100" />
                           <div className="px-2 py-1.5 bg-white border-t border-slate-100">
                             <p className="text-[11px] text-slate-600 truncate">{img.label}</p>
                           </div>
@@ -315,7 +316,7 @@ export function ItemLevelReviewPanel(props: Props) {
             <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
               {unlinkedSurveyPhotos.map((p: any) => (
                 <button key={p.id} type="button" onClick={() => setLightbox(p.photo_url)} className="rounded-xl overflow-hidden border border-slate-200 bg-white text-left">
-                  <img src={p.photo_url} alt={p.caption || 'Survey photo'} className="w-full h-28 object-cover bg-slate-100" />
+                  <SecureImage src={p.photo_url} alt={p.caption || 'Survey photo'} className="w-full h-28 object-cover bg-slate-100" />
                   <p className="px-2 py-1.5 text-[11px] text-slate-600 truncate">{p.caption || 'Survey photo'}</p>
                 </button>
               ))}
@@ -350,7 +351,7 @@ export function ItemLevelReviewPanel(props: Props) {
 
       {lightbox && (
         <div onClick={() => setLightbox(null)} className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4 cursor-zoom-out">
-          <img src={lightbox} alt="Evidence" className="max-w-full max-h-full rounded-lg" />
+          <SecureImage src={lightbox} alt="Evidence" className="max-w-full max-h-full rounded-lg" />
         </div>
       )}
     </div>

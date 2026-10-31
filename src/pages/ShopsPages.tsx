@@ -1,3 +1,4 @@
+import { SecureImage, SecureAnchor } from '@/lib/secureMedia';
 import { isOwnerStage, ownerStageLabels, statusesForStage } from '@/lib/ownerOperations';
 import { useState, useEffect, useMemo, type ReactNode } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -3598,7 +3599,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
               <span className="font-medium">{shop.clients?.name || 'No client'}</span>
               {shop.purchase_orders?.po_number && <Link to={`/purchase-orders?order=${encodeURIComponent(shop.purchase_order_id)}`} className="text-blue-700 hover:underline">PO {shop.purchase_orders.po_number}</Link>}
               {(shop.city || shop.district) && <span>· {[shop.city, shop.district].filter(Boolean).join(', ')}</span>}
-              {!!shop.contact_phone && <a href={`tel:${shop.contact_phone}`} className="hover:underline">· {shop.contact_phone}</a>}
+              {!!shop.contact_phone && <SecureAnchor href={`tel:${shop.contact_phone}`} className="hover:underline">· {shop.contact_phone}</SecureAnchor>}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -3636,9 +3637,9 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
               .map(([label, value], index) => <div key={`${label}-${index}`} className="min-w-0"><dt className="text-slate-500">{label}</dt><dd className="mt-0.5 break-words font-medium text-slate-800">{value || '—'}</dd></div>)}
           </dl>
           <div className="mt-3 flex flex-wrap gap-3 text-xs">
-            {shop.contact_phone && <a href={`tel:${shop.contact_phone}`} className="text-blue-700 underline">Call shop</a>}
-            {shop.contact_phone && String(shop.contact_phone).replace(/\D/g, '').length >= 10 && <a href={`https://wa.me/${String(shop.contact_phone).replace(/\D/g, '').length === 10 ? '91' : ''}${String(shop.contact_phone).replace(/\D/g, '')}`} target="_blank" rel="noreferrer" className="text-blue-700 underline">WhatsApp</a>}
-            {shop.latitude != null && shop.longitude != null && <a href={`https://www.google.com/maps?q=${shop.latitude},${shop.longitude}`} target="_blank" rel="noreferrer" className="text-blue-700 underline">View on map</a>}
+            {shop.contact_phone && <SecureAnchor href={`tel:${shop.contact_phone}`} className="text-blue-700 underline">Call shop</SecureAnchor>}
+            {shop.contact_phone && String(shop.contact_phone).replace(/\D/g, '').length >= 10 && <SecureAnchor href={`https://wa.me/${String(shop.contact_phone).replace(/\D/g, '').length === 10 ? '91' : ''}${String(shop.contact_phone).replace(/\D/g, '')}`} target="_blank" rel="noreferrer" className="text-blue-700 underline">WhatsApp</SecureAnchor>}
+            {shop.latitude != null && shop.longitude != null && <SecureAnchor href={`https://www.google.com/maps?q=${shop.latitude},${shop.longitude}`} target="_blank" rel="noreferrer" className="text-blue-700 underline">View on map</SecureAnchor>}
           </div>
         </details>
       </div>
@@ -3774,7 +3775,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                 // approved photos are always visible on Shop Details.
                 const unmappedInstall = allProofs.filter((p:any)=>!p.work_item_id || !currentWorkItemIds.has(p.work_item_id));
                 if (!unmappedSurvey.length && !unmappedInstall.length) return null;
-                return <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-3"><p className="text-xs font-bold text-amber-900">Legacy / unmapped evidence</p><p className="text-[11px] text-amber-700 mt-0.5">These photos exist in the shop and are shown here so evidence never disappears. They are not guessed onto a measurement.</p><div className="mt-2 grid max-h-80 grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3 lg:grid-cols-4">{unmappedSurvey.map((p:any,i:number)=><button type="button" key={`us-${p.id}`} aria-label={`Inspect unmapped survey ${i+1}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped survey ${i+1}`})} className="relative flex h-40 min-w-0 items-center justify-center rounded-lg border border-amber-200 bg-white p-1.5 hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><img src={p.photo_url} alt={`Unmapped survey ${i+1}`} loading="lazy" className="max-h-[148px] max-w-full object-contain"/><span className="absolute bottom-1 left-1 rounded bg-blue-700 px-1 text-[9px] text-white">SURVEY</span></button>)}{unmappedInstall.map((p:any,i:number)=><button type="button" key={`ui-${p.id}`} aria-label={`Inspect unmapped installation ${i+1}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped installation ${i+1}`})} className="relative flex h-40 min-w-0 items-center justify-center rounded-lg border border-amber-200 bg-white p-1.5 hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><img src={p.photo_url} alt={`Unmapped installation ${i+1}`} loading="lazy" className="max-h-[148px] max-w-full object-contain"/><span className="absolute bottom-1 left-1 rounded bg-emerald-700 px-1 text-[9px] text-white">INSTALL</span></button>)}</div></div>;
+                return <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/60 p-3"><p className="text-xs font-bold text-amber-900">Legacy / unmapped evidence</p><p className="text-[11px] text-amber-700 mt-0.5">These photos exist in the shop and are shown here so evidence never disappears. They are not guessed onto a measurement.</p><div className="mt-2 grid max-h-80 grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3 lg:grid-cols-4">{unmappedSurvey.map((p:any,i:number)=><button type="button" key={`us-${p.id}`} aria-label={`Inspect unmapped survey ${i+1}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped survey ${i+1}`})} className="relative flex h-40 min-w-0 items-center justify-center rounded-lg border border-amber-200 bg-white p-1.5 hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><SecureImage src={p.photo_url} alt={`Unmapped survey ${i+1}`} loading="lazy" className="max-h-[148px] max-w-full object-contain"/><span className="absolute bottom-1 left-1 rounded bg-blue-700 px-1 text-[9px] text-white">SURVEY</span></button>)}{unmappedInstall.map((p:any,i:number)=><button type="button" key={`ui-${p.id}`} aria-label={`Inspect unmapped installation ${i+1}`} onClick={()=>setEvidencePreview({src:p.photo_url,label:`Unmapped installation ${i+1}`})} className="relative flex h-40 min-w-0 items-center justify-center rounded-lg border border-amber-200 bg-white p-1.5 hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><SecureImage src={p.photo_url} alt={`Unmapped installation ${i+1}`} loading="lazy" className="max-h-[148px] max-w-full object-contain"/><span className="absolute bottom-1 left-1 rounded bg-emerald-700 px-1 text-[9px] text-white">INSTALL</span></button>)}</div></div>;
               })()}
           />}
         </div>
@@ -3811,7 +3812,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       </div>
 
       <Modal open={!!evidencePreview} onClose={() => setEvidencePreview(null)} title={evidencePreview?.label ? `Photo preview · ${evidencePreview.label}` : 'Photo preview'} size="lg">
-        {evidencePreview && <div className="bg-slate-950 rounded-xl min-h-[60vh] flex items-center justify-center p-3"><img src={evidencePreview.src} alt={evidencePreview.label} className="max-w-full max-h-[75vh] object-contain rounded-lg" /></div>}
+        {evidencePreview && <div className="bg-slate-950 rounded-xl min-h-[60vh] flex items-center justify-center p-3"><SecureImage src={evidencePreview.src} alt={evidencePreview.label} className="max-w-full max-h-[75vh] object-contain rounded-lg" /></div>}
       </Modal>
 
       <Modal open={!!assignModal} onClose={() => setAssignModal(null)} title={`Assign ${assignModal === 'installer' ? 'Installer' : assignModal === 'designer' ? 'Designer' : 'Surveyor'}`}>
@@ -3864,7 +3865,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
             <p className="text-xs text-slate-500 mb-3">File names do not matter. The sequence below is exactly the sequence selected from your device. Choose the board visible in each photo one-by-one.</p>
             <div className="max-h-[420px] overflow-y-auto border border-slate-200 rounded-xl divide-y divide-slate-100">
               {surveyPhotoUploadFiles.map((file, photoIndex) => <div key={`${file.name}-${photoIndex}`} className="p-3 grid grid-cols-[56px_1fr] gap-3 items-center">
-                <div className="w-14 h-14 rounded-lg bg-slate-100 overflow-hidden flex items-center justify-center text-xs font-bold text-slate-500">{file.type.startsWith('image/') ? <img src={URL.createObjectURL(file)} className="h-full w-full object-contain" alt={file.name} /> : `#${photoIndex + 1}`}</div>
+                <div className="w-14 h-14 rounded-lg bg-slate-100 overflow-hidden flex items-center justify-center text-xs font-bold text-slate-500">{file.type.startsWith('image/') ? <SecureImage src={URL.createObjectURL(file)} className="h-full w-full object-contain" alt={file.name} /> : `#${photoIndex + 1}`}</div>
                 <div className="min-w-0"><div className="flex items-center gap-2 mb-1"><span className="text-xs font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded">Photo {photoIndex + 1}</span><span className="text-xs text-slate-500 truncate">{file.name}</span></div>
                   {surveyPhotoTargetItemId ? <div className="w-full border border-blue-200 bg-blue-50 rounded-lg px-2.5 py-2 text-sm text-blue-800 font-medium">Automatically linked to this Work Item</div> : <select value={surveyPhotoFileMap[photoIndex] || ''} onChange={(e) => setSurveyPhotoFileMap((prev) => ({ ...prev, [photoIndex]: e.target.value }))} className="w-full border border-slate-300 rounded-lg px-2.5 py-2 text-sm bg-white">
                     <option value="">Select exact board / measurement...</option>
@@ -3892,7 +3893,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
             <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
               {installUploadFiles.map((file, i) => (
                 <div key={`${file.name}-${i}`} className="grid grid-cols-[56px_1fr] gap-3 items-center rounded-lg border border-slate-200 p-2">
-                  <img src={URL.createObjectURL(file)} alt={file.name} className="h-12 w-14 rounded bg-slate-100 object-contain" />
+                  <SecureImage src={URL.createObjectURL(file)} alt={file.name} className="h-12 w-14 rounded bg-slate-100 object-contain" />
                   <div className="min-w-0">
                     <p className="text-xs text-slate-500 truncate">{file.name}</p>
                     {installUploadTarget ? <p className="text-xs font-medium text-slate-600">Mapped to selected work item</p> : (

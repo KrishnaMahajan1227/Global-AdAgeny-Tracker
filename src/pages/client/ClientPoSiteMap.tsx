@@ -1,3 +1,4 @@
+import { SecureImage, SecureAnchor } from '@/lib/secureMedia';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { MarkerClusterer } from '@googlemaps/markerclusterer';
 import { Card, EmptyState } from '@/components/ui';
@@ -152,9 +153,9 @@ export function ClientPoSiteMap({ shops, fulfillmentType, receiptRequired = fals
                 ) : (
                   <div className="grid grid-cols-4 gap-1.5">
                     {[...(selectedPhotos?.survey || []), ...(selectedPhotos?.installation || [])].slice(0, 8).map((p) => (
-                      <a key={p.id} href={p.photo_url} target="_blank" rel="noopener noreferrer" className="block aspect-square rounded overflow-hidden bg-slate-100">
-                        <img src={p.photo_url} alt={p.caption || p.photo_type} className="w-full h-full object-cover" />
-                      </a>
+                      <SecureAnchor key={p.id} href={p.photo_url} target="_blank" rel="noopener noreferrer" className="block aspect-square rounded overflow-hidden bg-slate-100">
+                        <SecureImage src={p.photo_url} alt={p.caption || p.photo_type} className="w-full h-full object-cover" />
+                      </SecureAnchor>
                     ))}
                     {!photosLoading && (selectedPhotos?.survey.length || 0) + (selectedPhotos?.installation.length || 0) === 0 && (
                       <p className="col-span-4 text-xs text-slate-400 py-2">No photos uploaded yet.</p>

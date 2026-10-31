@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useState } from 'react';
 import { ImageOff } from 'lucide-react';
 
@@ -54,7 +55,7 @@ export function InstallationPhotoGrid({ photos }: { photos: InstallationPhotoRow
               }
               return (
                 <button key={p.id} onClick={() => setLightbox(p.photo_url)} className="relative block aspect-[4/3] rounded-lg overflow-hidden border border-slate-200 bg-slate-100 text-left">
-                  <img
+                  <SecureImage
                     src={p.photo_url}
                     alt={p.caption || p.photo_type}
                     className="w-full h-full object-contain"
@@ -74,7 +75,7 @@ export function InstallationPhotoGrid({ photos }: { photos: InstallationPhotoRow
 
       {lightbox && (
         <div onClick={() => setLightbox(null)} className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4 cursor-zoom-out">
-          <img src={lightbox} alt="Installation" className="max-w-full max-h-full rounded-lg" />
+          <SecureImage src={lightbox} alt="Installation" className="max-w-full max-h-full rounded-lg" />
         </div>
       )}
     </div>

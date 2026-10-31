@@ -1,6 +1,8 @@
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
+import { prepareEvidenceImage, type EvidenceMark } from './reportImage';
 import pptxgen from 'pptxgenjs';
 import { Shop, WorkItem, Survey, SurveyPhoto, InstallationJob, InstallationProof, Invoice, InvoiceItem, Organization, Client, BoardMarking, DesignVersion, DesignVersionItem, VehicleLoadLogRow } from './types';
 import { renderMarkedImage, toJpegDataUrl, loadImage, buildBoardLabel, numberMarkingsByPhoto } from './markingUtils';
@@ -67,53 +69,43 @@ async function buildBoardImageGroups(
   photos: SurveyPhoto[],
   markings: BoardMarking[]
 ): Promise<BoardImageGroup[]> {
-  const groups: BoardImageGroup[] = [];
-  const byPhoto = new Map<string, WorkItem[]>();
-  const unmarked: WorkItem[] = [];
-
-  for (const item of workItems) {
-    const marking = markings.find((m) => m.work_item_id === item.id);
-    if (marking && marking.points?.length >= 3) {
-      const list = byPhoto.get(marking.survey_photo_id) || [];
-      list.push(item);
-      byPhoto.set(marking.survey_photo_id, list);
-    } else {
-      unmarked.push(item);
+  const uniquePhotos = Array.from(new Map(photos.filter(p=>p.id).map(p=>[p.id,p])).values());
+  const uniqueItems = Array.from(new Map(workItems.filter(w=>w.id).map(w=>[w.id,w])).values());
+  const itemById = new Map(uniqueItems.map(w=>[w.id,w]));
+  const usedItems = new Set<string>();
+  const markGroups = new Map<string,{points: {x:number;y:number}[][];labels:string[];items:WorkItem[]}>();
+  const seenMarkings = new Set<string>();
+  for(const mark of markings) {
+    if (mark.id && seenMarkings.has(mark.id)) continue;
+    if (mark.id) seenMarkings.add(mark.id);
+    if (!Array.isArray(mark.points) || mark.points.length<3 || !mark.work_item_id) continue;
+    const item=itemById.get(mark.work_item_id);
+    if (!item || !uniquePhotos.some(p=>p.id===mark.survey_photo_id)) continue;
+    const group=markGroups.get(mark.survey_photo_id) || {points:[],labels:[],items:[]};
+    group.points.push(mark.points);
+    group.labels.push(buildBoardLabel({workTypeName:item.work_type_name,
+      width:item.approved_width ?? item.survey_width,
+      height:item.approved_height ?? item.survey_height,
+      unit:item.approved_unit ?? item.survey_unit}));
+    if(!group.items.some(w=>w.id===item.id))group.items.push(item);
+    usedItems.add(item.id);
+    markGroups.set(mark.survey_photo_id,group);
+  }
+  const unmarked=uniqueItems.filter(w=>!usedItems.has(w.id));
+  const groups:BoardImageGroup[]=[];
+  for(const [idx,photo] of uniquePhotos.entries()){
+    if(!photo.photo_url)throw new Error(`Survey evidence file missing: ${photo.id}`);
+    const marking=markGroups.get(photo.id);
+    try{
+      const dataUrl=marking?.points.length
+        ? (await renderMarkedImage(photo.photo_url,marking.points,{labels:marking.labels})).dataUrl
+        : await toJpegDataUrl(photo.photo_url);
+      groups.push({photoId:photo.id,dataUrl,
+        items:[...(marking?.items||[]),...(idx===0?unmarked:[])]});
+    }catch(error){
+      throw new Error(`Could not embed marked survey photo ${photo.id}: ${error instanceof Error?error.message:String(error)}`);
     }
   }
-
-  for (const [photoId, items] of byPhoto) {
-    const photo = photos.find((p) => p.id === photoId);
-    if (!photo?.photo_url) continue;
-    const pointSets = items.map((item) => markings.find((m) => m.work_item_id === item.id)!.points);
-    const labels = items.map((item) =>
-      buildBoardLabel({
-        workTypeName: item.work_type_name,
-        width: item.approved_width ?? item.survey_width,
-        height: item.approved_height ?? item.survey_height,
-        unit: item.approved_unit ?? item.survey_unit,
-      })
-    );
-    try {
-      const { dataUrl } = await renderMarkedImage(photo.photo_url, pointSets, { labels });
-      groups.push({ photoId, items, dataUrl });
-    } catch {
-      // Photo failed to load/render (e.g. offline) — skip it, same as the
-      // old per-item behaviour did on a failed fetch.
-    }
-  }
-
-  for (const item of unmarked) {
-    const photo = photos[0];
-    if (!photo?.photo_url) continue;
-    try {
-      const dataUrl = await toJpegDataUrl(photo.photo_url);
-      groups.push({ photoId: photo.id, items: [item], dataUrl });
-    } catch {
-      // skip
-    }
-  }
-
   return groups;
 }
 
@@ -1404,6 +1396,7 @@ export interface ClientSiteDetailRow {
   installation_photo_count: number;
 }
 export interface ClientSitePhotoRow {
+  photo_id?: string;
   shop_name: string;
   city: string | null;
   po_label: string;
@@ -1412,53 +1405,79 @@ export interface ClientSitePhotoRow {
   photo_url: string;
 }
 
-export function exportClientSiteDetailReport(
+/** Complete client-facing workbook: normalized site rows plus embedded,
+ * marked photographic evidence. Never export expiring private Storage links.
+ * Unreadable evidence fails the export instead of silently looking complete.
+ */
+export async function exportClientSiteDetailReport(
   sites: ClientSiteDetailRow[],
   surveyPhotos: ClientSitePhotoRow[],
   installPhotos: ClientSitePhotoRow[],
-  fileName: string = 'site-detail-report'
-) {
-  const wb = XLSX.utils.book_new();
-
-  const siteData = sites.map((r) => ({
-    'Site': r.shop_name,
-    'City': r.city || '',
-    'District': r.district || '',
-    'Address': r.address || '',
-    'Work Order': r.po_label,
-    'Agency': r.agency_name,
-    'Status': r.status_label,
-    'Work Type(s)': r.work_types,
-    'Total Area (sq ft)': r.total_area_sqft ?? '',
-    'Total Qty (pieces)': r.total_qty ?? '',
-    'Assigned On': r.assigned_on,
-    'Survey Photos': r.survey_photo_count,
-    'Installation Photos': r.installation_photo_count,
-  }));
-  const sitesWs = XLSX.utils.json_to_sheet(siteData.length > 0 ? siteData : [{ 'Site': 'No data' }]);
-  if (siteData.length > 0) sitesWs['!cols'] = Object.keys(siteData[0]).map((h) => ({ wch: Math.min(Math.max(h.length + 2, 12), 34) }));
-  XLSX.utils.book_append_sheet(wb, sitesWs, 'Sites');
-
-  function appendPhotoSheet(name: string, rows: ClientSitePhotoRow[]) {
-    const data = rows.map((r) => ({
-      'Site': r.shop_name, 'City': r.city || '', 'Work Order': r.po_label,
-      'Photo Type': r.photo_type, 'Uploaded On': r.uploaded_on, 'Photo Link': r.photo_url,
-    }));
-    const ws = XLSX.utils.json_to_sheet(data.length > 0 ? data : [{ 'Site': 'No data' }]);
-    if (data.length > 0) {
-      ws['!cols'] = [{ wch: 22 }, { wch: 14 }, { wch: 20 }, { wch: 14 }, { wch: 18 }, { wch: 46 }];
-      const linkCol = 5; // 'Photo Link' is the 6th column (index 5)
-      rows.forEach((r, i) => {
-        const cellRef = `${XLSX.utils.encode_col(linkCol)}${i + 2}`;
-        if (r.photo_url && ws[cellRef]) ws[cellRef].l = { Target: r.photo_url };
-      });
+  fileName: string = 'site-detail-report',
+  marksByPhoto: Map<string, EvidenceMark[]> = new Map(),
+): Promise<void> {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'AdRoute';
+  wb.created = new Date();
+  const safe = (v: unknown) => {
+    const text = String(v ?? '');
+    return /^[\s\u0000-\u001f]*[=+@\-]/.test(text) ? `’${text}` : text;
+  };
+  const sitesSheet = wb.addWorksheet('Sites', { views: [{ state: 'frozen', ySplit: 1 }] });
+  sitesSheet.columns = [
+    {header:'Site',key:'name',width:29},{header:'City',key:'city',width:18},
+    {header:'District',key:'district',width:20},{header:'Address',key:'address',width:44},
+    {header:'Work Order',key:'order',width:28},{header:'Agency',key:'agency',width:26},
+    {header:'Status',key:'status',width:22},{header:'Work Types',key:'types',width:37},
+    {header:'Area (sq.ft)',key:'area',width:16},{header:'Quantity',key:'qty',width:14},
+    {header:'Assigned On',key:'assigned',width:18},
+    {header:'Survey Photos',key:'survey',width:16},{header:'Install Photos',key:'install',width:16},
+  ];
+  for (const r of sites) sitesSheet.addRow({
+    name:safe(r.shop_name),city:safe(r.city),district:safe(r.district),
+    address:safe(r.address),order:safe(r.po_label),agency:safe(r.agency_name),
+    status:safe(r.status_label),types:safe(r.work_types),area:r.total_area_sqft ?? null,
+    qty:r.total_qty ?? null,assigned:safe(r.assigned_on),
+    survey:r.survey_photo_count,install:r.installation_photo_count,
+  });
+  async function photoSheet(name: string, photos: ClientSitePhotoRow[]) {
+    const sheet = wb.addWorksheet(name, {views:[{state:'frozen',ySplit:1}]});
+    sheet.columns=[{header:'Site',key:'site',width:28},{header:'Work Order',key:'order',width:27},
+      {header:'Photo Type',key:'type',width:20},{header:'Uploaded',key:'date',width:22},
+      {header:'Embedded photographic evidence / markings',key:'photo',width:72},
+      {header:'Original file',key:'source',width:34}];
+    const seen = new Set<string>();
+    for (const item of photos) {
+      if (!item.photo_url) throw new Error(`Missing ${name} photo URL for ${item.shop_name}`);
+      const key = item.photo_id || `${item.shop_name}:${item.photo_url}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const row = sheet.addRow({site:safe(item.shop_name),order:safe(item.po_label),
+        type:safe(item.photo_type),date:safe(item.uploaded_on),source:'Embedded (authorized export)'});
+      row.height = 175;
+      const img = await prepareEvidenceImage(item.photo_url,marksByPhoto.get(item.photo_id || '') || []);
+      const imageId = wb.addImage({base64:img.dataUrl.split(',')[1],extension:'jpeg'});
+      sheet.addImage(imageId,{tl:{col:4.04,row:row.number-0.96},
+        br:{col:4.96,row:row.number-0.04},editAs:'oneCell'});
     }
-    XLSX.utils.book_append_sheet(wb, ws, name);
+    return sheet;
   }
-  appendPhotoSheet('Survey Photos', surveyPhotos);
-  appendPhotoSheet('Installation Photos', installPhotos);
-
-  XLSX.writeFile(wb, `${fileName}.xlsx`);
+  const surveySheet = await photoSheet('Survey Photos',surveyPhotos);
+  const installSheet = await photoSheet('Installation Photos',installPhotos);
+  for (const sheet of [sitesSheet,surveySheet,installSheet]) {
+    const header=sheet.getRow(1);
+    header.font={bold:true,color:{argb:'FFFFFFFF'}};
+    header.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF203F6A'}};
+    header.alignment={vertical:'middle',wrapText:true};
+    header.height=28;
+    sheet.autoFilter={from:{row:1,column:1},to:{row:1,column:sheet.columnCount}};
+  }
+  const bytes=await wb.xlsx.writeBuffer();
+  const url=URL.createObjectURL(new Blob([bytes as BlobPart],
+    {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+  const a=document.createElement('a');a.href=url;a.download=`${fileName}.xlsx`;
+  document.body.appendChild(a);a.click();a.remove();
+  window.setTimeout(()=>URL.revokeObjectURL(url),60000);
 }
 
 /** Table-only PDF, safe at any scale (POs/campaigns, never one row per shop/photo) — the client-facing equivalent of the agency's own summary-style exports. */
@@ -1506,9 +1525,13 @@ export async function exportClientSiteDetailPDF(
   surveyPhotosByShop: Map<string, ClientSitePhotoRow[]>,
   installPhotosByShop: Map<string, ClientSitePhotoRow[]>,
   org: Organization | null | undefined,
-  fileName: string = 'site-detail-report'
+  fileName: string = 'site-detail-report',
+  marksByPhoto: Map<string, EvidenceMark[]> = new Map(),
 ): Promise<{ generated: number; skipped: number }> {
-  const scoped = sites.slice(0, CLIENT_SITE_PDF_MAX_SITES);
+  if (sites.length > CLIENT_SITE_PDF_MAX_SITES) {
+    throw new Error(`Select at most ${CLIENT_SITE_PDF_MAX_SITES} sites per PDF. Filter by agency or Work Order to avoid an incomplete report.`);
+  }
+  const scoped = sites;
   if (scoped.length === 0) return { generated: 0, skipped: 0 };
 
   const doc = new jsPDF();
@@ -1529,15 +1552,18 @@ export async function exportClientSiteDetailPDF(
       `Status: ${site.status_label}   |   Work Type(s): ${site.work_types}   |   Assigned: ${site.assigned_on}`,
     ];
     for (const line of infoLines) {
-      doc.text(line, 14, y);
-      y += 6;
+      for (const part of doc.splitTextToSize(line, pageWidth - 28) as string[]) {
+        if (y + 6 > pageHeight - 20) { doc.addPage(); y = 22; }
+        doc.text(part, 14, y);
+        y += 5;
+      }
     }
     doc.setTextColor(15, 23, 42);
     y += 4;
 
     const maxImgWidth = (pageWidth - 14 - 14 - 8) / 2; // two photos side by side
-    const surveyPhotos = (surveyPhotosByShop.get(site.shop_id) || []).slice(0, 2);
-    const installPhotos = (installPhotosByShop.get(site.shop_id) || []).slice(0, 2);
+    const surveyPhotos = [...new Map((surveyPhotosByShop.get(site.shop_id) || []).map(p=>[p.photo_url,p])).values()];
+    const installPhotos = [...new Map((installPhotosByShop.get(site.shop_id) || []).map(p=>[p.photo_url,p])).values()];
 
     if (surveyPhotos.length === 0 && installPhotos.length === 0) {
       doc.setFontSize(9);
@@ -1549,19 +1575,22 @@ export async function exportClientSiteDetailPDF(
 
     const maxRows = Math.max(surveyPhotos.length, installPhotos.length);
     for (let r = 0; r < maxRows; r++) {
+      // Reserve both columns together. A single auto-page-break in one column
+      // must never leave survey and installation photos on mismatched pages.
+      if (y + 94 > pageHeight - 20) { doc.addPage(); y = 22; }
       const rowStartY = y;
       let leftBottom = rowStartY, rightBottom = rowStartY;
       if (surveyPhotos[r]) {
         try {
-          const dataUrl = await toJpegDataUrl(surveyPhotos[r].photo_url);
-          leftBottom = await addCaptionedImage(doc, `Survey — ${surveyPhotos[r].photo_type}`, dataUrl, 14, rowStartY, maxImgWidth, 70, pageHeight);
-        } catch { /* skip photos that fail to fetch */ }
+          const prepared = await prepareEvidenceImage(surveyPhotos[r].photo_url,marksByPhoto.get(surveyPhotos[r].photo_id || '') || []);
+          leftBottom = await addCaptionedImage(doc, `Survey — ${surveyPhotos[r].photo_type}`, prepared.dataUrl, 14, rowStartY, maxImgWidth, 70, pageHeight);
+        } catch (error) { throw new Error(`Could not embed survey photo for ${site.shop_name}: ${String(error)}`); }
       }
       if (installPhotos[r]) {
         try {
           const dataUrl = await toJpegDataUrl(installPhotos[r].photo_url);
           rightBottom = await addCaptionedImage(doc, `Install — ${installPhotos[r].photo_type}`, dataUrl, 14 + maxImgWidth + 8, rowStartY, maxImgWidth, 70, pageHeight);
-        } catch { /* skip photos that fail to fetch */ }
+        } catch (error) { throw new Error(`Could not embed installation proof for ${site.shop_name}: ${String(error)}`); }
       }
       y = Math.max(leftBottom, rightBottom);
     }

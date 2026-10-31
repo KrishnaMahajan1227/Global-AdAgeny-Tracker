@@ -1,7 +1,8 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '@/lib/auth';
-import { ArrowLeft, ArrowRight, Check, Eye, EyeOff, Loader2, Mail, MapPin, ShieldCheck, Smartphone } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, Eye, EyeOff, Loader2, Mail, MapPin, ShieldCheck } from 'lucide-react';
 import './login.css';
 
 function AdRouteMark() {
@@ -14,10 +15,8 @@ function AdRouteMark() {
 }
 
 export default function LoginPage() {
-  const { signIn, signInWithPhone } = useAuth();
-  const [mode, setMode] = useState<'email' | 'phone'>('email');
+  const { signIn } = useAuth();
   const [email, setEmail] = useState('');
-  const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,13 +33,8 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
     try {
-      if (mode === 'email') {
-        const { error } = await signIn(email, password);
-        if (error) setError(error);
-      } else {
-        const { error } = await signInWithPhone(phone, password);
-        if (error) setError(error);
-      }
+      const { error } = await signIn(email, password);
+      if (error) setError(error);
     } finally {
       setLoading(false);
     }
@@ -49,7 +43,7 @@ export default function LoginPage() {
   return (
     <main className="signin-page">
       <section className="signin-visual" aria-label="AdRoute connected operations">
-        <img src="/landing/cinematic/10_AdRoute_Connected_Operations_Final_CTA.webp" alt="" className="signin-visual-image" />
+        <SecureImage src="/landing/cinematic/10_AdRoute_Connected_Operations_Final_CTA.webp" alt="" className="signin-visual-image" />
         <div className="signin-visual-vignette" />
         <div className="signin-visual-grain" />
 
@@ -96,27 +90,11 @@ export default function LoginPage() {
             <p>Sign in to continue to your AdRoute workspace. Your role automatically opens the right experience.</p>
           </div>
 
-          <div className="signin-mode" role="tablist" aria-label="Sign in method">
-            <button type="button" role="tab" aria-selected={mode === 'email'} className={mode === 'email' ? 'active' : ''} onClick={() => { setMode('email'); setError(null); }}>
-              <Mail size={16} /> Email
-            </button>
-            <button type="button" role="tab" aria-selected={mode === 'phone'} className={mode === 'phone' ? 'active' : ''} onClick={() => { setMode('phone'); setError(null); }}>
-              <Smartphone size={16} /> Phone
-            </button>
-          </div>
-
           <form onSubmit={handleSubmit} className="signin-form">
-            {mode === 'email' ? (
-              <label className="signin-field">
-                <span>Work email</span>
-                <div className="signin-input-wrap"><Mail size={17} /><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="username" placeholder="you@company.com" autoFocus /></div>
-              </label>
-            ) : (
-              <label className="signin-field">
-                <span>Phone number</span>
-                <div className="signin-input-wrap"><Smartphone size={17} /><input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} required autoComplete="tel" placeholder="+91 90000 00001" autoFocus /></div>
-              </label>
-            )}
+            <label className="signin-field">
+              <span>Work email</span>
+              <div className="signin-input-wrap"><Mail size={17} /><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="username" placeholder="you@company.com" autoFocus /></div>
+            </label>
 
             <label className="signin-field">
               <span>Password</span>

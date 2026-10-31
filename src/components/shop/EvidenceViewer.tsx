@@ -1,3 +1,4 @@
+import { SecureImage, SecureAnchor } from '@/lib/secureMedia';
 import { useEffect, useRef, useState } from 'react';
 import { X, ChevronLeft, ChevronRight, ExternalLink, ImageOff, FileText } from 'lucide-react';
 
@@ -45,7 +46,7 @@ export function EvidenceThumb({ slide, onOpen, onDelete, badge, badgeTone }: { s
         ) : (
           <span className="relative inline-block max-h-full max-w-full">
             {!loaded && <span className="absolute inset-0 animate-pulse bg-slate-100" />}
-            <img src={slide.src} alt={slide.subtitle || slide.title} loading="lazy" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} className="block max-h-[148px] max-w-full object-contain" />
+            <SecureImage src={slide.src} alt={slide.subtitle || slide.title} loading="lazy" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} className="block max-h-[148px] max-w-full object-contain" />
             <MarkOverlay marks={slide.marks} compact />
           </span>
         )}
@@ -63,9 +64,9 @@ export function EvidenceThumb({ slide, onOpen, onDelete, badge, badgeTone }: { s
 export function FileTile({ url, label, tone }: { url: string; label: string; tone: string }) {
   const ext = (url.split('?')[0].split('.').pop() || 'file').slice(0, 4).toUpperCase();
   return (
-    <a href={url} target="_blank" rel="noreferrer" className={`relative flex h-40 min-w-0 flex-col items-center justify-center gap-1 rounded-lg border bg-white p-2 transition hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 ${tone}`}>
+    <SecureAnchor href={url} target="_blank" rel="noreferrer" className={`relative flex h-40 min-w-0 flex-col items-center justify-center gap-1 rounded-lg border bg-white p-2 transition hover:border-blue-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600 ${tone}`}>
       <FileText className="w-6 h-6 text-slate-500" /><span className="text-[11px] font-bold">{ext}</span><span className="text-[10px] text-slate-500">{label}</span>
-    </a>
+    </SecureAnchor>
   );
 }
 
@@ -112,15 +113,15 @@ export function EvidenceViewer({ slides, index, onClose, onIndex }: { slides: Sl
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className="text-xs text-slate-300">{index + 1} / {slides.length}</span>
-          <a href={s.src} target="_blank" rel="noreferrer" className="p-2 rounded-lg hover:bg-white/10" title="Open original"><ExternalLink className="w-4 h-4" /></a>
+          <SecureAnchor href={s.src} target="_blank" rel="noreferrer" className="p-2 rounded-lg hover:bg-white/10" title="Open original"><ExternalLink className="w-4 h-4" /></SecureAnchor>
           <button type="button" ref={closeButtonRef} onClick={onClose} aria-label="Close photo viewer" className="p-2 rounded-lg hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white" title="Close (Esc)"><X className="w-5 h-5" /></button>
         </div>
       </div>
       <div className="relative flex-1 min-h-0 flex items-center justify-center px-14" onClick={(e) => e.stopPropagation()}>
         {index > 0 && <button type="button" aria-label="Previous photo" onClick={() => onIndex(index - 1)} className="absolute left-2 top-1/2 -translate-y-1/2 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white"><ChevronLeft className="w-6 h-6" /></button>}
-        {failed ? <div className="text-slate-300 flex flex-col items-center gap-2"><ImageOff className="w-10 h-10" /><p className="text-sm">Unable to load photo</p><a href={s.src} target="_blank" rel="noreferrer" className="text-xs underline">Open original image</a></div> : (
+        {failed ? <div className="text-slate-300 flex flex-col items-center gap-2"><ImageOff className="w-10 h-10" /><p className="text-sm">Unable to load photo</p><SecureAnchor href={s.src} target="_blank" rel="noreferrer" className="text-xs underline">Open original image</SecureAnchor></div> : (
           <div className="relative inline-block max-h-full max-w-full">
-            <img src={s.src} alt={s.title} onError={() => setFailed(true)} className="block max-h-[calc(100vh-190px)] max-w-full rounded-lg object-contain" />
+            <SecureImage src={s.src} alt={s.title} onError={() => setFailed(true)} className="block max-h-[calc(100vh-190px)] max-w-full rounded-lg object-contain" />
             <MarkOverlay marks={s.marks} showLabels />
           </div>
         )}
@@ -129,7 +130,7 @@ export function EvidenceViewer({ slides, index, onClose, onIndex }: { slides: Sl
       <div className="px-4 pb-4 pt-2" onClick={(e) => e.stopPropagation()}>
         {markCount > 0 && <p className="text-center text-xs text-slate-300 mb-2">{markCount} board marking(s) on this photo — <span className="text-blue-300 font-semibold">blue</span> = this work item, grey dashed = other items</p>}
         <div className="flex gap-2 overflow-x-auto justify-center">
-          {slides.map((sl, i) => <button key={i} type="button" aria-label={`View photo ${i + 1}: ${sl.title}`} aria-current={i === index ? 'true' : undefined} onClick={() => onIndex(i)} className={`shrink-0 h-12 w-16 rounded-md overflow-hidden border-2 ${i === index ? 'border-blue-400' : 'border-transparent opacity-60 hover:opacity-100'}`}><img src={sl.src} alt="" className="h-full w-full bg-slate-900 object-contain" /></button>)}
+          {slides.map((sl, i) => <button key={i} type="button" aria-label={`View photo ${i + 1}: ${sl.title}`} aria-current={i === index ? 'true' : undefined} onClick={() => onIndex(i)} className={`shrink-0 h-12 w-16 rounded-md overflow-hidden border-2 ${i === index ? 'border-blue-400' : 'border-transparent opacity-60 hover:opacity-100'}`}><SecureImage src={sl.src} alt="" className="h-full w-full bg-slate-900 object-contain" /></button>)}
         </div>
       </div>
     </div>

@@ -64,21 +64,13 @@ export default function SuperAdminPage() {
     },
   });
 
-  const { data: allShops } = useQuery({
-    queryKey: ['superadmin-shops'],
+  // Read aggregate counts through an authorized RPC, never full client/shop records.
+  const { data: orgMetrics } = useQuery({
+    queryKey: ['superadmin-org-metrics'],
     queryFn: async () => {
-      const { data, error } = await supabase.from('shops').select('id, organization_id, status');
+      const { data, error } = await supabase.rpc('super_admin_org_metrics');
       if (error) throw error;
-      return data as { id: string; organization_id: string; status: string }[];
-    },
-  });
-
-  const { data: allClients } = useQuery({
-    queryKey: ['superadmin-clients'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('clients').select('id, organization_id');
-      if (error) throw error;
-      return data as { id: string; organization_id: string }[];
+      return data as { organization_id: string; client_count: number; shop_count: number; completed_shop_count: number }[];
     },
   });
 
@@ -97,16 +89,16 @@ export default function SuperAdminPage() {
   const platformStats = useMemo(() => {
     const agencies = (orgs || []).filter((o) => o.org_type === 'agency');
     const clients = (orgs || []).filter((o) => o.org_type === 'client');
-    const completedShops = (allShops || []).filter((s) => s.status === 'installed' || s.status === 'billed').length;
+    const completedShops = (orgMetrics || []).reduce((n, m) => n + Number(m.completed_shop_count), 0);
     return {
       agencyCount: agencies.length,
       clientCount: clients.length,
       userCount: (allUsers || []).filter((u) => u.role !== 'super_admin').length,
-      shopCount: (allShops || []).length,
+      shopCount: (orgMetrics || []).reduce((n, m) => n + Number(m.shop_count), 0),
       completedShops,
       activeSubs: (orgs || []).filter((o) => o.subscription_status === 'active').length,
     };
-  }, [orgs, allUsers, allShops]);
+  }, [orgs, allUsers, orgMetrics]);
 
   const usersByOrg = useMemo(() => {
     const map = new Map<string, typeof allUsers>();
@@ -121,20 +113,15 @@ export default function SuperAdminPage() {
 
   const shopsByOrg = useMemo(() => {
     const map = new Map<string, { total: number; completed: number }>();
-    for (const s of allShops || []) {
-      const entry = map.get(s.organization_id) || { total: 0, completed: 0 };
-      entry.total += 1;
-      if (s.status === 'installed' || s.status === 'billed') entry.completed += 1;
-      map.set(s.organization_id, entry);
-    }
+    for (const m of orgMetrics || []) map.set(m.organization_id, { total: Number(m.shop_count), completed: Number(m.completed_shop_count) });
     return map;
-  }, [allShops]);
+  }, [orgMetrics]);
 
   const clientsByOrg = useMemo(() => {
     const map = new Map<string, number>();
-    for (const c of allClients || []) map.set(c.organization_id, (map.get(c.organization_id) || 0) + 1);
+    for (const m of orgMetrics || []) map.set(m.organization_id, Number(m.client_count));
     return map;
-  }, [allClients]);
+  }, [orgMetrics]);
 
   // Active-link counts, per org, in whichever direction that org sits —
   // this is what answers "is this client using more than one agency" /

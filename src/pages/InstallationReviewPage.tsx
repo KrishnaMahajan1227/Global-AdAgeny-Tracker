@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { itemSizeLabel } from '@/lib/units';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -494,7 +495,7 @@ export default function InstallationReviewPage() {
                       ) : (
                         <div className="flex items-center -space-x-2">
                           {photos.slice(0, 3).map((p, idx) => (
-                            <img
+                            <SecureImage
                               key={p.id}
                               src={p.photo_url}
                               alt="Installation evidence preview"
@@ -675,7 +676,7 @@ export default function InstallationReviewPage() {
       {lightbox && (
         <div onClick={() => setLightbox(null)} role="dialog" aria-modal="true" aria-label="Full size installation evidence" className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4 cursor-zoom-out">
           <button type="button" onClick={() => setLightbox(null)} className="absolute right-4 top-4 rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-900">Close (Esc)</button>
-          <img src={lightbox} alt="Full size installation evidence" onClick={event => event.stopPropagation()} className="max-w-full max-h-full rounded-lg" />
+          <SecureImage src={lightbox} alt="Full size installation evidence" onClick={event => event.stopPropagation()} className="max-w-full max-h-full rounded-lg" />
         </div>
       )}
     </div>
@@ -757,7 +758,7 @@ function MaterialLoadedSummary({ job, onOpenPhoto }: { job: any; onOpenPhoto: (u
 
       {job.material_check_photo_url && (
         <div className="p-2 border-t border-slate-100">
-          <img
+          <SecureImage
             src={job.material_check_photo_url}
             alt="Loaded material"
             onClick={() => onOpenPhoto(job.material_check_photo_url)}
@@ -827,7 +828,7 @@ function WorkItemEvidenceReview({ shopId, jobId, assignedTo, readOnly = false, o
   if (!items.length) return <p role="alert" className="text-xs text-amber-700">No work items found; review needs item reconciliation.</p>;
   const dim=(it:any)=>{const w=it.approved_width??it.survey_width,h=it.approved_height??it.survey_height,u=it.approved_unit??it.survey_unit??'ft',q=it.approved_quantity??it.survey_quantity??1,a=it.approved_area??it.survey_area;return `${itemSizeLabel(it)} · Qty ${q}${a!=null?` · ${Number(a).toFixed(2)} sq.ft`:''}`};
   const toggle=(key:string)=>setSelected(prev=>{const n=new Set(prev);n.has(key)?n.delete(key):n.add(key);return n});
-  const Photo=({url,label,reviewKey,decision}:{url?:string|null;label:string;reviewKey?:string;decision?:any})=>url?(<div className={`relative rounded-xl border-2 overflow-hidden ${reviewKey&&selected.has(reviewKey)?'border-blue-500 ring-2 ring-blue-100':decision?.decision==='redo'?'border-amber-300':'border-slate-200'}`}><button onClick={()=>onOpenPhoto(url)} className="block w-full bg-slate-50"><img src={url} alt={label} className="w-full aspect-[4/3] object-contain bg-slate-100"/></button>{reviewKey&&!readOnly&&<button onClick={()=>setSelected(prev => prev.has(reviewKey) ? new Set([...prev].filter(key => key !== reviewKey)) : new Set([reviewKey]))} className="absolute top-2 left-2 rounded-md bg-white/95 shadow px-2 py-1 text-[10px] font-semibold flex items-center gap-1">{selected.has(reviewKey)?<CheckSquare className="w-3.5 h-3.5 text-blue-600"/>:<Square className="w-3.5 h-3.5 text-slate-500"/>} {selected.has(reviewKey) ? 'Photo selected' : 'Select photo'}</button>}{decision?.note && <p title={decision.note} className="absolute bottom-9 inset-x-2 max-h-12 overflow-auto rounded-md bg-amber-50 px-2 py-1 text-[10px] text-amber-900"><strong>Redo:</strong> {decision.note}</p>}<div className="absolute left-2 bottom-2 flex gap-1"><span className="rounded-md bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-white">{label}</span>{decision&&<span className={`rounded-md px-2 py-1 text-[10px] font-bold ${decision.decision==='approved'?'bg-emerald-600 text-white':'bg-amber-500 text-white'}`}>{decision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div>):<div className="aspect-[4/3] rounded-xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center text-[11px] text-slate-400">No {label.toLowerCase()}</div>;
+  const Photo=({url,label,reviewKey,decision}:{url?:string|null;label:string;reviewKey?:string;decision?:any})=>url?(<div className={`relative rounded-xl border-2 overflow-hidden ${reviewKey&&selected.has(reviewKey)?'border-blue-500 ring-2 ring-blue-100':decision?.decision==='redo'?'border-amber-300':'border-slate-200'}`}><button onClick={()=>onOpenPhoto(url)} className="block w-full bg-slate-50"><SecureImage src={url} alt={label} className="w-full aspect-[4/3] object-contain bg-slate-100"/></button>{reviewKey&&!readOnly&&<button onClick={()=>setSelected(prev => prev.has(reviewKey) ? new Set([...prev].filter(key => key !== reviewKey)) : new Set([reviewKey]))} className="absolute top-2 left-2 rounded-md bg-white/95 shadow px-2 py-1 text-[10px] font-semibold flex items-center gap-1">{selected.has(reviewKey)?<CheckSquare className="w-3.5 h-3.5 text-blue-600"/>:<Square className="w-3.5 h-3.5 text-slate-500"/>} {selected.has(reviewKey) ? 'Photo selected' : 'Select photo'}</button>}{decision?.note && <p title={decision.note} className="absolute bottom-9 inset-x-2 max-h-12 overflow-auto rounded-md bg-amber-50 px-2 py-1 text-[10px] text-amber-900"><strong>Redo:</strong> {decision.note}</p>}<div className="absolute left-2 bottom-2 flex gap-1"><span className="rounded-md bg-slate-950/75 px-2 py-1 text-[10px] font-medium text-white">{label}</span>{decision&&<span className={`rounded-md px-2 py-1 text-[10px] font-bold ${decision.decision==='approved'?'bg-emerald-600 text-white':'bg-amber-500 text-white'}`}>{decision.decision==='approved'?'APPROVED':'REDO'}</span>}</div></div>):<div className="aspect-[4/3] rounded-xl border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center text-[11px] text-slate-400">No {label.toLowerCase()}</div>;
   async function applyInline(decision:'approved'|'redo'){
     if(!selected.size||!profile)return; setBusy(true);setReviewError('');
     try{
@@ -892,7 +893,7 @@ function ReviewProofPhotos({ jobId, onOpenPhoto }: { jobId: string; onOpenPhoto:
     <div className="grid grid-cols-3 gap-2">
       {photos.map((photo) => (
         <button key={photo.id} onClick={() => onOpenPhoto(photo.photo_url)} className="relative rounded-lg overflow-hidden border border-slate-200 cursor-zoom-in group">
-          <img src={photo.photo_url} alt={photo.photo_type} className="w-full aspect-square object-cover group-hover:opacity-90 transition" />
+          <SecureImage src={photo.photo_url} alt={photo.photo_type} className="w-full aspect-square object-cover group-hover:opacity-90 transition" />
           <span className="absolute top-1 right-1 bg-blue-600 text-white text-[9px] font-medium px-1 py-0.5 rounded capitalize">{photo.angle || photo.photo_type}</span>
           {photo.duplicate_flag && (
             <span className="absolute bottom-1 left-1 right-1 bg-amber-600 text-white text-[9px] font-semibold px-1 py-0.5 rounded text-center">
@@ -958,7 +959,7 @@ function InstallationCorrectionPicker({ job, value, onChange }: { job:any; value
     {(items||[]).map((it:any)=>{ const k=`wi:${it.id}`, checked=!!value[k], ps=(proofs||[]).filter((p:any)=>p.work_item_id===it.id); return <div key={it.id} className="rounded-lg border border-slate-200 bg-white p-3">
       <label className="flex items-start gap-2 cursor-pointer"><input type="checkbox" checked={checked} onChange={()=>toggle(k,{issue_type:'work_item',work_item_id:it.id})} className="mt-1"/><span><b className="text-sm">{it.work_type_name||'Work item'}</b><span className="block text-xs text-slate-500">{it.approved_width??'—'} × {it.approved_height??'—'} {it.approved_unit||''} · Qty {it.approved_quantity??1}</span></span></label>
       {checked&&<input value={value[k]?.note||''} onChange={e=>note(k,e.target.value)} placeholder="What exactly must be corrected?" className="mt-2 w-full rounded-lg border border-slate-300 px-2.5 py-2 text-xs"/>}
-      {ps.length>0&&<div className="grid grid-cols-3 gap-2 mt-2">{ps.map((p:any)=>{const pk=`proof:${p.id}`, pc=!!value[pk]; return <div key={p.id}><button type="button" onClick={()=>toggle(pk,{issue_type:'installation_photo',work_item_id:it.id,installation_proof_id:p.id})} className={`w-full rounded-lg border-2 overflow-hidden ${pc?'border-red-500 ring-2 ring-red-100':'border-slate-200'}`}><img src={p.photo_url} className="w-full aspect-[4/3] object-contain bg-slate-100"/><span className={`block text-[10px] py-1 ${pc?'bg-red-50 text-red-700':'bg-white text-slate-500'}`}>{pc?'Marked for correction':(p.angle||'Photo')}</span></button>{pc&&<input value={value[pk]?.note||''} onChange={e=>note(pk,e.target.value)} placeholder="Photo issue" className="mt-1 w-full rounded border px-2 py-1 text-[10px]"/>}</div>})}</div>}
+      {ps.length>0&&<div className="grid grid-cols-3 gap-2 mt-2">{ps.map((p:any)=>{const pk=`proof:${p.id}`, pc=!!value[pk]; return <div key={p.id}><button type="button" onClick={()=>toggle(pk,{issue_type:'installation_photo',work_item_id:it.id,installation_proof_id:p.id})} className={`w-full rounded-lg border-2 overflow-hidden ${pc?'border-red-500 ring-2 ring-red-100':'border-slate-200'}`}><SecureImage src={p.photo_url} className="w-full aspect-[4/3] object-contain bg-slate-100"/><span className={`block text-[10px] py-1 ${pc?'bg-red-50 text-red-700':'bg-white text-slate-500'}`}>{pc?'Marked for correction':(p.angle||'Photo')}</span></button>{pc&&<input value={value[pk]?.note||''} onChange={e=>note(pk,e.target.value)} placeholder="Photo issue" className="mt-1 w-full rounded border px-2 py-1 text-[10px]"/>}</div>})}</div>}
     </div>})}
   </div>;
 }

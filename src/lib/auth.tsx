@@ -9,7 +9,6 @@ interface AuthContextValue {
   profile: Profile | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<{ error: string | null }>;
-  signInWithPhone: (phone: string, password: string) => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
@@ -32,7 +31,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
       if (error) throw error;
       if (mountedRef.current && revision === authRevisionRef.current && identityRef.current === userId) {
-        setProfile(data as Profile | null);
+        if (!data || data.is_active !== true) {
+          void queryClient.cancelQueries();
+          queryClient.clear();
+          setProfile(null);
+        } else {
+          setProfile(previous => {
+            // Role/tenant changes invalidate everything fetched under older privileges.
+            if (previous && (previous.role !== data.role || previous.organization_id !== data.organization_id)) {
+              void queryClient.cancelQueries();
+              queryClient.clear();
+            }
+            return data as Profile;
+          });
+        }
       }
     } catch (error) {
       console.error('Unable to load the active account profile:', error);
@@ -93,25 +105,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) return { error: error.message };
-    return { error: null };
-  };
-
-  const signInWithPhone = async (phone: string, password: string) => {
-    // Look up the email tied to this phone via a SECURITY DEFINER RPC —
-    // the anon key alone cannot read auth.users or bypass RLS on profiles,
-    // so this small server-side function does the lookup safely.
-    const { data: email, error: lookupError } = await supabase.rpc('get_login_email_by_phone', {
-      p_phone: phone,
-    });
-
-    if (lookupError || !email) {
-      return { error: 'No account found with that phone number' };
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) return { error: 'Invalid email or password.' };
+    // A valid Auth token alone does not imply authorization to this product.
+    const { data: activeProfile, error: profileError } = await supabase.from('profiles')
+      .select('id,is_active').eq('id', data.user.id).maybeSingle();
+    if (profileError || !activeProfile || !activeProfile.is_active) {
+      await supabase.auth.signOut();
+      return { error: 'This account is not active. Contact your organization administrator.' };
     }
-
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) return { error: error.message };
     return { error: null };
   };
 
@@ -129,13 +131,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const refreshProfile = async () => {
-    if (session?.user) {
-      await loadProfile(session.user.id, authRevisionRef.current);
-    }
+    if (session?.user) await loadProfile(session.user.id, authRevisionRef.current);
   };
 
+  useEffect(() => {
+    // A removed user may still hold a valid JWT until it expires. Database RLS
+    // blocks it immediately; the UI also checks periodically and on focus.
+    const checkActiveSession = () => {
+      if (identityRef.current) void loadProfile(identityRef.current, authRevisionRef.current);
+    };
+    const interval = window.setInterval(checkActiveSession, 60_000);
+    window.addEventListener('focus', checkActiveSession);
+    return () => { window.clearInterval(interval); window.removeEventListener('focus', checkActiveSession); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ session, profile, loading, signIn, signInWithPhone, signOut, refreshProfile }}>
+    <AuthContext.Provider value={{ session, profile, loading, signIn, signOut, refreshProfile }}>
       {children}
     </AuthContext.Provider>
   );

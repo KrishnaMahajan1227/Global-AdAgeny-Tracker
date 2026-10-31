@@ -55,7 +55,7 @@ const REPORT_GROUPS: { title: string; subtitle: string; cards: ReportCardDef[] }
     cards: [
       {
         id: 'design-approval', label: 'Design Approval Report',
-        desc: 'Side-by-side: what was surveyed vs. what was designed, board by board. 2 boards per PDF page, 1 board per slide in the deck. Combine every shop into one file, or export one file per shop — your call, in the toggle above.',
+        desc: 'Marked survey photos and approved design versions, with linked boards and dimensions. Images are embedded in PDF, PPT and Excel.',
         icon: Layers, color: 'fuchsia',
         variants: [{ type: 'design-approval-pdf', label: 'PDF', ext: 'PDF' }, { type: 'design-approval-ppt', label: 'Deck', ext: 'PPTX' }],
       },
@@ -65,16 +65,16 @@ const REPORT_GROUPS: { title: string; subtitle: string; cards: ReportCardDef[] }
     title: 'Client presentation decks',
     subtitle: 'Ready-to-present slide decks for sign-off calls',
     cards: [
-      { id: 'ppt-preapproval', label: 'Pre-Approval Deck', desc: 'Survey photos only, one slide per shop — for sign-off before design begins.', icon: Presentation, color: 'amber', variants: [{ type: 'ppt-preapproval', label: 'Deck', ext: 'PPTX' }] },
-      { id: 'ppt-final', label: 'Final Installation Deck', desc: 'Before/after photos, one slide per shop — for Work Order close-out.', icon: Presentation, color: 'emerald', variants: [{ type: 'ppt-final', label: 'Deck', ext: 'PPTX' }] },
+      { id: 'ppt-preapproval', label: 'Pre-Approval Deck', desc: 'Marked survey evidence and measured work items, with additional photos on follow-on slides.', icon: Presentation, color: 'amber', variants: [{ type: 'ppt-preapproval', label: 'Deck', ext: 'PPTX' }] },
+      { id: 'ppt-final', label: 'Final Installation Deck', desc: 'Survey-before and installation-after evidence, including multiple proof photos and recorded dimensions.', icon: Presentation, color: 'emerald', variants: [{ type: 'ppt-final', label: 'Deck', ext: 'PPTX' }] },
     ],
   },
   {
     title: 'Data exports',
     subtitle: 'Spreadsheets for offline review — photo and design links included where available',
     cards: [
-      { id: 'excel', label: 'Shops Export', desc: 'Shop summary plus separate Survey Photos, Installation Photos and Design Files sheets — one row per photo, marked boards flagged, real clickable links.', icon: FileSpreadsheet, color: 'cyan', variants: [{ type: 'excel', label: 'Excel', ext: 'XLSX' }] },
-      { id: 'excel-multi', label: 'Multi-Sheet Export', desc: 'One sheet per pipeline stage, plus the same Survey/Installation/Design photo sheets.', icon: FileSpreadsheet, color: 'blue', variants: [{ type: 'excel-multi', label: 'Excel', ext: 'XLSX' }] },
+      { id: 'excel', label: 'Shops Export', desc: 'Shop and work-item details, with marked survey/installation images embedded in the workbook; protected originals stay private.', icon: FileSpreadsheet, color: 'cyan', variants: [{ type: 'excel', label: 'Excel', ext: 'XLSX' }] },
+      { id: 'excel-multi', label: 'Multi-Sheet Export', desc: 'One consistent workbook: shop summary, work items and embedded photos; no duplicate evidence.', icon: FileSpreadsheet, color: 'blue', variants: [{ type: 'excel-multi', label: 'Excel', ext: 'XLSX' }] },
       { id: 'po-utilization', label: 'PO Utilization Report', desc: 'Budgeted vs. surveyed/approved/produced/installed vs. invoiced, with variance flags.', icon: ShoppingCart, color: 'indigo', variants: [{ type: 'po-utilization', label: 'Excel', ext: 'XLSX' }] },
       { id: 'vehicle-load-log', label: 'Vehicle Load Log', desc: 'Every board loaded onto every vehicle, with driver, quantities and trip grouping.', icon: Truck, color: 'blue', variants: [{ type: 'vehicle-load-log', label: 'Excel', ext: 'XLSX' }] },
     ],
@@ -83,7 +83,7 @@ const REPORT_GROUPS: { title: string; subtitle: string; cards: ReportCardDef[] }
     title: 'Billing',
     subtitle: '',
     cards: [
-      { id: 'invoice', label: 'Invoice PDF', desc: 'Itemized invoice(s) with your agency letterhead.', icon: FileText, color: 'green', variants: [{ type: 'invoice-pdf', label: 'PDF', ext: 'PDF' }] },
+      { id: 'invoice', label: 'Invoice PDF', desc: 'Full tax invoice: bill-to details, itemized charges, GST and payment instructions.', icon: FileText, color: 'green', variants: [{ type: 'invoice-pdf', label: 'PDF', ext: 'PDF' }] },
     ],
   },
 ];
@@ -225,11 +225,12 @@ export default function ReportsPage() {
     enabled: !!orgId,
   });
 
-  const { data: invoices } = useQuery({
+  const { data: invoices, isError: invoicesError } = useQuery({
     queryKey: ['invoices-reports', orgId],
     queryFn: async () => {
-      const { data } = await supabase.from('invoices').select('*, invoice_items(*), clients(name)').eq('organization_id', orgId).order('created_at', { ascending: false });
-      return data || [];
+      return fetchAllPages<any>((a,b)=>supabase.from('invoices')
+        .select('*, invoice_items(*), clients(name)').eq('organization_id', orgId!)
+        .order('id').range(a,b));
     },
     enabled: !!orgId,
   });
@@ -386,6 +387,7 @@ export default function ReportsPage() {
         const [,kind,format] = type.split(':');
         if (!['PDF','PPTX','XLSX'].includes(format)) throw new Error('Unsupported export format.');
         const isShopReport = !['invoice','po-utilization','vehicle-load-log'].includes(kind);
+        if (kind === 'invoice' && invoicesError) throw new Error('Invoice data could not be loaded. Retry before exporting.');
         if (isShopReport && (workItemsError || surveyPhotosError || boardMarkingsError || installationsError || (['design-approval','final-report'].includes(kind) && (designVersionsError || designVersionItemsError)))) {
           throw new Error('Some report evidence could not be fetched. Please retry after checking the connection and Storage permissions.');
         }
@@ -400,6 +402,26 @@ export default function ReportsPage() {
           const t=Date.parse(v || '');
           return Number.isFinite(t) && (!periodRange.from || t >= periodRange.from.getTime()) && (!periodRange.to || t <= periodRange.to.getTime());
         };
+        // Tax invoices use the actual invoice renderer (GST split, payer details,
+        // payment instructions and pagination) rather than a generic data table.
+        if (kind === 'invoice' && format === 'PDF') {
+          const matches = (invoices || []).filter(r =>
+            (!selectedClient || r.client_id===selectedClient) &&
+            (!selectedPO || r.purchase_order_id===selectedPO) &&
+            dateWithin(r.invoice_date || r.created_at));
+          if (!matches.length) throw new Error('No invoices match the selected client, Work Order and date filters.');
+          const entries = matches.map(inv=>({
+            invoice: inv as any, items: (inv.invoice_items || []) as any,
+            client: (clients || []).find(c=>c.id===inv.client_id) as any || null,
+          }));
+          if (combined) {
+            await generateInvoiceBundlePDF(entries,org,{fileName:bundleFileName('tax-invoices',selectedClientLabel,entries.length)});
+          } else {
+            for (const entry of entries) await generateInvoicePDF(entry.invoice,entry.items,entry.client,org);
+          }
+          setNotice({kind:'success',message:`${matches.length} complete invoice PDF(s) ready, including GST totals.`});
+          return;
+        }
         const selectedPOIds = new Set((purchaseOrders || []).filter(p =>
           (!selectedClient || p.client_id === selectedClient) && (!selectedPO || p.id === selectedPO)
         ).map(p=>p.id));
@@ -408,12 +430,12 @@ export default function ReportsPage() {
           .filter(r=>allowedShopIds.has(r.shop_id) && dateWithin(r.loaded_at)) : [];
         const n = await generatePortfolioReport({
           shops: filteredShops,
-          workItems: (workItems || []).filter(w=>filteredShops.some(s=>s.id === w.shop_id)),
+          workItems: (workItems || []).filter(w=>allowedShopIds.has(w.shop_id)),
           surveys: (surveys || []).filter(r=>filteredShops.some(s=>s.id === r.shop_id)),
-          surveyPhotos: (surveyPhotos || []).filter(r=>filteredShops.some(s=>s.id === r.shop_id)),
+          surveyPhotos: (surveyPhotos || []).filter(r=>allowedShopIds.has(r.shop_id)),
           markings: (boardMarkings || []).filter(m=>(surveyPhotos || []).some(p=>p.id === m.survey_photo_id && filteredShops.some(s=>s.id===p.shop_id))),
           surveyPhotoItems: (surveyPhotoItems || []).filter((link:any)=>(surveyPhotos || []).some(p=>p.id===link.survey_photo_id && filteredShops.some(s=>s.id===p.shop_id))),
-          installations: (installations || []).filter(r=>filteredShops.some(s=>s.id === r.shop_id)),
+          installations: (installations || []).filter(r=>allowedShopIds.has(r.shop_id)),
           designVersions: designVersions || [],
           designVersionItems: designVersionItems || [],
           invoices: (invoices || []).filter(r=>(!selectedClient || r.client_id===selectedClient) && (!selectedPO || r.purchase_order_id===selectedPO) && dateWithin(r.invoice_date || r.created_at)),
@@ -761,7 +783,7 @@ export default function ReportsPage() {
           <div className="flex items-center gap-2">
             <FileBarChart className="h-4 w-4 text-slate-500" />
             <h2 className="text-sm font-semibold text-slate-900">Report library</h2>
-            <span className="text-xs text-slate-400">One report, three formats</span>
+            <span className="text-xs text-slate-400">Evidence embedded · one record per photo</span>
           </div>
           <div className="relative w-full sm:w-64">
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />

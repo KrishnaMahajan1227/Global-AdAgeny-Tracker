@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, Check, ShieldCheck } from 'lucide-react';
@@ -104,7 +105,7 @@ export default function PublicInfoPage() {
           </div>
         </div>
         <figure className="pi-hero-visual">
-          <img src={d.image} alt={d.imageAlt}/>
+          <SecureImage src={d.image} alt={d.imageAlt}/>
           <figcaption><ShieldCheck size={14}/><span>FIELD ACTIVITY</span><i/><b>CONNECTED TO THE JOB RECORD</b></figcaption>
         </figure>
       </section>

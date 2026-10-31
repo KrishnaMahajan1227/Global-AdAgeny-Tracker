@@ -1,3 +1,4 @@
+import { SecureImage } from '@/lib/secureMedia';
 import { useEffect, useState } from 'react';
 import { itemSizeLabel } from '@/lib/units';
 import { renderMarkedImage, buildBoardLabel } from '@/lib/markingUtils';
@@ -141,7 +142,7 @@ export function MarkedPhotoGrid({ photos, markings, workItems }: { photos: Surve
           return (
             <button key={photo.id} onClick={() => setLightbox(src)} className="text-left">
               <div className="relative rounded-lg overflow-hidden border border-slate-200 bg-slate-100">
-                <img
+                <SecureImage
                   src={src}
                   alt="Survey"
                   className="w-full aspect-[4/3] object-cover"
@@ -166,7 +167,7 @@ export function MarkedPhotoGrid({ photos, markings, workItems }: { photos: Surve
 
       {lightbox && (
         <div onClick={() => setLightbox(null)} className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4 cursor-zoom-out">
-          <img src={lightbox} alt="Marked board" className="max-w-full max-h-full rounded-lg" />
+          <SecureImage src={lightbox} alt="Marked board" className="max-w-full max-h-full rounded-lg" />
         </div>
       )}
     </div>

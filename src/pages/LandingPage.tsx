@@ -1,3 +1,4 @@
+import { SecureImage, SecureAnchor } from '@/lib/secureMedia';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import { Link } from 'react-router-dom';
@@ -211,7 +212,7 @@ function ProcessOverlay({ id }: { id: string }) {
   if (id === 'proof') {
     return (
       <div className="proof-transfer" aria-hidden="true">
-        <div className="proof-transfer__thumb"><img src={images.proof} alt="" /></div>
+        <div className="proof-transfer__thumb"><SecureImage src={images.proof} alt="" /></div>
         <div><small>SITE 024 · PROOF</small><strong>Installation verified</strong><span><Check size={11} /> GPS + photo linked</span></div>
       </div>
     );
@@ -221,7 +222,7 @@ function ProcessOverlay({ id }: { id: string }) {
       <div className="ops-panel" aria-hidden="true">
         <div className="ops-panel__top"><span>WORK ORDER LIVE</span><b>Site 024</b></div>
         <div className="ops-panel__stats"><span><b>128</b> Surveyed</span><span><b>96</b> Installed</span><span><b>34</b> Production</span></div>
-        <div className="ops-panel__proof"><img src={images.proof} alt="" /><span><Check size={12} /> NOVA LIVING · Verified</span></div>
+        <div className="ops-panel__proof"><SecureImage src={images.proof} alt="" /><span><Check size={12} /> NOVA LIVING · Verified</span></div>
       </div>
     );
   }
@@ -447,24 +448,24 @@ function LandingPage() {
         <div className="landing-nav__links">
           <button onClick={() => scrollToJourney('survey')}>How it works</button>
           <button onClick={() => scrollToJourney('production')}>Inside AdRoute</button>
-          <a href="#why-adroute">Why AdRoute</a>
-          <a href="#team">For your team</a>
-          <a href="#platform">Platform</a>
+          <SecureAnchor href="#why-adroute">Why AdRoute</SecureAnchor>
+          <SecureAnchor href="#team">For your team</SecureAnchor>
+          <SecureAnchor href="#platform">Platform</SecureAnchor>
         </div>
         <div className="landing-nav__actions">
           <Link to="/login" className="nav-signin">Sign in</Link>
-          <a href="#contact" className="nav-demo">Book a demo <ArrowRight size={14} /></a>
+          <SecureAnchor href="#contact" className="nav-demo">Book a demo <ArrowRight size={14} /></SecureAnchor>
         </div>
         <button className="nav-menu" onClick={() => setMobileNav((v) => !v)} aria-label="Toggle navigation">{mobileNav ? <X /> : <Menu />}</button>
         {mobileNav && (
           <div className="mobile-nav-panel">
             <button onClick={() => scrollToJourney('survey')}>How it works</button>
             <button onClick={() => scrollToJourney('production')}>Inside AdRoute</button>
-            <a href="#why-adroute" onClick={() => setMobileNav(false)}>Why AdRoute</a>
-            <a href="#team" onClick={() => setMobileNav(false)}>For your team</a>
-            <a href="#platform" onClick={() => setMobileNav(false)}>Platform</a>
+            <SecureAnchor href="#why-adroute" onClick={() => setMobileNav(false)}>Why AdRoute</SecureAnchor>
+            <SecureAnchor href="#team" onClick={() => setMobileNav(false)}>For your team</SecureAnchor>
+            <SecureAnchor href="#platform" onClick={() => setMobileNav(false)}>Platform</SecureAnchor>
             <Link to="/login">Sign in</Link>
-            <a className="mobile-nav-panel__primary" href="#contact" onClick={() => setMobileNav(false)}>Book a demo</a>
+            <SecureAnchor className="mobile-nav-panel__primary" href="#contact" onClick={() => setMobileNav(false)}>Book a demo</SecureAnchor>
           </div>
         )}
       </nav>
@@ -472,7 +473,7 @@ function LandingPage() {
       <section className="cinematic-journey" ref={journeyRef} aria-label="AdRoute connected operations journey">
         <div className="cinematic-pin" ref={pinRef}>
           <div className="journey-scene journey-scene--intro" data-scene="intro">
-            <img className="intro-city-bg" src={images.city} alt="" aria-hidden="true" />
+            <SecureImage className="intro-city-bg" src={images.city} alt="" aria-hidden="true" />
             <div className="intro-city-depth" aria-hidden="true" />
             <div className="cloud-video cloud-video--base" aria-hidden="true" style={{ display: "none" }} />
             <div className="intro-shade" />
@@ -482,7 +483,7 @@ function LandingPage() {
               <p className="intro-support intro-reveal">Connect survey, design, production, installation proof, live operations and client visibility in one workflow built for outdoor branding teams.</p>
               <div className="intro-actions intro-reveal">
                 <button onClick={() => scrollToJourney('survey')}>Explore the operation <ArrowDown size={15} /></button>
-                <a href="#contact">Book a demo <ArrowRight size={15} /></a>
+                <SecureAnchor href="#contact">Book a demo <ArrowRight size={15} /></SecureAnchor>
               </div>
               <div className="intro-ecosystem intro-reveal" aria-label="AdRoute connects field sites, agency operations and clients">
                 <span><b>01</b><strong>Field site</strong><small>Survey · Install · Proof</small></span>
@@ -496,7 +497,7 @@ function LandingPage() {
           </div>
 
           <div className="journey-scene journey-scene--city" data-scene="city">
-            <img className="scene-image" src={images.city} alt="AdRoute connected city with field site, agency and client locations" />
+            <SecureImage className="scene-image" src={images.city} alt="AdRoute connected city with field site, agency and client locations" />
             <div className="city-atmosphere" />
             <div className="city-context">
               <span>ONE CITY · THREE OPERATING WORLDS</span>
@@ -506,7 +507,7 @@ function LandingPage() {
 
           {chapters.map((chapter) => (
             <article className={`journey-scene journey-scene--chapter journey-scene--${chapter.id}`} data-scene={chapter.id} key={chapter.id}>
-              <img className="scene-image" src={chapter.image} alt={`${chapter.eyebrow}: ${chapter.title}`} style={{ objectPosition: chapter.position }} />
+              <SecureImage className="scene-image" src={chapter.image} alt={`${chapter.eyebrow}: ${chapter.title}`} style={{ objectPosition: chapter.position }} />
               <div className="scene-grade" />
               <ChapterCopy chapter={chapter} />
               <ProcessOverlay id={chapter.id} />
@@ -516,7 +517,7 @@ function LandingPage() {
           ))}
 
           <section className="journey-scene final-city" data-scene="final" aria-label="Connected city summary">
-            <img className="scene-image" src={images.final} alt="Connected AdRoute city flow from field site to agency operations to client" />
+            <SecureImage className="scene-image" src={images.final} alt="Connected AdRoute city flow from field site to agency operations to client" />
             <div className="final-city__ambient" />
             <svg className="flow-lines" viewBox="0 0 1000 562" preserveAspectRatio="none" aria-hidden="true">
               <path d="M215 371 C315 280, 390 230, 460 191" />
@@ -608,7 +609,7 @@ function LandingPage() {
           <div className="proof-stage-visual premium-tilt" onPointerMove={tiltMove} onPointerLeave={tiltLeave}>
             {proofStages.map((stage) => (
               <figure key={stage.id} className={proofStage === stage.id ? 'is-active' : ''}>
-                <img src={stage.image} alt={`${stage.label}: ${stage.title}`} />
+                <SecureImage src={stage.image} alt={`${stage.label}: ${stage.title}`} />
                 <figcaption>
                   <small>{stage.label}</small>
                   <strong>{stage.title}</strong>

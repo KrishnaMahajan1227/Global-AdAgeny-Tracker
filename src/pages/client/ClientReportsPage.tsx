@@ -5,6 +5,7 @@ import { fetchAllPages } from '@/lib/paginatedQuery';
 import { useAuth } from '@/lib/auth';
 import { Card, EmptyState, PageHeader, StatusBadge, Select } from '@/components/ui';
 import { LineItemProgressChart } from '@/components/LineItemProgressChart';
+import { type EvidenceMark } from '@/lib/reportImage';
 import { exportClientCampaignReport, exportClientPhotoComplianceReport, exportClientSiteDetailReport, exportClientCampaignReportPDF, exportClientSiteDetailPDF } from '@/lib/reports';
 import { STATUS_LABELS, type PurchaseOrder, type ClientPOLineItemProgress, type WorkItem, type SurveyPhoto, type Organization } from '@/lib/types';
 import {
@@ -96,10 +97,32 @@ export default function ClientReportsPage() {
   const { data: surveyPhotos } = useQuery({
     queryKey: ['client-reports-survey-photos', orgId],
     queryFn: async () => {
-      return fetchAllPages<Pick<SurveyPhoto, 'shop_id' | 'photo_url' | 'photo_type' | 'created_at'>>((a,b) => supabase.from('survey_photos').select('shop_id, photo_url, photo_type, created_at').order('created_at').order('id').range(a,b));
+      return fetchAllPages<Pick<SurveyPhoto, 'id' | 'shop_id' | 'photo_url' | 'photo_type' | 'created_at'>>((a,b) => supabase.from('survey_photos').select('id, shop_id, photo_url, photo_type, created_at').order('created_at').order('id').range(a,b));
     },
     enabled: !!orgId,
   });
+
+  const { data: boardMarkings, isError: boardMarkingsError } = useQuery({
+    queryKey: ['client-reports-board-markings', orgId],
+    queryFn: async () => fetchAllPages<{id:string;survey_photo_id:string;points:{x:number;y:number}[];work_item_id:string|null}>(
+      (a,b)=>supabase.from('board_markings')
+        .select('id,survey_photo_id,points,work_item_id').order('id').range(a,b)),
+    enabled: !!orgId,
+  });
+  function linkedMarkings(): Map<string,EvidenceMark[]> {
+    if (boardMarkingsError || !boardMarkings) throw new Error('Marked survey evidence could not be loaded. Retry the export.');
+    const result=new Map<string,EvidenceMark[]>();
+    const itemNames=new Map((workItems || []).map(it=>[it.id,it.work_type_name]));
+    const seen=new Set<string>();
+    for(const mark of boardMarkings){
+      if(seen.has(mark.id)||!Array.isArray(mark.points)||mark.points.length<3) continue;
+      seen.add(mark.id);
+      const list=result.get(mark.survey_photo_id) || [];
+      list.push({points:mark.points,label:itemNames.get(mark.work_item_id || '') || 'Marked board'});
+      result.set(mark.survey_photo_id,list);
+    }
+    return result;
+  }
 
   // InstallationProof's timestamp column is `captured_at`, not
   // `created_at` — selected and re-keyed to `created_at` right here so
@@ -216,8 +239,8 @@ export default function ClientReportsPage() {
   }
 
   // ---- Site Detail Report — the full corporate-style export: what was
-  // assigned, when, how much is done, where, and every photo as a real
-  // link (not just a count). Scoped by the same Campaign/Agency/Work
+  // assigned, when, how much is done, where, and every available photo embedded
+  // directly in the export (not just a count or expiring link). Scoped by the same Campaign/Agency/Work
   // Order filters as everything else on this page. ----
   const workItemsByShop = useMemo(() => {
     const m = new Map<string, typeof workItems>();
@@ -266,25 +289,34 @@ export default function ClientReportsPage() {
     return { shop_name: s?.name || 'Unknown', city: s?.city || null, po_label: po ? (po.name || po.po_number) : '—' };
   }
 
-  function handleExportSiteDetail() {
+  async function handleExportSiteDetail() {
+    setPdfNotice(null);
+    setPdfGenerating(true);
+    try {
+    const markings=linkedMarkings();
     const surveyRows = (surveyPhotos || [])
       .filter((p) => siteShopIdsInFilter.has(p.shop_id))
-      .map((p) => ({ ...shopMetaFor(p.shop_id), photo_type: p.photo_type, uploaded_on: new Date(p.created_at).toLocaleDateString('en-IN'), photo_url: p.photo_url }));
+      .map((p) => ({ photo_id:p.id, ...shopMetaFor(p.shop_id), photo_type: p.photo_type, uploaded_on: new Date(p.created_at).toLocaleDateString('en-IN'), photo_url: p.photo_url }));
     const installRows = (installPhotos || [])
       .filter((p) => siteShopIdsInFilter.has(p.shop_id))
       .map((p) => ({ ...shopMetaFor(p.shop_id), photo_type: p.photo_type, uploaded_on: new Date(p.created_at).toLocaleDateString('en-IN'), photo_url: p.photo_url }));
-    exportClientSiteDetailReport(siteDetailRows, surveyRows, installRows);
+    await exportClientSiteDetailReport(siteDetailRows, surveyRows, installRows, 'site-detail-report',markings);
+    setPdfNotice({kind:'success',message:`Excel ready — ${siteDetailRows.length} site(s), photographic evidence embedded.`});
+    } catch(error) {
+      setPdfNotice({kind:'error',message:error instanceof Error?error.message:'Excel export failed.'});
+    } finally { setPdfGenerating(false); }
   }
 
   async function handleExportSiteDetailPDF() {
     setPdfGenerating(true);
     setPdfNotice(null);
     try {
-      const surveyByShop = new Map<string, { shop_name: string; city: string | null; po_label: string; photo_type: string; uploaded_on: string; photo_url: string }[]>();
+      const markings=linkedMarkings();
+      const surveyByShop = new Map<string, { photo_id?: string; shop_name: string; city: string | null; po_label: string; photo_type: string; uploaded_on: string; photo_url: string }[]>();
       for (const p of surveyPhotos || []) {
         if (!siteShopIdsInFilter.has(p.shop_id)) continue;
         const list = surveyByShop.get(p.shop_id) || [];
-        list.push({ ...shopMetaFor(p.shop_id), photo_type: p.photo_type, uploaded_on: new Date(p.created_at).toLocaleDateString('en-IN'), photo_url: p.photo_url });
+        list.push({ photo_id:p.id, ...shopMetaFor(p.shop_id), photo_type: p.photo_type, uploaded_on: new Date(p.created_at).toLocaleDateString('en-IN'), photo_url: p.photo_url });
         surveyByShop.set(p.shop_id, list);
       }
       const installByShop = new Map<string, { shop_name: string; city: string | null; po_label: string; photo_type: string; uploaded_on: string; photo_url: string }[]>();
@@ -294,12 +326,11 @@ export default function ClientReportsPage() {
         list.push({ ...shopMetaFor(p.shop_id), photo_type: p.photo_type, uploaded_on: new Date(p.created_at).toLocaleDateString('en-IN'), photo_url: p.photo_url });
         installByShop.set(p.shop_id, list);
       }
-      const { generated, skipped } = await exportClientSiteDetailPDF(siteDetailRows, surveyByShop, installByShop, org);
+      const { generated, skipped } = await exportClientSiteDetailPDF(siteDetailRows, surveyByShop, installByShop, org, 'site-detail-report',markings);
       if (generated === 0) setPdfNotice({ kind: 'error', message: 'No sites in this scope yet.' });
-      else if (skipped > 0) setPdfNotice({ kind: 'success', message: `PDF ready — first ${generated} sites (${skipped} more matched this filter; narrow it with Agency/Work Order to include them too).` });
       else setPdfNotice({ kind: 'success', message: `PDF ready — ${generated} site(s), with photos.` });
-    } catch {
-      setPdfNotice({ kind: 'error', message: 'Could not generate the PDF. Please try again.' });
+    } catch (error) {
+      setPdfNotice({ kind: 'error', message: error instanceof Error ? error.message : 'Could not generate the PDF. Please try again.' });
     } finally {
       setPdfGenerating(false);
     }

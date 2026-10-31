@@ -1,0 +1,27 @@
+{
+  "release": "0112 missing relation migration hotfix",
+  "based_on": "AdRoute_Updated_Billing_Navigation_Professional_Reports_2026-10-31.zip",
+  "affected_migration": "20261031131000_0112_integrity_and_rpc_hardening.sql",
+  "original_sha256": "9240b88fcdd981aa89a270133c511d427165162d7fa89fd8652fafe1c0cb5cbb",
+  "fixed_sha256": "1c0112d668a72ab614da4c189237b4c2f51b536bfbb08cf85ce7a0a655b58d27",
+  "verified": {
+    "hotfix_regressions": "6/6 pass",
+    "source_parser": "127 files, 0 syntax errors",
+    "security_static": "27/27 pass",
+    "phase7_source": "16/16 pass",
+    "reporting_billing_checks": "40/40 pass"
+  },
+  "not_verified": [
+    "Supabase remote migrations",
+    "Production application build",
+    "Direct API role penetration tests"
+  ],
+  "changed_existing_files": [
+    "supabase/migrations/20261031131000_0112_integrity_and_rpc_hardening.sql"
+  ],
+  "new_files": [
+    "docs/MIGRATION_0112_HOTFIX.md",
+    "docs/MIGRATION_0112_HOTFIX_MANIFEST.json",
+    "scripts/verify-migration-0112-hotfix.cjs"
+  ]
+}

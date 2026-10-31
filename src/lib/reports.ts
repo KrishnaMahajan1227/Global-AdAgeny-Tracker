@@ -1320,7 +1320,6 @@ export function exportPOUtilizationToExcel(rows: POUtilizationExportRow[], fileN
 // ---------------------------------------------------------------------------
 
 export interface ClientCampaignExportRow {
-  campaign_name: string;
   po_number: string;
   po_date: string;
   agency_name: string;
@@ -1330,11 +1329,10 @@ export interface ClientCampaignExportRow {
   completion_pct: number | null;
 }
 
-export function exportClientCampaignReport(rows: ClientCampaignExportRow[], fileName: string = 'campaign-performance-report') {
+export function exportClientCampaignReport(rows: ClientCampaignExportRow[], fileName: string = 'work-order-performance-report') {
   const wb = XLSX.utils.book_new();
 
   const data = rows.map((r) => ({
-    'Campaign': r.campaign_name,
     'PO Number': r.po_number,
     'PO Date': r.po_date ? new Date(r.po_date).toLocaleDateString('en-IN') : '',
     'Agency': r.agency_name,
@@ -1345,7 +1343,7 @@ export function exportClientCampaignReport(rows: ClientCampaignExportRow[], file
   }));
 
   const ws = XLSX.utils.json_to_sheet(data.length > 0 ? data : [{ 'PO Number': 'No data' }]);
-  XLSX.utils.book_append_sheet(wb, ws, 'Campaign Performance');
+  XLSX.utils.book_append_sheet(wb, ws, 'Work Order Performance');
 
   XLSX.writeFile(wb, `${fileName}.xlsx`);
 }
@@ -1395,7 +1393,6 @@ export interface ClientSiteDetailRow {
   city: string | null;
   district: string | null;
   address: string | null;
-  campaign_name: string;
   po_label: string;
   agency_name: string;
   status_label: string;
@@ -1428,7 +1425,6 @@ export function exportClientSiteDetailReport(
     'City': r.city || '',
     'District': r.district || '',
     'Address': r.address || '',
-    'Campaign': r.campaign_name,
     'Work Order': r.po_label,
     'Agency': r.agency_name,
     'Status': r.status_label,
@@ -1469,15 +1465,15 @@ export function exportClientSiteDetailReport(
 export async function exportClientCampaignReportPDF(
   rows: ClientCampaignExportRow[],
   org: Organization | null | undefined,
-  fileName: string = 'campaign-performance-report'
+  fileName: string = 'work-order-performance-report'
 ) {
   const doc = new jsPDF();
-  drawSectionHeader(doc, 'Campaign Performance Report', org, true, [15, 23, 42]);
+  drawSectionHeader(doc, 'Work Order Performance Report', org, true, [15, 23, 42]);
 
   autoTable(doc, {
-    head: [['Campaign', 'Work Order', 'Agency', 'Type', 'Status', 'Sites', 'Completion']],
+    head: [['Work Order', 'Agency', 'Type', 'Status', 'Sites', 'Completion']],
     body: rows.map((r) => [
-      r.campaign_name, r.po_number, r.agency_name,
+      r.po_number, r.agency_name,
       fulfillmentTypeLabel(r.fulfillment_type),
       r.work_status, String(r.sites_total), r.completion_pct != null ? `${Math.round(r.completion_pct)}%` : '—',
     ]),
@@ -1529,7 +1525,7 @@ export async function exportClientSiteDetailPDF(
     doc.setTextColor(71, 85, 105);
     const infoLines = [
       `${[site.city, site.district].filter(Boolean).join(', ') || '—'}${site.address ? ' — ' + site.address : ''}`,
-      `Campaign: ${site.campaign_name}   |   Work Order: ${site.po_label}   |   Agency: ${site.agency_name}`,
+      `Work Order: ${site.po_label}   |   Agency: ${site.agency_name}`,
       `Status: ${site.status_label}   |   Work Type(s): ${site.work_types}   |   Assigned: ${site.assigned_on}`,
     ];
     for (const line of infoLines) {

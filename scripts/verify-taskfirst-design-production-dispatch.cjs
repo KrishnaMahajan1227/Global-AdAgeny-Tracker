@@ -18,7 +18,7 @@ function matches(src, expression) { return expression.test(src); }
 ok('Design opens task-first for both owner and Designer', d.includes('const [browsingList, setBrowsingList] = useState(true)'));
 ok('Production opens actual task list rather than owner Overview', p.includes("useState<'overview' | 'production' | 'vehicle_load'>('production')"));
 ok('Design uses review queue by default and linked PO is not hidden', d.includes("(linkedPoId ? 'all' : 'in_review')"));
-ok('Both studios keep folder hierarchy instead of removing existing saved context', [d,p].every(src => src.includes('clientFolders') && src.includes('campaignFolders') && src.includes('poFolders') && src.includes('zoneFolders')));
+ok('Both studios keep the streamlined Client → Work Order → Zone hierarchy', [d,p].every(src => src.includes('clientFolders') && src.includes('poFolders') && src.includes('zoneFolders')) && !p.includes("level === 'campaign'"));
 ok('Task and folder modes have accessible semantics', [d,p].every(src => src.includes('aria-pressed=') && src.includes('Action Queue') && src.includes('Browse Folders')));
 ok('Deep-linked Work Order remains scoped', [d,p].every(src => src.includes('validWorkOrderId(routeParams.get(\'po\'))') && src.includes('setPoFilter(linkedPoId)')));
 ok('Default queue does not require full org-wide tree download', [d,p].every(src => src.includes('enabled: !!orgId && !browsingList && !debouncedSearch') && src.includes('fetchWorkflowFolderPages(async (from, to)')));

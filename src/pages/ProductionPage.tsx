@@ -645,10 +645,9 @@ export default function ProductionPage() {
     ? (zoneFilter === NO_FOLDER_BUCKET ? 'No Zone' : (zoneFolders.find((z) => z.id === zoneFilter)?.name || (treeRows || []).find((r) => r.zone_id === zoneFilter)?.zone_name || 'Zone'))
     : null;
 
-  function resetFolderFrom(level: 'root' | 'client' | 'campaign' | 'po' | 'zone') {
+  function resetFolderFrom(level: 'root' | 'client' | 'po' | 'zone') {
     if (level === 'root') { setClientFilter(''); setCampaignFilter(''); setPoFilter(''); setZoneFilter(''); }
     else if (level === 'client') { setCampaignFilter(''); setPoFilter(''); setZoneFilter(''); }
-    else if (level === 'campaign') { setPoFilter(''); setZoneFilter(''); }
     else if (level === 'po') { setZoneFilter(''); }
     else if (level === 'zone') { setZoneFilter(''); }
     setBrowsingList(false);
@@ -1366,7 +1365,7 @@ export default function ProductionPage() {
             except the current/deepest one, which is bold and un-styled
             as a link since it's where you already are. Clicking it still
             works though — it steps back to that level's own tiles. */}
-        {(!browsingList || clientFilter || campaignFilter || poFilter || zoneFilter) && <nav aria-label="Folder path" className="flex items-center gap-1.5 text-sm mb-5 flex-wrap text-slate-400">
+        {(!browsingList || clientFilter || poFilter || zoneFilter) && <nav aria-label="Folder path" className="flex items-center gap-1.5 text-sm mb-5 flex-wrap text-slate-400">
           <button
             onClick={() => resetFolderFrom('root')}
             className={`flex items-center gap-1.5 ${!clientFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
@@ -1378,20 +1377,9 @@ export default function ProductionPage() {
               <span aria-hidden>/</span>
               <button
                 onClick={() => resetFolderFrom('client')}
-                className={`truncate max-w-[200px] ${!campaignFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
-              >
-                {selectedClientName}
-              </button>
-            </>
-          )}
-          {campaignFilter && (
-            <>
-              <span aria-hidden>/</span>
-              <button
-                onClick={() => resetFolderFrom('campaign')}
                 className={`truncate max-w-[200px] ${!poFilter ? 'font-semibold text-slate-900' : 'hover:text-blue-600 transition-colors'}`}
               >
-                {selectedCampaignName}
+                {selectedClientName}
               </button>
             </>
           )}
@@ -1414,7 +1402,7 @@ export default function ProductionPage() {
               </button>
             </>
           )}
-          {browsingList && !zoneFilter && (clientFilter || campaignFilter || poFilter) && (
+          {browsingList && !zoneFilter && (clientFilter || poFilter) && (
             <>
               <span aria-hidden>/</span>
               <button onClick={() => setBrowsingList(false)} className="font-semibold text-slate-900">
@@ -1441,12 +1429,11 @@ export default function ProductionPage() {
             it, so the production team is never looking at a long list
             they didn't ask to see yet. */}
         {!showList && (() => {
-          const level = !clientFilter ? 'client' : !campaignFilter ? 'campaign' : !poFilter ? 'po' : 'zone';
-          const levelLabel = level === 'client' ? 'Clients' : level === 'campaign' ? 'Campaigns' : level === 'po' ? 'Work Orders' : 'Zones';
-          const folders = level === 'client' ? clientFolders : level === 'campaign' ? campaignFolders : level === 'po' ? poFolders : zoneFolders;
+          const level = !clientFilter ? 'client' : !poFilter ? 'po' : 'zone';
+          const levelLabel = level === 'client' ? 'Clients' : level === 'po' ? 'Work Orders' : 'Zones';
+          const folders = level === 'client' ? clientFolders : level === 'po' ? poFolders : zoneFolders;
           const onPick = (id: string) => {
             if (level === 'client') setClientFilter(id);
-            else if (level === 'campaign') setCampaignFilter(id);
             else if (level === 'po') setPoFilter(id);
             else { setZoneFilter(id); setBrowsingList(true); }
           };

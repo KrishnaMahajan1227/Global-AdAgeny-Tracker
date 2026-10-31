@@ -8,7 +8,7 @@ import {
   Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, ProgressBar,
   FilterButton, FilterDrawer, FilterSection, Pagination,
 } from '@/components/ui';
-import { PurchaseOrder, POLineItem, POLineItemUtilization, Campaign, Zone, RateCard, PoAssignment } from '@/lib/types';
+import { PurchaseOrder, POLineItem, POLineItemUtilization, Zone, RateCard, PoAssignment } from '@/lib/types';
 import { logAudit, notifyLinkedOrg, createNotification } from '@/lib/helpers';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { computeUtilization, calculatePoProgress, formatQty, formatRupees, isAreaUom, getActualForStage, UtilizationStage, fulfillmentTypeLabel, defaultUtilizationStage } from '@/lib/poUtilization';
@@ -50,7 +50,6 @@ const PO_STATUS_LABELS: Record<string, string> = { active: 'Active', closed: 'Cl
 type PoRow = PurchaseOrder & {
   clients: { name: string } | null;
   projects: { name: string } | null;
-  campaigns: { name: string } | null;
   po_line_items: { id: string; budgeted_area: number | null; budgeted_qty: number | null; requires_survey: boolean; requires_design: boolean; requires_production: boolean; requires_installation: boolean }[];
   client_org: { name: string } | null;
 };
@@ -65,7 +64,7 @@ function getPoMetrics(po: PoRow, utilization: POLineItemUtilization[], sites?: D
   const stage: UtilizationStage = defaultUtilizationStage(po.fulfillment_type);
   const summary = calculatePoProgress(poRows, stage, lineCount);
   const anyVariance = poRows.some(row => computeUtilization(row, stage).hasVariance);
-  const campaignName = po.projects?.name || po.campaigns?.name || null;
+  const campaignName = null;
   const operational = sites && sites.total > 0 ? sites.percentage : null;
   return {
     lineCount, poRows, stage, anyVariance, campaignName,
@@ -166,7 +165,7 @@ function WorkOrdersList() {
   // agency's own campaign) or `camp:<client campaign id>` (a client's
   // campaign), since a PO's campaign grouping can be either depending on
   // origin, and the person filtering shouldn't have to know which.
-  const [campaignFilterValue, setCampaignFilterValue] = useState('');
+
   const [zoneFilter, setZoneFilter] = useState('');
   const [sortBy, setSortBy] = useState('date_desc');
   const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
@@ -191,7 +190,7 @@ function WorkOrdersList() {
 
   useEffect(() => {
     setPage(0);
-  }, [search, stageFilter, statusFilter, clientFilter, fulfillmentFilter, campaignFilterValue, zoneFilter, sortBy, pageSize]);
+  }, [search, stageFilter, statusFilter, clientFilter, fulfillmentFilter, zoneFilter, sortBy, pageSize]);
 
   useRealtimeInvalidate(['purchase_orders', 'po_line_items', 'work_items', 'invoices', 'invoice_items', 'shops'], orgId, [
     ['purchase_orders', orgId],
@@ -230,14 +229,6 @@ function WorkOrdersList() {
   const clientOptions = (clients || []).filter(c => c.name.toLowerCase().includes(clientOptionSearch.toLowerCase())).slice(0, 75);
   if (selectedClientRecord && !clientOptions.some(c => c.id === selectedClientRecord.id)) clientOptions.unshift(selectedClientRecord);
 
-  const { data: projects } = useQuery({
-    queryKey: ['projects', orgId, form.client_id],
-    queryFn: async () => {
-      const { data } = await supabase.from('projects').select('id, name, client_id').eq('organization_id', orgId).order('name');
-      return data || [];
-    },
-    enabled: !!orgId,
-  });
 
   const { data: pos, isLoading: ordersLoading, isError: ordersError, error: ordersErrorDetail, refetch: refetchOrders } = useQuery({
     queryKey: ['purchase_orders', orgId, clientFilter],
@@ -248,7 +239,7 @@ function WorkOrdersList() {
       const result: PoRow[] = [];
       for (let from = 0; ; from += 500) {
         let request = supabase.from('purchase_orders')
-          .select('*, clients(name), projects(name), campaigns(name), po_line_items(id, budgeted_area, budgeted_qty, requires_survey, requires_design, requires_production, requires_installation), client_org:organizations!purchase_orders_client_org_id_fkey(name)')
+          .select('*, clients(name), projects(name), po_line_items(id, budgeted_area, budgeted_qty, requires_survey, requires_design, requires_production, requires_installation), client_org:organizations!purchase_orders_client_org_id_fkey(name)')
           .eq('organization_id', orgId);
         if (clientFilter) request = request.eq('client_id', clientFilter);
         const { data, error } = await request.order('created_at', { ascending: false })
@@ -324,19 +315,6 @@ function WorkOrdersList() {
     enabled: !!orgId,
   });
 
-  // Client-owned campaigns with at least one Work Order assigned to this
-  // agency (RLS already scopes this) — combined with `projects` (this
-  // agency's own campaigns) below to build one unified Campaign filter,
-  // the same way the agency's own Campaigns page does.
-  const { data: clientCampaigns } = useQuery({
-    queryKey: ['client-campaigns', orgId],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('campaigns').select('id, name').order('name');
-      if (error) throw error;
-      return data as Pick<Campaign, 'id' | 'name'>[];
-    },
-    enabled: !!orgId,
-  });
 
   // A Work Order's "Campaign" is whichever grouping it actually has: the
   // client's own campaign for a client-assigned PO (campaign_id), or this
@@ -359,11 +337,6 @@ function WorkOrdersList() {
     } else if (statusFilter && po.status !== statusFilter) return false;
     if (clientFilter && po.client_id !== clientFilter) return false;
     if (fulfillmentFilter && po.fulfillment_type !== fulfillmentFilter) return false;
-    if (campaignFilterValue) {
-      const [kind, id] = campaignFilterValue.split(':');
-      if (kind === 'proj' && po.project_id !== id) return false;
-      if (kind === 'camp' && po.campaign_id !== id) return false;
-    }
     if (zoneFilter && !(zoneIdsByPo.get(po.id)?.has(zoneFilter))) return false;
     if (stageFilter) {
       const buckets = deliveryMap.get(po.id)?.stages;
@@ -393,7 +366,7 @@ function WorkOrdersList() {
   const currentPage = Math.min(page, totalPages - 1);
   const pagedPos = visiblePos.slice(currentPage * pageSize, currentPage * pageSize + pageSize);
 
-  const activeFilterCount = [stageFilter, statusFilter, clientFilter, fulfillmentFilter, campaignFilterValue, zoneFilter].filter(Boolean).length;
+  const activeFilterCount = [stageFilter, statusFilter, clientFilter, fulfillmentFilter, zoneFilter].filter(Boolean).length;
   const SORT_OPTIONS = [
     { value: 'date_desc', label: 'Order Date (Newest first)' },
     { value: 'date_asc', label: 'Order Date (Oldest first)' },
@@ -402,13 +375,6 @@ function WorkOrdersList() {
     ...(financeAllowed && listFinancialVisible ? [{ value: 'amount_desc', label: 'Amount (Highest first)' }] : []),
   ];
 
-  // Combined dropdown options for the Campaign filter — this agency's own
-  // campaigns (projects) first, then client campaigns, each tagged so the
-  // filter logic above knows which PO field to match against.
-  const campaignFilterOptions = [
-    ...(projects || []).map((p) => ({ value: `proj:${p.id}`, label: p.name, group: 'My Campaigns' })),
-    ...(clientCampaigns || []).map((c) => ({ value: `camp:${c.id}`, label: c.name, group: 'Client Campaigns' })),
-  ];
 
   // Client Requests inbox — POs a linked Client Organization created and
   // assigned to this agency, still waiting on Accept/Reject (doc section
@@ -574,7 +540,7 @@ function WorkOrdersList() {
     setModalOpen(true);
   }
 
-  const filteredProjects = (projects || []).filter((p) => !form.client_id || p.client_id === form.client_id);
+
 
   // Whether the Work Order queued for delete has real shops/invoices
   // attached — deleting it always genuinely deletes it either way now;
@@ -658,7 +624,7 @@ function WorkOrdersList() {
       {(campaignFilter || projectFilter) && (
         <div className="mb-4 flex items-center gap-2 text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
           <ListChecks className="w-4 h-4" />
-          Showing Work Orders for one campaign only.
+          Showing linked historical Work Orders.
           <a href="/purchase-orders" className="ml-1 underline hover:no-underline">Clear filter</a>
         </div>
       )}
@@ -712,7 +678,7 @@ function WorkOrdersList() {
       <FilterDrawer
         open={filterDrawerOpen}
         onClose={() => setFilterDrawerOpen(false)}
-        onClear={() => { setStatusFilter(''); changeClientFilter(''); changeFulfillmentFilter(''); setCampaignFilterValue(''); setZoneFilter(''); }}
+        onClear={() => { setStatusFilter(''); changeClientFilter(''); changeFulfillmentFilter(''); setZoneFilter(''); }}
         activeCount={activeFilterCount}
         resultCount={filteredPos.length}
         resultLabel="Work Orders"
@@ -725,23 +691,6 @@ function WorkOrdersList() {
           </select>
           <p className="mt-1 text-xs text-slate-500">Showing the first 75 matches. Type to find a client.</p>
         </FilterSection>
-        {campaignFilterOptions.length > 0 && (
-          <FilterSection label="Campaign">
-            <select value={campaignFilterValue} onChange={(e) => setCampaignFilterValue(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">All Campaigns</option>
-              {(projects || []).length > 0 && (
-                <optgroup label="My Campaigns">
-                  {(projects || []).map((p) => <option key={`proj:${p.id}`} value={`proj:${p.id}`}>{p.name}</option>)}
-                </optgroup>
-              )}
-              {(clientCampaigns || []).length > 0 && (
-                <optgroup label="Client Campaigns">
-                  {(clientCampaigns || []).map((c) => <option key={`camp:${c.id}`} value={`camp:${c.id}`}>{c.name}</option>)}
-                </optgroup>
-              )}
-            </select>
-          </FilterSection>
-        )}
         {(zones || []).length > 0 && (
           <FilterSection label="Zone">
             <select value={zoneFilter} onChange={(e) => setZoneFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
@@ -936,19 +885,13 @@ function WorkOrdersList() {
       {/* Add / Edit PO header */}
       <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editPo ? 'Edit Work Order' : 'Add Work Order'} size="lg">
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4">
             <Select
               label="Client"
               value={form.client_id}
-              onChange={(v) => setForm({ ...form, client_id: v, project_id: '' })}
+              onChange={(v) => setForm({ ...form, client_id: v, project_id: editPo ? form.project_id : '' })}
               options={(clients || []).map((c) => ({ value: c.id, label: c.name }))}
               required
-            />
-            <Select
-              label="Campaign (optional)"
-              value={form.project_id}
-              onChange={(v) => setForm({ ...form, project_id: v })}
-              options={filteredProjects.map((p) => ({ value: p.id, label: p.name }))}
             />
           </div>
 

@@ -10,12 +10,11 @@ import { type Order } from '@/lib/agencyProgress';
 import { deliveryByOrder, deliveryForOrders, type DeliveryShop } from '@/lib/agencyDelivery';
 import { useAgencyFinancials, financeForOrders } from '@/lib/agencyFinance';
 import { formatRupees } from '@/lib/poUtilization';
-import AgencyHierarchyPage from '@/pages/AgencyHierarchyPage';
 import {
   Modal, ConfirmDialog, Card, Input, Select, Textarea, StatusBadge, EmptyState, PageHeader,
   FilterButton, FilterDrawer, FilterSection, Combobox,
 } from '@/components/ui';
-import { Client, Project, Campaign, Shop, WorkType, WorkItem, SurveyPhoto, BoardMarking, Zone, PurchaseOrder, POLineItem, WorkItemComponent, SHOP_STATUSES, STATUS_LABELS } from '@/lib/types';
+import { Client, Project, Shop, WorkType, WorkItem, SurveyPhoto, BoardMarking, Zone, PurchaseOrder, POLineItem, WorkItemComponent, SHOP_STATUSES, STATUS_LABELS } from '@/lib/types';
 import { logAudit, createNotification } from '@/lib/helpers';
 import { setAvailability, refreshReviewViews } from '@/lib/reviewApi';
 import { WorkItemsPanel } from '@/components/shop/WorkItemsPanel';
@@ -151,14 +150,12 @@ export function ClientsPage() {
     queryKey: ['client-related-counts', hardDeleteClient?.id],
     queryFn: async () => {
       const clientId = hardDeleteClient!.id;
-      const [campaigns, workOrders, shops, invoices] = await Promise.all([
-        supabase.from('projects').select('id', { count: 'exact', head: true }).eq('client_id', clientId),
+      const [workOrders, shops, invoices] = await Promise.all([
         supabase.from('purchase_orders').select('id', { count: 'exact', head: true }).eq('client_id', clientId),
         supabase.from('shops').select('id', { count: 'exact', head: true }).eq('client_id', clientId),
         supabase.from('invoices').select('id', { count: 'exact', head: true }).eq('client_id', clientId),
       ]);
       return {
-        campaigns: campaigns.count || 0,
         workOrders: workOrders.count || 0,
         shops: shops.count || 0,
         invoices: invoices.count || 0,
@@ -227,7 +224,7 @@ export function ClientsPage() {
     mutationFn: async (client: Client) => {
       const { error } = await supabase.from('clients').delete().eq('id', client.id);
       if (error) throw error;
-      await logAudit('clients', client.id, 'delete', null, null, null, `Permanently deleted client "${client.name}" and all its campaigns, work orders, shops and invoices`);
+      await logAudit('clients', client.id, 'delete', null, null, null, `Permanently deleted client "${client.name}" and all its work orders, shops and invoices`);
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['clients', orgId] }),
     onSuccess: (_data, client) => {
@@ -364,7 +361,7 @@ export function ClientsPage() {
         onClose={() => { setDeactivateClient(null); deactivateMutation.reset(); }}
         onConfirm={() => deactivateClient && deactivateMutation.mutate({ client: deactivateClient, active: false })}
         title="Deactivate Client"
-        message={`Deactivate ${deactivateClient?.name}? It disappears from active-client pickers everywhere, but every campaign, work order, shop and invoice stays exactly as-is. You can reactivate it any time.`}
+        message={`Deactivate ${deactivateClient?.name}? It disappears from active-client pickers everywhere, but every work order, shop and invoice stays exactly as-is. You can reactivate it any time.`}
         confirmLabel="Deactivate"
         danger
         manualClose
@@ -388,7 +385,6 @@ export function ClientsPage() {
             </div>
 
             <div className="grid grid-cols-2 gap-2.5 text-sm">
-              <RelatedCountRow label="Campaigns" count={relatedCounts?.campaigns} loading={countsLoading} />
               <RelatedCountRow label="Work Orders (+ line items)" count={relatedCounts?.workOrders} loading={countsLoading} />
               <RelatedCountRow label="Shops (+ surveys, designs, production, installs)" count={relatedCounts?.shops} loading={countsLoading} />
               <RelatedCountRow label="Invoices (+ line items)" count={relatedCounts?.invoices} loading={countsLoading} />
@@ -444,417 +440,6 @@ function RelatedCountRow({ label, count, loading }: { label: string; count: numb
   );
 }
 
-// Campaigns — the agency-side grouping level shown above Work Orders (POs).
-// Two kinds of rows share this one table:
-//  1. "Agency" campaigns — rows in this org's own `projects` table. Full
-//     CRUD, only ever visible/owned by this agency (unchanged data model,
-//     just relabelled from "Project" to "Campaign" everywhere in the UI).
-//  2. "Client" campaigns — rows in the client-owned `campaigns` table,
-//     visible here (read-only) because a linked client org assigned at
-//     least one Work Order (PO) to this agency under that campaign (RLS:
-//     campaigns_select, migration 0051). Never editable from this side —
-//     the client owns creation/renaming/status; the agency only ever acts
-//     on the Work Orders that arrive under it.
-export function CampaignsPage() {
-  const { profile } = useAuth();
-  const orgId = profile?.organization_id;
-  const queryClient = useQueryClient();
-  const canDelete = profile?.role === 'agency_owner' || profile?.role === 'admin';
-  const [campaignParams, setCampaignParams] = useSearchParams();
-  const campaignDetail = campaignParams.get('detail');
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editProject, setEditProject] = useState<Project | null>(null);
-  const [deleteProject, setDeleteProject] = useState<Project | null>(null);
-  const [form, setForm] = useState({ name: '', client_id: '', description: '', start_date: '', status: 'active' });
-  const [search, setSearch] = useState('');
-  const [clientFilter, setClientFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [sourceFilter, setSourceFilter] = useState('');
-  const [sortBy, setSortBy] = useState('created_desc');
-  const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
-  const [notice, setNotice] = useState<{ kind: 'error' | 'success'; message: string } | null>(null);
-
-  const { data: clients } = useQuery({
-    queryKey: ['clients', orgId],
-    queryFn: async () => {
-      const { data } = await supabase.from('clients').select('id, name').eq('organization_id', orgId).eq('is_active', true).order('name');
-      return data;
-    },
-    enabled: !!orgId,
-  });
-
-  const { data: projects } = useQuery({
-    queryKey: ['projects', orgId],
-    queryFn: async () => {
-      const { data } = await supabase
-        .from('projects')
-        .select('*, clients(name)')
-        .eq('organization_id', orgId)
-        .order('created_at', { ascending: false });
-      return data as (Project & { clients: { name: string } | null })[];
-    },
-    enabled: !!orgId,
-  });
-
-  // Client-owned campaigns that have at least one Work Order assigned to
-  // this agency — RLS (campaigns_select) already restricts the rows that
-  // come back to exactly those, so no extra filtering is needed here.
-  const { data: clientCampaigns } = useQuery({
-    queryKey: ['client-campaigns', orgId],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('campaigns')
-        .select('*, client_org:organizations!campaigns_client_org_id_fkey(name)')
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      return data as (Campaign & { client_org: { name: string } | null })[];
-    },
-    enabled: !!orgId,
-  });
-
-  const saveMutation = useMutation({
-    mutationFn: async () => {
-      if (editProject) {
-        const { error } = await supabase.from('projects').update({
-          name: form.name, client_id: form.client_id, description: form.description,
-          start_date: form.start_date || null, status: form.status,
-        }).eq('id', editProject.id);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from('projects').insert({
-          organization_id: orgId, name: form.name, client_id: form.client_id,
-          description: form.description, start_date: form.start_date || null, status: form.status,
-        });
-        if (error) throw error;
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['projects', orgId] });
-      setModalOpen(false);
-      setNotice({ kind: 'success', message: editProject ? 'Campaign updated.' : 'Campaign created.' });
-    },
-    onError: (err: Error) => {
-      setNotice({ kind: 'error', message: err.message || 'Could not save the campaign. Please try again.' });
-    },
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: async () => {
-      if (!deleteProject) return null;
-      const { data, error } = await supabase.rpc('delete_campaign_cascade', { p_project_id: deleteProject.id });
-      if (error) throw error;
-      return data as { shops: number; purchase_orders: number; invoices: number } | null;
-    },
-    // Runs whether the delete succeeded or failed — so the list always
-    // reflects the true database state instead of quietly going stale if
-    // something after the delete (e.g. a notification) throws.
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['projects', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['shops', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['purchase-orders', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['invoices', orgId] });
-    },
-    onSuccess: (counts) => {
-      const parts = [];
-      if (counts?.shops) parts.push(`${counts.shops} shop${counts.shops === 1 ? '' : 's'}`);
-      if (counts?.purchase_orders) parts.push(`${counts.purchase_orders} Work Order${counts.purchase_orders === 1 ? '' : 's'}`);
-      if (counts?.invoices) parts.push(`${counts.invoices} invoice${counts.invoices === 1 ? '' : 's'}`);
-      setNotice({ kind: 'success', message: parts.length > 0 ? `"${deleteProject?.name}" deleted, along with ${parts.join(', ')} and all their survey/design/production/installation records.` : `"${deleteProject?.name}" deleted.` });
-      setDeleteProject(null);
-    },
-    onError: (err: Error) => {
-      setNotice({ kind: 'error', message: err.message || 'Could not delete the campaign. Please try again.' });
-    },
-  });
-
-  function openAdd() {
-    setEditProject(null);
-    setForm({ name: '', client_id: '', description: '', start_date: '', status: 'active' });
-    setNotice(null);
-    setModalOpen(true);
-  }
-
-  function openEdit(project: Project) {
-    setEditProject(project);
-    setForm({
-      name: project.name, client_id: project.client_id, description: project.description || '',
-      start_date: project.start_date || '', status: project.status,
-    });
-    setNotice(null);
-    setModalOpen(true);
-  }
-
-  const totalCount = (projects?.length || 0) + (clientCampaigns?.length || 0);
-
-  // Unify "My Campaign" (projects) and "Client Campaign" rows into one
-  // shape so search/filter/sort can work across both at once instead of
-  // two separate un-filterable tables.
-  type CampaignRow = {
-    key: string; kind: 'project' | 'client'; name: string; description: string | null;
-    clientName: string; clientId: string | null; status: string; startDate: string | null;
-    project?: Project; campaign?: Campaign & { client_org: { name: string } | null };
-  };
-  const allRows: CampaignRow[] = [
-    ...(projects || []).map((p): CampaignRow => ({
-      key: `p-${p.id}`, kind: 'project', name: p.name, description: p.description,
-      clientName: p.clients?.name || 'No client', clientId: p.client_id, status: p.status,
-      startDate: p.start_date, project: p,
-    })),
-    ...(clientCampaigns || []).map((c): CampaignRow => ({
-      key: `c-${c.id}`, kind: 'client', name: c.name, description: c.description,
-      clientName: c.client_org?.name || 'Linked client', clientId: null, status: c.status,
-      startDate: c.start_date, campaign: c,
-    })),
-  ];
-
-  const filteredRows = allRows.filter((r) => {
-    if (search) {
-      const term = search.toLowerCase();
-      if (!r.name.toLowerCase().includes(term) && !r.clientName.toLowerCase().includes(term)) return false;
-    }
-    if (clientFilter && r.clientId !== clientFilter) return false;
-    if (statusFilter && r.status !== statusFilter) return false;
-    if (sourceFilter && r.kind !== sourceFilter) return false;
-    return true;
-  });
-
-  const sortedRows = [...filteredRows].sort((a, b) => {
-    switch (sortBy) {
-      case 'name_asc':
-        return a.name.localeCompare(b.name);
-      case 'client_asc':
-        return a.clientName.localeCompare(b.clientName);
-      case 'status_asc':
-        return a.status.localeCompare(b.status);
-      case 'date_asc':
-        return new Date(a.startDate || 0).getTime() - new Date(b.startDate || 0).getTime();
-      case 'date_desc':
-        return new Date(b.startDate || 0).getTime() - new Date(a.startDate || 0).getTime();
-      case 'created_desc':
-      default:
-        // Both source arrays already come back newest-first from their
-        // own queries; preserve that relative order (projects first).
-        return 0;
-    }
-  });
-
-  const activeFilterCount = [clientFilter, statusFilter, sourceFilter].filter(Boolean).length;
-  const SORT_OPTIONS = [
-    { value: 'created_desc', label: 'Newest first' },
-    { value: 'name_asc', label: 'Name (A–Z)' },
-    { value: 'client_asc', label: 'Client (A–Z)' },
-    { value: 'status_asc', label: 'Status' },
-    { value: 'date_desc', label: 'Start Date (Newest first)' },
-    { value: 'date_asc', label: 'Start Date (Oldest first)' },
-  ];
-
-  if (campaignDetail && /^(project|campaign):[a-f0-9-]+$/i.test(campaignDetail)) {
-    return <div><button className="text-blue-700 text-sm mb-4" onClick={()=>setCampaignParams(p=>{const q=new URLSearchParams(p);q.delete('detail');return q;})}>← All campaigns</button><AgencyHierarchyPage kind={campaignDetail.startsWith('project:')?'project':'campaign'} selectedId={campaignDetail.split(':')[1]}/></div>;
-  }
-  return (
-    <div>
-
-      <PageHeader
-        title="Campaigns"
-        subtitle="Your own campaigns, plus every client campaign a Work Order has been assigned to you under"
-        action={
-          <button onClick={openAdd} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium text-sm transition">
-            <Plus className="w-4 h-4" /> Add Campaign
-          </button>
-        }
-      />
-
-      {notice && (
-        <div className={`flex items-start gap-2.5 rounded-lg px-4 py-3 mb-4 text-sm ${notice.kind === 'error' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'}`}>
-          {notice.kind === 'error' ? <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /> : <CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" />}
-          <p className="flex-1">{notice.message}</p>
-          <button onClick={() => setNotice(null)} className="text-current opacity-60 hover:opacity-100"><X className="w-4 h-4" /></button>
-        </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        <div className="relative flex-1 min-w-[220px]">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by campaign or client name..."
-            className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-          {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>Sort: {o.label}</option>)}
-        </select>
-        <FilterButton activeCount={activeFilterCount} onClick={() => setFilterDrawerOpen(true)} />
-        {(search || activeFilterCount > 0) && <span className="text-xs text-slate-400">{filteredRows.length} of {allRows.length} shown</span>}
-      </div>
-
-      <FilterDrawer
-        open={filterDrawerOpen}
-        onClose={() => setFilterDrawerOpen(false)}
-        onClear={() => { setClientFilter(''); setStatusFilter(''); setSourceFilter(''); }}
-        activeCount={activeFilterCount}
-        resultCount={filteredRows.length}
-        resultLabel="campaigns"
-      >
-        <FilterSection label="Source">
-          <select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Sources</option>
-            <option value="project">My Campaigns</option>
-            <option value="client">Client Campaigns</option>
-          </select>
-        </FilterSection>
-        <FilterSection label="Client (My Campaigns)">
-          <select value={clientFilter} onChange={(e) => setClientFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Clients</option>
-            {(clients || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </FilterSection>
-        <FilterSection label="Status">
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All Statuses</option>
-            <option value="active">Active</option>
-            <option value="on_hold">On Hold</option>
-            <option value="completed">Completed</option>
-            <option value="cancelled">Cancelled</option>
-          </select>
-        </FilterSection>
-      </FilterDrawer>
-
-      <Card className="overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-slate-600">
-              <tr>
-                <th className="text-left px-4 py-3 font-medium">Campaign</th>
-                <th className="text-left px-4 py-3 font-medium">Client</th>
-                <th className="text-left px-4 py-3 font-medium">Source</th>
-                <th className="text-left px-4 py-3 font-medium">Status</th>
-                <th className="text-left px-4 py-3 font-medium">Start Date</th>
-                <th className="px-4 py-3"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {sortedRows.map((r) => r.kind === 'project' && r.project ? (
-                <tr key={r.key} className="hover:bg-slate-50">
-                  <td className="px-4 py-3">
-                    <p className="font-medium text-slate-900">{r.project.name}</p>
-                    {r.project.description && <p className="text-xs text-slate-500">{r.project.description}</p>}
-                  </td>
-                  <td className="px-4 py-3 text-slate-600">{r.clientName}</td>
-                  <td className="px-4 py-3">
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
-                      <Layers className="w-3 h-3" /> My Campaign
-                    </span>
-                  </td>
-                  <td className="px-4 py-3"><StatusBadge status={r.project.status} /></td>
-                  <td className="px-4 py-3 text-slate-500 text-xs">{r.project.start_date ? new Date(r.project.start_date).toLocaleDateString('en-IN') : '—'}</td>
-                  <td className="px-4 py-3 text-right">
-                    <div className="flex items-center justify-end gap-2">
-                      <Link to={`/campaigns?detail=project:${r.project.id}`} className="text-xs text-blue-600 hover:underline flex items-center gap-1">
-                        <ListOrdered className="w-3.5 h-3.5" /> Work Orders
-                      </Link>
-                      <button onClick={() => openEdit(r.project!)} className="p-1 text-slate-400 hover:text-blue-600">
-                        <Pencil className="w-3.5 h-3.5" />
-                      </button>
-                      {canDelete && (
-                        <button onClick={() => setDeleteProject(r.project!)} className="p-1 text-slate-400 hover:text-red-600">
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ) : r.campaign ? (
-                <tr key={r.key} className="hover:bg-slate-50">
-                  <td className="px-4 py-3">
-                    <p className="font-medium text-slate-900">{r.campaign.name}</p>
-                    {r.campaign.description && <p className="text-xs text-slate-500">{r.campaign.description}</p>}
-                  </td>
-                  <td className="px-4 py-3 text-slate-600 flex items-center gap-1.5">
-                    <Building2 className="w-3.5 h-3.5 text-slate-400" /> {r.clientName}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
-                      <Lock className="w-3 h-3" /> Client Campaign
-                    </span>
-                  </td>
-                  <td className="px-4 py-3"><StatusBadge status={r.campaign.status} /></td>
-                  <td className="px-4 py-3 text-slate-500 text-xs">{r.campaign.start_date ? new Date(r.campaign.start_date).toLocaleDateString('en-IN') : '—'}</td>
-                  <td className="px-4 py-3 text-right">
-                    <Link to={`/purchase-orders?campaign=${r.campaign.id}`} className="text-xs text-blue-600 hover:underline flex items-center justify-end gap-1">
-                      <ListOrdered className="w-3.5 h-3.5" /> Work Orders
-                    </Link>
-                  </td>
-                </tr>
-              ) : null)}
-              {totalCount === 0 && (
-                <tr><td colSpan={6} className="text-center py-10 text-slate-400">No campaigns yet</td></tr>
-              )}
-              {totalCount > 0 && sortedRows.length === 0 && (
-                <tr><td colSpan={6} className="text-center py-10 text-slate-400">No campaigns match these filters</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      <p className="text-xs text-slate-400 mt-2">Client campaigns are read-only here — they're managed by the client and only appear once a Work Order under them is assigned to you.</p>
-
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={editProject ? 'Edit Campaign' : 'Add Campaign'}>
-        <div className="space-y-4">
-          <Input label="Campaign Name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} required />
-          <Select
-            label="Client"
-            value={form.client_id}
-            onChange={(v) => setForm({ ...form, client_id: v })}
-            options={(clients || []).map((c) => ({ value: c.id, label: c.name }))}
-            required
-          />
-          <Textarea label="Description" value={form.description} onChange={(v) => setForm({ ...form, description: v })} />
-          <div className="grid grid-cols-2 gap-4">
-            <Input label="Start Date" type="date" value={form.start_date} onChange={(v) => setForm({ ...form, start_date: v })} />
-            <Select
-              label="Status"
-              value={form.status}
-              onChange={(v) => setForm({ ...form, status: v })}
-              options={[
-                { value: 'active', label: 'Active' },
-                { value: 'on_hold', label: 'On Hold' },
-                { value: 'completed', label: 'Completed' },
-                { value: 'cancelled', label: 'Cancelled' },
-              ]}
-            />
-          </div>
-          {saveMutation.isError && (
-            <p className="text-sm text-red-600 flex items-center gap-1.5"><AlertCircle className="w-4 h-4 shrink-0" />{(saveMutation.error as Error).message}</p>
-          )}
-          <button
-            onClick={() => saveMutation.mutate()}
-            disabled={saveMutation.isPending || !form.name || !form.client_id}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition disabled:opacity-50"
-          >
-            {saveMutation.isPending ? 'Saving...' : editProject ? 'Update Campaign' : 'Add Campaign'}
-          </button>
-        </div>
-      </Modal>
-
-      <ConfirmDialog
-        open={!!deleteProject}
-        onClose={() => { setDeleteProject(null); deleteMutation.reset(); }}
-        onConfirm={() => deleteMutation.mutate()}
-        title="Delete Campaign"
-        message={`This permanently deletes "${deleteProject?.name}" AND every shop under it — including their surveys, designs, production records, installation history and any invoices raised under this campaign. This cannot be undone.`}
-        confirmLabel="Delete Everything"
-        danger
-        manualClose
-        loading={deleteMutation.isPending}
-        error={deleteMutation.isError ? ((deleteMutation.error as Error).message || 'Could not delete this campaign.') : null}
-      />
-    </div>
-  );
-}
-
 export function ShopsPage() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
@@ -884,7 +469,6 @@ export function ShopsPage() {
   const [stateFilter, setStateFilter] = useState('');
   const debouncedStateFilter = useDebouncedValue(stateFilter.trim(), 350);
   const [zoneFilter, setZoneFilter] = useState('');
-  const [campaignFilter, setCampaignFilter] = useState('');
   const [sortBy, setSortBy] = useState('created_desc');
   const [filterDrawerOpen, setFilterDrawerOpen] = useState(false);
   const [zoneModalOpen, setZoneModalOpen] = useState(false);
@@ -949,7 +533,7 @@ export function ShopsPage() {
   useEffect(() => {
     setPage(0);
     setSelectedShopIds(new Set());
-  }, [poFilter, stageFilter, statusFilter, debouncedCityFilter, debouncedDistrictFilter, debouncedStateFilter, zoneFilter, campaignFilter, debouncedSearch, pageSize]);
+  }, [poFilter, stageFilter, statusFilter, debouncedCityFilter, debouncedDistrictFilter, debouncedStateFilter, zoneFilter, debouncedSearch, pageSize]);
   // Selection is strictly scoped to the visible page. Never carry old IDs
   // into a new page/sort and accidentally mutate shops users cannot see.
   useEffect(() => { setSelectedShopIds(new Set()); }, [page, sortBy]);
@@ -1415,20 +999,6 @@ export function ShopsPage() {
     },
   });
 
-  // Campaigns — client-owned, but any campaign with at least one Work
-  // Order assigned to this agency is visible here (RLS already scopes
-  // this the same way the Campaigns/Projects page's client-campaigns
-  // query does) so shops can be filtered by which campaign their Work
-  // Order belongs to.
-  const { data: campaignsForFilter } = useQuery({
-    queryKey: ['campaigns-for-shops-filter', orgId],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('campaigns').select('id, name').order('name');
-      if (error) throw error;
-      return data as { id: string; name: string }[];
-    },
-    enabled: !!orgId,
-  });
 
   // The Work Order this list is filtered to may be cancelled (so it
   // won't be in the "active" purchaseOrders list above) — fetched
@@ -1466,7 +1036,7 @@ export function ShopsPage() {
   // one page (pageSize rows) comes back, alongside an exact total count
   // from Postgres for the "X–Y of Z" indicator and page controls below.
   const groupedStatuses = stageFilter ? (poFilterInfo ? statusesForStage(stageFilter, poFilterInfo.fulfillment_type, poFilterInfo.po_line_items || []) : []) : null;
-  const shopsQueryKey = ['shops', orgId, { poFilter, stageFilter, groupedStatuses, statusFilter, zoneFilter, campaignFilter, city: debouncedCityFilter, district: debouncedDistrictFilter, state: debouncedStateFilter, q: debouncedSearch, sortBy, page, pageSize }];
+  const shopsQueryKey = ['shops', orgId, { poFilter, stageFilter, groupedStatuses, statusFilter, zoneFilter, city: debouncedCityFilter, district: debouncedDistrictFilter, state: debouncedStateFilter, q: debouncedSearch, sortBy, page, pageSize }];
   const { data: shopsPage, isFetching: shopsLoading, error: shopsLoadError, refetch: refetchShops } = useQuery({
     queryKey: shopsQueryKey,
     queryFn: async () => {
@@ -1474,7 +1044,7 @@ export function ShopsPage() {
       // by it needs an INNER join hint (!inner) on purchase_orders — a
       // plain embedded select only shapes the joined object, it doesn't
       // restrict which top-level shop rows come back.
-      const poEmbed = campaignFilter ? 'purchase_orders!inner(po_number, campaign_id)' : 'purchase_orders(po_number)';
+      const poEmbed = 'purchase_orders(po_number)';
       let query = supabase
         .from('shops')
         .select(`*, clients(name), projects(name), zones(name), ${poEmbed}, rejected_profile:profiles!shops_rejected_by_fkey(full_name)`, { count: 'exact' })
@@ -1484,7 +1054,6 @@ export function ShopsPage() {
       if (groupedStatuses) query = query.in('status', groupedStatuses.length ? groupedStatuses : ['__no_matching_stage__']);
       if (statusFilter) query = query.eq('status', statusFilter);
       if (zoneFilter) query = query.eq('zone_id', zoneFilter);
-      if (campaignFilter) query = query.eq('purchase_orders.campaign_id', campaignFilter);
       if (debouncedCityFilter) query = query.ilike('city', `%${debouncedCityFilter}%`);
       if (debouncedDistrictFilter) query = query.ilike('district', `%${debouncedDistrictFilter}%`);
       if (debouncedStateFilter) query = query.ilike('state', `%${debouncedStateFilter}%`);
@@ -1518,7 +1087,6 @@ export function ShopsPage() {
         if (groupedStatuses) fallback = fallback.in('status', groupedStatuses.length ? groupedStatuses : ['__no_matching_stage__']);
         if (statusFilter) fallback = fallback.eq('status', statusFilter);
         if (zoneFilter) fallback = fallback.eq('zone_id', zoneFilter);
-        if (campaignFilter) fallback = fallback.eq('purchase_orders.campaign_id', campaignFilter);
         if (debouncedCityFilter) fallback = fallback.ilike('city', `%${debouncedCityFilter}%`);
         if (debouncedDistrictFilter) fallback = fallback.ilike('district', `%${debouncedDistrictFilter}%`);
         if (debouncedStateFilter) fallback = fallback.ilike('state', `%${debouncedStateFilter}%`);
@@ -2069,8 +1637,8 @@ export function ShopsPage() {
   const cities = useMemo(() => [...new Set((locationRows || []).map((r) => r.city).filter(Boolean))].sort() as string[], [locationRows]);
   const districts = useMemo(() => [...new Set((locationRows || []).map((r) => r.district).filter(Boolean))].sort() as string[], [locationRows]);
   const states = useMemo(() => [...new Set((locationRows || []).map((r) => r.state).filter(Boolean))].sort() as string[], [locationRows]);
-  const hasActiveFilters = !!(stageFilter || search || statusFilter || cityFilter || districtFilter || stateFilter || zoneFilter || campaignFilter || poFilter);
-  const activeFilterCount = [stageFilter, statusFilter, cityFilter, districtFilter, stateFilter, zoneFilter, campaignFilter, poFilter].filter(Boolean).length;
+  const hasActiveFilters = !!(stageFilter || search || statusFilter || cityFilter || districtFilter || stateFilter || zoneFilter || poFilter);
+  const activeFilterCount = [stageFilter, statusFilter, cityFilter, districtFilter, stateFilter, zoneFilter, poFilter].filter(Boolean).length;
   const SORT_OPTIONS = [
     { value: 'created_desc', label: 'Newest first' },
     { value: 'created_asc', label: 'Oldest first' },
@@ -2171,7 +1739,7 @@ export function ShopsPage() {
       <FilterDrawer
         open={filterDrawerOpen}
         onClose={() => setFilterDrawerOpen(false)}
-        onClear={() => { setStatusFilter(''); setCityFilter(''); setDistrictFilter(''); setStateFilter(''); setZoneFilter(''); setCampaignFilter(''); setPoFilter(''); }}
+        onClear={() => { setStatusFilter(''); setCityFilter(''); setDistrictFilter(''); setStateFilter(''); setZoneFilter(''); setPoFilter(''); }}
         activeCount={activeFilterCount}
         resultCount={totalShops}
         resultLabel="shops"
@@ -2189,14 +1757,6 @@ export function ShopsPage() {
             {(purchaseOrders || []).map((po) => <option key={po.id} value={po.id}>{po.po_number}</option>)}
           </select>
         </FilterSection>
-        {(campaignsForFilter || []).length > 0 && (
-          <FilterSection label="Campaign">
-            <select value={campaignFilter} onChange={(e) => setCampaignFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">All Campaigns</option>
-              {(campaignsForFilter || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </FilterSection>
-        )}
         <FilterSection label="Zone">
           <select value={zoneFilter} onChange={(e) => setZoneFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">All Zones</option>
@@ -3724,7 +3284,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const assignMutation = useMutation({
     mutationFn: async () => {
       if (!assignUserId || !assignModal || !shop) throw new Error('Pick a person to assign first.');
-      if (assignModal === 'surveyor' && (purchaseOrders || []).some(po => po.id === shop.purchase_order_id && po.fulfillment_type === 'production_install')) throw new Error('Survey is not required for Production & Installation. Select Design Review instead.');
+      if (assignModal === 'surveyor' && shop.purchase_orders?.fulfillment_type === 'production_install') throw new Error('Survey is not required for Production & Installation. Select Design Review instead.');
 
       // Designers are owned by design_tasks rather than shop_assignments.
       // Keep one canonical task per shop and update/reassign it here so the

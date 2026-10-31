@@ -66,7 +66,7 @@ const REPORT_GROUPS: { title: string; subtitle: string; cards: ReportCardDef[] }
     subtitle: 'Ready-to-present slide decks for sign-off calls',
     cards: [
       { id: 'ppt-preapproval', label: 'Pre-Approval Deck', desc: 'Survey photos only, one slide per shop — for sign-off before design begins.', icon: Presentation, color: 'amber', variants: [{ type: 'ppt-preapproval', label: 'Deck', ext: 'PPTX' }] },
-      { id: 'ppt-final', label: 'Final Installation Deck', desc: 'Before/after photos, one slide per shop — for campaign close-out.', icon: Presentation, color: 'emerald', variants: [{ type: 'ppt-final', label: 'Deck', ext: 'PPTX' }] },
+      { id: 'ppt-final', label: 'Final Installation Deck', desc: 'Before/after photos, one slide per shop — for Work Order close-out.', icon: Presentation, color: 'emerald', variants: [{ type: 'ppt-final', label: 'Deck', ext: 'PPTX' }] },
     ],
   },
   {
@@ -100,7 +100,6 @@ export default function ReportsPage() {
   const orgId = profile?.organization_id;
 
   const [selectedClient, setSelectedClient] = useState('');
-  const [selectedCampaign, setSelectedCampaign] = useState('');
   const [selectedPO, setSelectedPO] = useState('');
   const [zoneFilter, setZoneFilter] = useState('');
   const [shopStatus, setShopStatus] = useState('');
@@ -119,8 +118,7 @@ export default function ReportsPage() {
   // Resetting a level whenever its parent changes so the dropdowns can never
   // point at a combination that no longer makes sense (e.g. a PO from a
   // campaign that was just deselected).
-  useEffect(() => { setSelectedCampaign(''); setSelectedPO(''); setSelectedShopIds(new Set()); }, [selectedClient]);
-  useEffect(() => { setSelectedPO(''); setSelectedShopIds(new Set()); }, [selectedCampaign]);
+  useEffect(() => { setSelectedPO(''); setSelectedShopIds(new Set()); }, [selectedClient]);
   useEffect(() => { setSelectedShopIds(new Set()); }, [selectedPO]);
 
   const { data: org } = useQuery({
@@ -141,14 +139,6 @@ export default function ReportsPage() {
     enabled: !!orgId,
   });
 
-  const { data: campaigns } = useQuery({
-    queryKey: ['projects-reports', orgId],
-    queryFn: async () => {
-      const data = await fetchAllPages<any>((a, b) => supabase.from('projects').select('id, name, client_id').eq('organization_id', orgId!).order('id').range(a, b));
-      return data as { id: string; name: string; client_id: string }[];
-    },
-    enabled: !!orgId,
-  });
 
   const { data: purchaseOrders } = useQuery({
     queryKey: ['purchase-orders-reports', orgId],
@@ -167,11 +157,10 @@ export default function ReportsPage() {
   });
 
   const { data: shops } = useQuery({
-    queryKey: ['shops-reports', orgId, selectedClient, selectedCampaign, selectedPO],
+    queryKey: ['shops-reports', orgId, selectedClient, selectedPO],
     queryFn: async () => {
       let q = supabase.from('shops').select('*, clients(name), projects(name), zones(name), purchase_orders(name,po_number)').eq('organization_id', orgId);
       if (selectedClient) q = q.eq('client_id', selectedClient);
-      if (selectedCampaign) q = q.eq('project_id', selectedCampaign);
       if (selectedPO) q = q.eq('purchase_order_id', selectedPO);
       return fetchAllPages<any>((a, b) => q.order('id').range(a, b));
     },
@@ -337,29 +326,24 @@ export default function ReportsPage() {
 
   const selectedClientLabel = useMemo(() => clients?.find((c) => c.id === selectedClient)?.name, [selectedClient, clients]);
 
-  const campaignOptions = useMemo(
-    () => (campaigns || []).filter((c) => !selectedClient || c.client_id === selectedClient),
-    [campaigns, selectedClient]
-  );
   const poOptions = useMemo(
     () => (purchaseOrders || []).filter((p) =>
       (!selectedClient || p.client_id === selectedClient) &&
-      (!selectedCampaign || p.project_id === selectedCampaign)
+      true
     ),
-    [purchaseOrders, selectedClient, selectedCampaign]
+    [purchaseOrders, selectedClient]
   );
   const scopedPoUtilizationRows = useMemo(
     () => (poUtilizationRows || []).filter((r) =>
-      (!selectedCampaign || r.project_id === selectedCampaign) &&
       (!selectedPO || r.purchase_order_id === selectedPO)
     ),
-    [poUtilizationRows, selectedCampaign, selectedPO]
+    [poUtilizationRows, selectedPO]
   );
 
-  const activeFilterCount = [selectedClient, selectedCampaign, selectedPO, zoneFilter, shopStatus, period !== 'all' ? period : ''].filter(Boolean).length + (selectedShopIds.size > 0 ? 1 : 0);
+  const activeFilterCount = [selectedClient, selectedPO, zoneFilter, shopStatus, period !== 'all' ? period : ''].filter(Boolean).length + (selectedShopIds.size > 0 ? 1 : 0);
 
   function clearFilters() {
-    setSelectedClient(''); setSelectedCampaign(''); setSelectedPO(''); setSelectedShopIds(new Set()); setShopSearch('');
+    setSelectedClient(''); setSelectedPO(''); setSelectedShopIds(new Set()); setShopSearch('');
     setZoneFilter(''); setShopStatus(''); setPeriod('all'); setDateFrom(''); setDateTo('');
   }
 
@@ -417,7 +401,7 @@ export default function ReportsPage() {
           return Number.isFinite(t) && (!periodRange.from || t >= periodRange.from.getTime()) && (!periodRange.to || t <= periodRange.to.getTime());
         };
         const selectedPOIds = new Set((purchaseOrders || []).filter(p =>
-          (!selectedClient || p.client_id === selectedClient) && (!selectedCampaign || p.project_id === selectedCampaign) && (!selectedPO || p.id === selectedPO)
+          (!selectedClient || p.client_id === selectedClient) && (!selectedPO || p.id === selectedPO)
         ).map(p=>p.id));
         const allowedShopIds = new Set(filteredShops.map((s:any)=>s.id));
         const vehicleRows = kind === 'vehicle-load-log' && orgId ? (await fetchVehicleLoadLog(orgId, periodRange.from || undefined))
@@ -535,7 +519,7 @@ export default function ReportsPage() {
           const candidateShops = filteredShops.filter((s: any) => (workItems || []).some((w) => w.shop_id === s.id));
           if (candidateShops.length === 0) { setNotice({ kind: 'error', message: 'No work items found for the selected shops.' }); break; }
           if (candidateShops.length > DESIGN_APPROVAL_MAX_SHOPS) {
-            setNotice({ kind: 'error', message: `Ek baar mein ${DESIGN_APPROVAL_MAX_SHOPS} shops tak hi. Filters se PO, Campaign ya shop selection se list chota karein (abhi ${candidateShops.length} shops match ho rahe hain).` });
+            setNotice({ kind: 'error', message: `Ek baar mein ${DESIGN_APPROVAL_MAX_SHOPS} shops tak hi. Filters se PO ya shop selection se list chota karein (abhi ${candidateShops.length} shops match ho rahe hain).` });
             break;
           }
           setGenProgress({ done: 0, total: candidateShops.length });
@@ -705,10 +689,9 @@ export default function ReportsPage() {
             </button>
           </div>
         </div>
-        {(selectedClientLabel || selectedCampaign || selectedPO || selectedShopIds.size > 0) && (
+        {(selectedClientLabel || selectedPO || selectedShopIds.size > 0) && (
           <div className="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-slate-100">
             {selectedClientLabel && <ScopeChip label={`Client: ${selectedClientLabel}`} onClear={() => setSelectedClient('')} />}
-            {selectedCampaign && <ScopeChip label={`Campaign: ${campaigns?.find((c) => c.id === selectedCampaign)?.name || '—'}`} onClear={() => setSelectedCampaign('')} />}
             {selectedPO && <ScopeChip label={`PO: ${purchaseOrders?.find((p) => p.id === selectedPO)?.po_number || '—'}`} onClear={() => setSelectedPO('')} />}
             {selectedShopIds.size > 0 && <ScopeChip label={`${selectedShopIds.size} shop(s) selected`} onClear={() => setSelectedShopIds(new Set())} />}
             {zoneFilter && <ScopeChip label={`Zone: ${zoneFilter === '__NO_ZONE__' ? 'No Zone' : zones?.find(z=>z.id===zoneFilter)?.name || 'Zone'}`} onClear={()=>setZoneFilter('')} />}
@@ -725,12 +708,6 @@ export default function ReportsPage() {
         resultCount={filteredShops.length}
         resultLabel="shops"
       >
-        <FilterSection label="Campaign">
-          <select value={selectedCampaign} onChange={(e) => setSelectedCampaign(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-            <option value="">All campaigns</option>
-            {campaignOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </FilterSection>
         <FilterSection label="Shop status">
           <select value={shopStatus} onChange={e=>setShopStatus(e.target.value)} aria-label="Report shop status" className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white">
             <option value="">All statuses</option>

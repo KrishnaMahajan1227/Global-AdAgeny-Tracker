@@ -72,14 +72,13 @@ const INSTALLED_OR_LATER = new Set(['installation_review', 'installed', 'billed'
 // Excel while the PO is still pending_acceptance, then read-only with
 // photos once the agency accepts and starts work), Report (progress +
 // photo compliance scoped to just this PO), and Map. This nests under a
-// Campaign now (Campaign -> its POs -> open one), reached via
-// ClientCampaignDetailPage.tsx.
+// the direct Work Orders listing without an intermediate group.
 //
 // No rate/₹ anywhere on this page, and no Billing tab — a Client
 // Organization user never sees agency pricing or invoice/payment data,
 // full stop. Money lives entirely on the agency side of the platform.
 export default function ClientPODetailPage() {
-  const { campaignId, poId } = useParams<{ campaignId: string; poId: string }>();
+  const { poId } = useParams<{ poId: string }>();
   const navigate = useNavigate();
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
@@ -270,9 +269,9 @@ export default function ClientPODetailPage() {
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['client-campaigns-pos-rollup', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['client-campaign-pos', po?.campaign_id] });
-      navigate(`/client/campaigns/${campaignId}`);
+      queryClient.invalidateQueries({ queryKey: ['client-work-orders', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['client-work-orders', orgId] });
+      navigate('/client/work-orders');
     },
   });
 
@@ -341,7 +340,7 @@ export default function ClientPODetailPage() {
       queryClient.invalidateQueries({ queryKey: ['client-po-detail', poId] });
       queryClient.invalidateQueries({ queryKey: ['client-po-line-items', poId] });
       queryClient.invalidateQueries({ queryKey: ['client-po-progress', poId] });
-      queryClient.invalidateQueries({ queryKey: ['client-campaigns-pos', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['client-work-orders', orgId] });
       setEditOpen(false);
     },
   });
@@ -618,8 +617,8 @@ export default function ClientPODetailPage() {
   if (!po) {
     return (
       <div>
-        <button onClick={() => navigate(`/client/campaigns/${campaignId}`)} className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800 mb-4">
-          <ArrowLeft className="w-4 h-4" /> Back to Campaign
+        <button onClick={() => navigate('/client/work-orders')} className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800 mb-4">
+          <ArrowLeft className="w-4 h-4" /> Back to Work Orders
         </button>
         <Card><EmptyState icon={<FileText className="w-12 h-12" />} title="Work Order not found" subtitle="It may have been removed, or you don't have access to it" /></Card>
       </div>
@@ -633,8 +632,8 @@ export default function ClientPODetailPage() {
 
   return (
     <div>
-      <button onClick={() => navigate(`/client/campaigns/${campaignId}`)} className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800 mb-4">
-        <ArrowLeft className="w-4 h-4" /> Back to Campaign
+      <button onClick={() => navigate('/client/work-orders')} className="flex items-center gap-1 text-sm text-slate-500 hover:text-slate-800 mb-4">
+        <ArrowLeft className="w-4 h-4" /> Back to Work Orders
       </button>
 
       <div className="flex flex-wrap items-start justify-between gap-4 mb-5">

@@ -10,7 +10,7 @@ import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { InstallationPhotoGrid } from '@/components/InstallationPhotoGrid';
 import { formatDim } from '@/lib/units';
 import { logAudit } from '@/lib/helpers';
-import { STATUS_LABELS, type PurchaseOrder, type Campaign, type ClientAgencyLink, type SurveyPhoto, type BoardMarking, type WorkItem } from '@/lib/types';
+import { STATUS_LABELS, type PurchaseOrder, type ClientAgencyLink, type SurveyPhoto, type BoardMarking, type WorkItem } from '@/lib/types';
 import {
   Store, Plus, Search, MapPin, Phone, Image as ImageIcon, ChevronRight, Pencil, Trash2,
   Loader2, UploadCloud, Ruler,
@@ -27,9 +27,9 @@ type PhotoRow = { id: string; photo_url: string; caption: string | null; photo_t
 
 const SHOP_RENDER_CAP = 200;
 
-// Shops — every site across every campaign/Work Order the client has,
+// Shops — every site across all Work Orders the client has,
 // searchable and manageable from one place, instead of only reachable
-// three levels deep (Campaign -> Work Order -> Shops tab). Same CRUD
+// two levels deep (Work Order -> Shops tab). Same CRUD
 // rules as the per-Work-Order Shops tab: adding a site is always
 // available on a client-created Work Order; editing/removing an existing
 // site is only offered while that specific site's own status is still
@@ -44,7 +44,6 @@ export default function ClientShopsPage() {
   const [zoneFilter, setZoneFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [workOrderFilter, setWorkOrderFilter] = useState('');
-  const [campaignFilter, setCampaignFilter] = useState('');
   const [cityFilter, setCityFilter] = useState('');
   const [districtFilter, setDistrictFilter] = useState('');
   const [stateFilter, setStateFilter] = useState('');
@@ -100,15 +99,6 @@ export default function ClientShopsPage() {
     enabled: !!orgId,
   });
 
-  const { data: campaigns } = useQuery({
-    queryKey: ['client-shops-campaigns', orgId],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('campaigns').select('id, name').eq('client_org_id', orgId);
-      if (error) throw error;
-      return data as Pick<Campaign, 'id' | 'name'>[];
-    },
-    enabled: !!orgId,
-  });
 
   const { data: links } = useQuery({
     queryKey: ['client-shops-links', orgId],
@@ -168,14 +158,13 @@ export default function ClientShopsPage() {
   });
 
   const poById = useMemo(() => new Map((pos || []).map((p) => [p.id, p])), [pos]);
-  const campaignById = useMemo(() => new Map((campaigns || []).map((c) => [c.id, c])), [campaigns]);
   const linkByAgency = useMemo(() => new Map((links || []).map((l) => [l.agency_org_id, l])), [links]);
 
   // Only client-created Work Orders can receive client-added shops (RLS).
   const addableWorkOrders = (pos || []).filter((p) => p.origin === 'client_created');
   const workOrderOptions = addableWorkOrders.map((p) => ({
     value: p.id,
-    label: `${p.name ? `${p.name} (${p.po_number})` : p.po_number}${p.campaign_id ? ` — ${campaignById.get(p.campaign_id)?.name || ''}` : ''}`,
+    label: `${p.name ? `${p.name} (${p.po_number})` : p.po_number}`,
   }));
 
   const surveyCountByShop = useMemo(() => {
@@ -194,7 +183,6 @@ export default function ClientShopsPage() {
   const cityOptions = useMemo(() => Array.from(new Set((shops || []).map((s) => s.city).filter((c): c is string => !!c))).sort(), [shops]);
   const districtOptions = useMemo(() => Array.from(new Set((shops || []).map((s) => s.district).filter((d): d is string => !!d))).sort(), [shops]);
   const stateOptions = useMemo(() => Array.from(new Set((shops || []).map((s) => s.state).filter((st): st is string => !!st))).sort(), [shops]);
-  const poCampaignById = useMemo(() => new Map((pos || []).map((p) => [p.id, p.campaign_id])), [pos]);
   const poNumberById = useMemo(() => new Map((pos || []).map((p) => [p.id, p.name || p.po_number])), [pos]);
 
   const filteredShops = useMemo(() => {
@@ -207,13 +195,12 @@ export default function ClientShopsPage() {
       if (zoneFilter && (s.zone || '') !== zoneFilter) return false;
       if (statusFilter && s.status !== statusFilter) return false;
       if (workOrderFilter && s.purchase_order_id !== workOrderFilter) return false;
-      if (campaignFilter && (!s.purchase_order_id || poCampaignById.get(s.purchase_order_id) !== campaignFilter)) return false;
       if (cityFilter && (s.city || '') !== cityFilter) return false;
       if (districtFilter && (s.district || '') !== districtFilter) return false;
       if (stateFilter && (s.state || '') !== stateFilter) return false;
       return true;
     });
-  }, [shops, search, zoneFilter, statusFilter, workOrderFilter, campaignFilter, cityFilter, districtFilter, stateFilter, poCampaignById]);
+  }, [shops, search, zoneFilter, statusFilter, workOrderFilter, cityFilter, districtFilter, stateFilter]);
 
   const sortedShops = useMemo(() => {
     const arr = [...filteredShops];
@@ -238,7 +225,7 @@ export default function ClientShopsPage() {
   }, [filteredShops, sortBy, poNumberById]);
 
   const shopsToRender = sortedShops.slice(0, SHOP_RENDER_CAP);
-  const activeFilterCount = [zoneFilter, statusFilter, workOrderFilter, campaignFilter, cityFilter, districtFilter, stateFilter].filter(Boolean).length;
+  const activeFilterCount = [zoneFilter, statusFilter, workOrderFilter, cityFilter, districtFilter, stateFilter].filter(Boolean).length;
   const SORT_OPTIONS = [
     { value: 'created_desc', label: 'Newest first' },
     { value: 'created_asc', label: 'Oldest first' },
@@ -495,7 +482,7 @@ export default function ClientShopsPage() {
     <div>
       <PageHeader
         title="Shops"
-        subtitle="Every site across every campaign and Work Order, in one place"
+        subtitle="Every site across your Work Orders, in one place"
         action={
           <div className="flex items-center gap-2">
             <button
@@ -546,7 +533,7 @@ export default function ClientShopsPage() {
       <FilterDrawer
         open={filterDrawerOpen}
         onClose={() => setFilterDrawerOpen(false)}
-        onClear={() => { setZoneFilter(''); setStatusFilter(''); setWorkOrderFilter(''); setCampaignFilter(''); setCityFilter(''); setDistrictFilter(''); setStateFilter(''); }}
+        onClear={() => { setZoneFilter(''); setStatusFilter(''); setWorkOrderFilter(''); setCityFilter(''); setDistrictFilter(''); setStateFilter(''); }}
         activeCount={activeFilterCount}
         resultCount={filteredShops.length}
         resultLabel="sites"
@@ -557,14 +544,6 @@ export default function ClientShopsPage() {
             {(pos || []).map((p) => <option key={p.id} value={p.id}>{p.name ? `${p.name} (${p.po_number})` : p.po_number}</option>)}
           </select>
         </FilterSection>
-        {(campaigns || []).length > 0 && (
-          <FilterSection label="Campaign">
-            <select value={campaignFilter} onChange={(e) => setCampaignFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-              <option value="">All Campaigns</option>
-              {(campaigns || []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </FilterSection>
-        )}
         <FilterSection label="Zone">
           <select value={zoneFilter} onChange={(e) => setZoneFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
             <option value="">All Zones</option>
@@ -648,7 +627,7 @@ export default function ClientShopsPage() {
             <EmptyState
               icon={<Store className="w-12 h-12" />}
               title={(shops || []).length > 0 ? 'No sites match these filters' : 'No sites yet'}
-              subtitle={(shops || []).length === 0 ? (addableWorkOrders.length > 0 ? 'Add sites one by one, or bulk upload via Excel' : 'Create a campaign and Work Order first') : undefined}
+              subtitle={(shops || []).length === 0 ? (addableWorkOrders.length > 0 ? 'Add sites one by one, or bulk upload via Excel' : 'Create a Work Order first') : undefined}
             />
           </Card>
         )}

@@ -403,11 +403,11 @@ export default function ClientAgenciesPage() {
         <div className="space-y-4">
           <div className="flex items-start gap-2.5 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2.5 text-sm text-blue-800">
             <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-            <p>Ask the agency for their invite code (they can find it on their own Platform Clients screen). They'll need to accept your request before you can create campaigns/POs with them.</p>
+            <p>Ask the agency for their invite code (they can find it on their own Platform Clients screen). They'll need to accept your request before you can create Work Orders with them.</p>
           </div>
           <div className="flex items-start gap-2.5 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2.5 text-xs text-emerald-800">
             <Shield className="w-4 h-4 mt-0.5 shrink-0" />
-            <p>Private by design: this only tells the agency that someone with this code wants to link. No pricing, other clients, or your other agency relationships are visible to them — or to you about them — until you both confirm, and even then only what your own campaigns actually need to share.</p>
+            <p>Private by design: this only tells the agency that someone with this code wants to link. No pricing, other clients, or your other agency relationships are visible to them — or to you about them — until you both confirm, and even then only what your own Work Orders actually need to share.</p>
           </div>
           <Input
             label="Agency Invite Code"
@@ -476,7 +476,7 @@ export default function ClientAgenciesPage() {
         onClose={() => setRemoveTarget(null)}
         onConfirm={() => removeTarget && removeMutation.mutate(removeTarget)}
         title="Remove this agency?"
-        message={`This removes ${removeTarget?.agency_org?.name || 'this agency'} from your list — you won't be able to create new campaigns with them until you add/link them again. Their own account and any work already done stays exactly as it is.`}
+        message={`This removes ${removeTarget?.agency_org?.name || 'this agency'} from your list — you won't be able to create new Work Orders with them until you add/link them again. Their own account and any work already done stays exactly as it is.`}
         confirmLabel={removeMutation.isPending ? 'Removing...' : 'Remove'}
         danger
       />

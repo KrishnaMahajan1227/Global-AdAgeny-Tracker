@@ -9,7 +9,7 @@ import PublicInfoPage from '@/pages/PublicInfoPage';
 import AdminLayout from '@/components/AdminLayout';
 import DashboardPage from '@/pages/DashboardPage';
 import OwnerConsolePage from '@/pages/OwnerConsolePage';
-import { ClientsPage, CampaignsPage, ShopsPage, ShopDetailPage } from '@/pages/ShopsPages';
+import { ClientsPage, ShopsPage, ShopDetailPage } from '@/pages/ShopsPages';
 import PurchaseOrdersPage from '@/pages/PurchaseOrdersPage';
 import SurveyReviewPage from '@/pages/SurveyReviewPage';
 import DesignerPage from '@/pages/DesignerPage';
@@ -23,8 +23,7 @@ import SurveyorPage from '@/pages/SurveyorPage';
 import InstallerPage from '@/pages/InstallerPage';
 import ClientPortalPage from '@/pages/ClientPortalPage';
 import ClientOverviewPage from '@/pages/client/ClientOverviewPage';
-import ClientCampaignsPage from '@/pages/client/ClientCampaignsPage';
-import ClientCampaignDetailPage from '@/pages/client/ClientCampaignDetailPage';
+import ClientWorkOrdersPage from '@/pages/client/ClientWorkOrdersPage';
 import ClientPODetailPage from '@/pages/client/ClientPODetailPage';
 import ClientShopsPage from '@/pages/client/ClientShopsPage';
 import ClientAgenciesPage from '@/pages/client/ClientAgenciesPage';
@@ -92,10 +91,14 @@ function homeRouteForRole(role: Role) {
 }
 
 // Preserve existing bookmarked detail URLs while showing details in their original list screens.
-function DetailRedirect({ section, kind }: { section: 'clients' | 'campaigns'; kind?: 'project' | 'campaign' }) {
+function DetailRedirect() {
   const { id } = useParams();
-  const detail = section === 'clients' ? id : `${kind}:${id}`;
-  return <Navigate to={`/${section}?detail=${encodeURIComponent(detail || '')}`} replace />;
+  return <Navigate to={`/clients?detail=${encodeURIComponent(id || '')}`} replace />;
+}
+
+function LegacyClientPoRedirect() {
+  const { poId } = useParams();
+  return <Navigate to={poId ? `/client/work-orders/${encodeURIComponent(poId)}` : '/client/work-orders'} replace />;
 }
 
 function RoleRedirect() {
@@ -152,7 +155,7 @@ function AppRoutes() {
         </ProtectedRoute>
       } />
 
-      {/* Client Organization portal — Overview / Campaigns / PO Detail
+      {/* Client Organization portal — Overview / Work Orders / PO Detail
           (with its own nested Shops+Photos / Report / Map) / Agencies /
           Reports. No Billing route — a client org user never sees
           pricing/payment data anywhere in this app. Map Feed is no longer
@@ -164,9 +167,12 @@ function AppRoutes() {
         </ProtectedRoute>
       }>
         <Route index element={<ClientOverviewPage />} />
-        <Route path="campaigns" element={<ClientCampaignsPage />} />
-        <Route path="campaigns/:campaignId" element={<ClientCampaignDetailPage />} />
-        <Route path="campaigns/:campaignId/po/:poId" element={<ClientPODetailPage />} />
+        <Route path="work-orders" element={<ClientWorkOrdersPage />} />
+        <Route path="work-orders/:poId" element={<ClientPODetailPage />} />
+        {/* Bookmarks from the retired module retain access to their Work Orders. */}
+        <Route path="campaigns" element={<Navigate to="/client/work-orders" replace />} />
+        <Route path="campaigns/:campaignId" element={<Navigate to="/client/work-orders" replace />} />
+        <Route path="campaigns/:campaignId/po/:poId" element={<LegacyClientPoRedirect />} />
         <Route path="shops" element={<ClientShopsPage />} />
         <Route path="agencies" element={<ClientAgenciesPage />} />
         <Route path="reports" element={<ClientReportsPage />} />
@@ -184,11 +190,11 @@ function AppRoutes() {
         } />
         <Route path="/account" element={<AccountSettingsPage />} />
         <Route path="/clients" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'demo']}><ClientsPage /></ProtectedRoute>} />
-        <Route path="/clients/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="clients" /></ProtectedRoute>} />
-        <Route path="/campaigns/project/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" kind="project" /></ProtectedRoute>} />
-        <Route path="/campaigns/client/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect section="campaigns" kind="campaign" /></ProtectedRoute>} />
-        <Route path="/campaigns" element={<ProtectedRoute allowedRoles={['agency_owner', 'admin', 'client_manager', 'demo']}><CampaignsPage /></ProtectedRoute>} />
-        <Route path="/projects" element={<Navigate to="/campaigns" replace />} />
+        <Route path="/clients/:id" element={<ProtectedRoute allowedRoles={['agency_owner','admin','client_manager','demo']}><DetailRedirect /></ProtectedRoute>} />
+        <Route path="/campaigns/project/:id" element={<Navigate to="/purchase-orders" replace />} />
+        <Route path="/campaigns/client/:id" element={<Navigate to="/purchase-orders" replace />} />
+        <Route path="/campaigns" element={<Navigate to="/purchase-orders" replace />} />
+        <Route path="/projects" element={<Navigate to="/purchase-orders" replace />} />
         <Route path="/purchase-orders" element={
           <ProtectedRoute allowedRoles={FINANCIAL_ROLES}><PurchaseOrdersPage /></ProtectedRoute>
         } />

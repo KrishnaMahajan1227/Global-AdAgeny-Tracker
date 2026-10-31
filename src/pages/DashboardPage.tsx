@@ -2,20 +2,20 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  AlertCircle, ArrowRight, CheckCircle2, ChevronDown,
-  ClipboardList, Factory, IndianRupee, MapPin, Palette,
-  RefreshCw, Search, ShieldCheck, Store, Truck, EyeOff,
+  ArrowRight, CheckCircle2, ChevronDown,
+  Building2, ClipboardList, IndianRupee, MapPin,
+  RefreshCw, Search, EyeOff,
   ArrowUpRight,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { supabase } from '@/lib/supabase';
 import { ProgressBar } from '@/components/ui';
 import type { Order } from '@/lib/agencyProgress';
-import { deliveryByOrder, deliveryForOrder, deliveryForOrders, deliveryPipeline, type DeliveryShop } from '@/lib/agencyDelivery';
+import { deliveryByOrder, deliveryForOrder, deliveryForOrders, type DeliveryShop } from '@/lib/agencyDelivery';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { useAgencyFinancials, financeForOrder, financeForOrders } from '@/lib/agencyFinance';
 import { formatRupees, fulfillmentTypeLabel } from '@/lib/poUtilization';
-import { describeOrderNextStep, ownerStageLabels, type OwnerStageFilter } from '@/lib/ownerOperations';
+import { describeOrderNextStep, ownerStageLabels } from '@/lib/ownerOperations';
 import { orderNextActionPath } from '@/lib/operationalNavigation';
 import type { Client } from '@/lib/types';
 
@@ -28,12 +28,12 @@ const fmt = (value: number) => value.toLocaleString('en-IN');
 const excluded = (order: Order) => order.status === 'cancelled' || order.assignment_status === 'rejected';
 const poUrl = (id: string) => `/purchase-orders?order=${encodeURIComponent(id)}`;
 const shopUrl = (id: string, stage?: string) => `/shops?po=${encodeURIComponent(id)}${stage ? `&stage=${encodeURIComponent(stage)}` : ''}`;
-const stageUrl = (stage: OwnerStageFilter) => `/purchase-orders?stage=${encodeURIComponent(stage)}`;
+// Only the stage keys are needed for per-order drilldowns. Avoid importing and
+// shipping a second set of decorative stage icons for a removed pipeline panel.
 const pipelineStages = [
-  { key: 'pending', icon: MapPin }, { key: 'survey', icon: ClipboardList },
-  { key: 'design', icon: Palette }, { key: 'production', icon: Factory },
-  { key: 'dispatch', icon: Truck }, { key: 'installation', icon: Store },
-  { key: 'review', icon: ShieldCheck }, { key: 'complete', icon: CheckCircle2 },
+  { key: 'pending' }, { key: 'survey' }, { key: 'design' },
+  { key: 'production' }, { key: 'dispatch' }, { key: 'installation' },
+  { key: 'review' }, { key: 'complete' },
 ] as const;
 export default function DashboardPage() {
   const { profile } = useAuth();
@@ -84,9 +84,6 @@ export default function DashboardPage() {
     const clientNames = new Map(data.clients.map(client => [client.id, client.name]));
     const byOrder = deliveryByOrder(orders, data.shops);
     const portfolio = deliveryForOrders(orders, byOrder);
-    const orderIds = new Set(orders.map(order => order.id));
-    const linkedShops = data.shops.filter(shop => shop.purchase_order_id && orderIds.has(shop.purchase_order_id));
-    const stages = deliveryPipeline(linkedShops, orders);
     const details = orders.map(order => {
       const delivery = deliveryForOrder(order, byOrder);
       const awaitingAcceptance = order.assignment_status === 'pending_acceptance';
@@ -101,16 +98,23 @@ export default function DashboardPage() {
     const ordered = [...details].sort((a,b) => Number(a.delivery.delivered) - Number(b.delivery.delivered)
       || a.priority - b.priority || (b.ageDays || 0) - (a.ageDays || 0));
     const open = ordered.filter(item => !item.delivery.delivered);
-    const needsOwner = open.filter(item => item.needsAttention);
-    const unlinked = open.filter(item => !item.delivery.total);
+    // Index once instead of scanning every Work Order for every client.
+    // Important for agencies with hundreds of clients and thousands of shops.
+    const ordersByClient = new Map<string, Order[]>();
+    for (const order of orders) {
+      const own = ordersByClient.get(order.client_id) || [];
+      own.push(order);
+      ordersByClient.set(order.client_id, own);
+    }
+    const actionsByClient = new Map<string, number>();
+    for (const item of ordered) {
+      if (item.needsAttention) actionsByClient.set(item.order.client_id, (actionsByClient.get(item.order.client_id) || 0) + 1);
+    }
     const clientRows = clients.map(client => {
-      const own = orders.filter(order => order.client_id === client.id);
-      const progress = deliveryForOrders(own, byOrder);
-      const work = ordered.filter(item => item.order.client_id === client.id);
-      return { ...client, ...progress, work, attention: work.filter(item => item.needsAttention).length };
+      const progress = deliveryForOrders(ordersByClient.get(client.id) || [], byOrder);
+      return { ...client, ...progress, attention: actionsByClient.get(client.id) || 0 };
     }).sort((a,b) => b.attention - a.attention || b.open - a.open || a.name.localeCompare(b.name));
-    return { clients, orders, details, ordered, open, needsOwner, clientRows, portfolio, stages, unlinked,
-      aged: open.filter(item => item.ageDays != null && item.ageDays >= 30).length,
+    return { clients, orders, details, ordered, open, clientRows, portfolio,
       unfinishedSites: Math.max(0, portfolio.sites - portfolio.deliveredSites) };
   }, [data]);
 
@@ -121,23 +125,16 @@ export default function DashboardPage() {
   const relevantOrders = snapshot.ordered.filter(item => (orderView === 'all' || (orderView === 'attention' ? item.needsAttention : item.delivery.delivered))
     && (!normalizedOrderSearch || [item.clientName, item.order.name, item.order.po_number, fulfillmentTypeLabel(item.order.fulfillment_type || 'survey_install')]
       .some(value => String(value || '').toLowerCase().includes(normalizedOrderSearch))));
-  const workShown = showAllOrders ? relevantOrders : relevantOrders.slice(0, 10);
+  const workShown = showAllOrders ? relevantOrders : relevantOrders.slice(0, 6);
   const clientsFiltered = snapshot.clientRows.filter(client => client.name.toLowerCase().includes(clientSearch.trim().toLowerCase()));
   const clientsShown = showAllClients ? clientsFiltered : clientsFiltered.slice(0, 4);
-  const needsOwner = snapshot.needsOwner.slice(0, 4);
-  const stageItems = pipelineStages.filter(stage => snapshot.stages[stage.key] > 0);
-  const actionLinks = [
-    { label: 'Survey reviews', to: '/survey-review', icon: ClipboardList },
-    { label: 'Design queue', to: '/design', icon: Palette },
-    { label: 'Production', to: '/production', icon: Factory },
-    { label: 'Install reviews', to: '/installation-review', icon: ShieldCheck },
-    { label: 'Field map', to: '/field-map', icon: MapPin },
-  ];
+  // One KPI per distinct question. Detailed next steps remain in Work Orders;
+  // the client section below is aggregate-only, never a duplicate order list.
   const kpis = [
-    { label: 'Open work orders', value: fmt(snapshot.open.length), subtitle: `${fmt(snapshot.clients.length)} active clients`, icon: ClipboardList, href: '/purchase-orders', tone: 'text-slate-900' },
-    { label: 'Needs attention', value: fmt(snapshot.needsOwner.length), subtitle: snapshot.aged ? `${fmt(snapshot.aged)} open over 30 days` : 'Owner follow-up queue', icon: AlertCircle, href: '#owner-attention', tone: snapshot.needsOwner.length ? 'text-amber-700' : 'text-slate-900' },
-    { label: 'Sites delivered', value: `${fmt(snapshot.portfolio.deliveredSites)} / ${fmt(snapshot.portfolio.sites)}`, subtitle: 'At final required stage', icon: CheckCircle2, href: '/shops?stage=complete', tone: 'text-emerald-700' },
-    { label: 'Site completion', value: snapshot.portfolio.sites ? `${snapshot.portfolio.percentage}%` : '—', subtitle: snapshot.portfolio.sites ? `${fmt(snapshot.unfinishedSites)} active sites remaining` : 'Site scope not linked', icon: Store, href: '/shops', tone: 'text-blue-700' },
+    { label: 'Open Work Orders', value: fmt(snapshot.open.length), subtitle: 'Orders still in progress', icon: ClipboardList, href: '/purchase-orders', tone: 'text-slate-900' },
+    { label: 'Active clients', value: fmt(snapshot.clients.length), subtitle: 'Clients with an active account', icon: Building2, href: '/clients', tone: 'text-slate-900' },
+    { label: 'Sites delivered', value: `${fmt(snapshot.portfolio.deliveredSites)} / ${fmt(snapshot.portfolio.sites)}`, subtitle: snapshot.portfolio.sites ? `${snapshot.portfolio.percentage}% at the final required stage` : 'No linked sites yet', icon: CheckCircle2, href: '/shops?stage=complete', tone: 'text-emerald-700' },
+    { label: 'Linked sites pending', value: snapshot.portfolio.sites ? fmt(snapshot.unfinishedSites) : '—', subtitle: snapshot.portfolio.sites ? 'Not yet at the final stage' : 'Site scope not linked', icon: MapPin, href: '/shops', tone: 'text-blue-700' },
   ];
 
   return <main className="mx-auto max-w-[1660px] space-y-3 pb-6 text-slate-800">
@@ -157,24 +154,12 @@ export default function DashboardPage() {
       <section aria-label="Key delivery indicators" className="grid grid-cols-2 gap-2 lg:grid-cols-4">
         {kpis.map(kpi => {
           const Icon = kpi.icon;
-          return <Link key={kpi.label} to={kpi.href} onClick={kpi.href.startsWith('#') ? (event) => {event.preventDefault();document.getElementById('owner-attention')?.scrollIntoView({behavior:'smooth',block:'start'});} : undefined} className="group flex min-w-0 items-start gap-3 rounded-xl border border-slate-200 bg-white px-3.5 py-3.5 transition-colors hover:border-blue-300 hover:bg-blue-50/40 focus-visible:outline-2 focus-visible:outline-blue-600">
+          return <Link key={kpi.label} to={kpi.href} className="group flex min-w-0 items-start gap-3 rounded-xl border border-slate-200 bg-white px-3.5 py-3.5 transition-colors hover:border-blue-300 hover:bg-blue-50/40 focus-visible:outline-2 focus-visible:outline-blue-600">
             <span className="shrink-0 rounded-lg bg-slate-100 p-2 text-slate-500 group-hover:bg-blue-100 group-hover:text-blue-700"><Icon size={16}/></span>
             <span className="min-w-0 flex-1"><span className="block text-xs font-medium text-slate-500">{kpi.label}</span><strong className={`mt-0.5 block text-xl font-semibold tabular-nums tracking-tight sm:text-2xl ${kpi.tone}`}>{kpi.value}</strong><span className="mt-0.5 block text-[11px] text-slate-500">{kpi.subtitle}</span></span>
             <ArrowUpRight className="shrink-0 text-slate-300 group-hover:text-blue-600" size={13}/>
           </Link>;
         })}
-      </section>
-
-      <section id="owner-attention" aria-label="Action required" className="scroll-mt-20 overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-2.5">
-          <div className="flex min-w-0 items-center gap-2"><h2 className="text-sm font-semibold text-slate-900">Attention required</h2><span className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${snapshot.needsOwner.length ? 'bg-amber-50 text-amber-800' : 'bg-emerald-50 text-emerald-800'}`}>{snapshot.needsOwner.length}</span></div>
-          <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">{snapshot.unlinked.length > 0 && <span>{snapshot.unlinked.length} unlinked order(s)</span>}{snapshot.aged > 0 && <span>{snapshot.aged} open 30+ days — not an overdue label</span>}{snapshot.needsOwner.length > needsOwner.length && <button type="button" onClick={() => {setOrderView('attention'); setShowAllOrders(true); document.getElementById('owner-work-orders')?.scrollIntoView({behavior:'smooth',block:'start'});}} className="font-semibold text-blue-700 hover:underline">View all →</button>}</div>
-        </div>
-        {needsOwner.length ? <div className="divide-y divide-slate-100">{needsOwner.map(item => <div key={item.order.id} className="grid gap-2 px-4 py-2.5 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto] sm:items-center">
-          <div className="min-w-0"><p className="truncate text-[11px] text-slate-500">{item.clientName} · {item.order.po_number}</p><Link to={poUrl(item.order.id)} className="block truncate text-sm font-semibold text-slate-900 hover:text-blue-700">{item.order.name || item.order.po_number}</Link></div>
-          <div className="min-w-0"><p className="truncate text-xs font-medium text-amber-800">{!item.delivery.total && item.order.assignment_status !== 'pending_acceptance' ? 'Verify linked site scope' : item.next.label}</p><p className="text-[11px] text-slate-500">{item.delivery.total ? `${fmt(item.delivery.completed)} of ${fmt(item.delivery.total)} delivered` : 'Site scope unlinked'}</p></div>
-          <Link to={orderNextActionPath(item.order, item.next, item.delivery.total > 0)} className="inline-flex min-h-9 items-center justify-center gap-1 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700">Take action <ArrowRight size={13}/></Link>
-        </div>)}</div> : <p className="flex items-center gap-2 px-4 py-4 text-xs text-slate-600"><CheckCircle2 size={16} className="text-emerald-600"/> No immediate owner-action exceptions in recorded shop stages.</p>}
       </section>
 
       <section id="owner-work-orders" aria-label="Client and work orders" className="scroll-mt-20 overflow-hidden rounded-xl border border-slate-200 bg-white">
@@ -194,24 +179,15 @@ export default function DashboardPage() {
             <div className="flex flex-wrap gap-1.5 lg:justify-end"><Link to={poUrl(item.order.id)} className="inline-flex min-h-9 items-center rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:bg-slate-100">Details</Link>{!item.delivery.delivered&&<Link to={directAction} className="inline-flex min-h-9 items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-3 text-xs font-semibold text-blue-700 hover:bg-blue-100">Next <ArrowRight size={13}/></Link>}</div>
           </article>;
         })}{!relevantOrders.length&&<div className="px-4 py-6 text-center text-sm text-slate-500">No Work Orders match. <button type="button" onClick={()=>{setOrderSearch('');setOrderView('all');}} className="font-semibold text-blue-700 underline">Clear filters</button></div>}</div>
-        {relevantOrders.length>10&&<button type="button" onClick={()=>setShowAllOrders(v=>!v)} className="w-full border-t px-4 py-2.5 text-xs font-semibold text-blue-700 hover:bg-slate-50">{showAllOrders?'Show fewer':`Show all ${fmt(relevantOrders.length)} orders`} <ChevronDown size={13} className={`ml-1 inline ${showAllOrders?'rotate-180':''}`}/></button>}
-      </section>
-
-      <section aria-label="Operational quick actions" className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5">
-        <span className="mr-1 text-xs font-semibold text-slate-700">Quick access</span>{actionLinks.map(action=>{const Icon=action.icon;return <Link key={action.to} to={action.to} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs font-medium text-slate-700 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"><Icon size={14}/>{action.label}</Link>;})}
-      </section>
-
-      <section aria-label="Current site stages" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-        <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-2.5"><div className="flex flex-wrap items-baseline gap-2"><h2 className="text-sm font-semibold text-slate-900">Site pipeline</h2><span className="text-xs text-slate-500">Sites in their current stage · each counted once</span></div><Link to="/shops" className="shrink-0 text-xs font-semibold text-blue-700">All sites →</Link></div>
-        <div className="flex flex-wrap gap-px bg-slate-200">{stageItems.map(stage=>{const Icon=stage.icon;return <Link key={stage.key} to={stageUrl(stage.key)} className="group flex min-w-[135px] flex-1 items-center gap-2 bg-white px-3 py-3 hover:bg-blue-50"><Icon size={15} className="shrink-0 text-slate-400 group-hover:text-blue-600"/><div className="min-w-0"><strong className="block text-lg font-semibold tabular-nums leading-5 text-slate-900">{fmt(snapshot.stages[stage.key])}</strong><span className="block truncate text-[11px] text-slate-500">{ownerStageLabels[stage.key]}</span></div></Link>;})}{!stageItems.length&&<p className="w-full bg-white p-4 text-sm text-slate-500">No linked active site stages available. <Link to="/shops" className="text-blue-700 underline">Review shops</Link></p>}</div>
+        {relevantOrders.length>6&&<button type="button" onClick={()=>setShowAllOrders(v=>!v)} className="w-full border-t px-4 py-2.5 text-xs font-semibold text-blue-700 hover:bg-slate-50">{showAllOrders?'Show fewer':`Show all ${fmt(relevantOrders.length)} orders`} <ChevronDown size={13} className={`ml-1 inline ${showAllOrders?'rotate-180':''}`}/></button>}
       </section>
 
       <section aria-label="Client delivery summary" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-4 py-2.5"><h2 className="text-sm font-semibold text-slate-900">Client delivery</h2><div className="relative w-full sm:w-52"><Search className="pointer-events-none absolute left-2.5 top-2.5 text-slate-400" size={14}/><label htmlFor="owner-client-search" className="sr-only">Search clients</label><input id="owner-client-search" value={clientSearch} onChange={event=>{setClientSearch(event.target.value);setShowAllClients(false);}} placeholder="Find client" className="min-h-9 w-full rounded-lg border border-slate-200 py-1.5 pl-8 pr-2 text-xs focus-visible:outline-2 focus-visible:outline-blue-600"/></div></div>
-        <div className="divide-y divide-slate-100">{clientsShown.map(client=><article key={client.id} className="grid gap-2 px-4 py-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.4fr)_auto] md:items-center md:gap-4">
+        <div className="divide-y divide-slate-100">{clientsShown.map(client=><article key={client.id} className="grid gap-2 px-4 py-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.4fr)_auto] md:items-center md:gap-4">
           <div className="min-w-0"><Link to={`/purchase-orders?client=${encodeURIComponent(client.id)}`} className="block truncate text-sm font-semibold text-slate-900 hover:text-blue-700">{client.name}</Link><p className="text-[11px] text-slate-500">{client.open} open · {client.done} completed orders{client.attention?` · ${client.attention} need action`:''}</p></div>
           <div className="min-w-0"><div className="mb-1 flex justify-between gap-2 text-xs"><span className="text-slate-500">Delivered sites</span><span className="font-semibold tabular-nums text-slate-700">{fmt(client.deliveredSites)} / {fmt(client.sites)} · {client.sites?`${client.percentage}%`:'—'}</span></div><ProgressBar pct={client.percentage}/></div>
-          <div className="min-w-0 space-y-1">{client.work.slice(0,2).map(item=><Link key={item.order.id} to={poUrl(item.order.id)} className="flex min-w-0 items-center justify-between gap-1 text-[11px] text-slate-600 hover:text-blue-700"><span className="truncate">{item.order.name||item.order.po_number} · {item.delivery.delivered?'Delivered':item.next.label}</span><ArrowRight size={12} className="shrink-0"/></Link>)}</div>
+
           <Link to={`/purchase-orders?client=${encodeURIComponent(client.id)}`} className="inline-flex min-h-9 shrink-0 items-center text-xs font-semibold text-blue-700 hover:underline">Open client orders <ArrowRight className="ml-1" size={13}/></Link>
         </article>)}{!clientsFiltered.length&&<p className="px-4 py-5 text-sm text-slate-500">{clientSearch?'No matching clients.':'No active clients yet.'}</p>}</div>
         {clientsFiltered.length>4&&<button type="button" onClick={()=>setShowAllClients(v=>!v)} className="w-full border-t px-4 py-2.5 text-xs font-semibold text-blue-700 hover:bg-slate-50">{showAllClients?'Show fewer clients':`Show all ${clientsFiltered.length} clients`}</button>}

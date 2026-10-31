@@ -4,29 +4,19 @@ import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { ROLE_LABELS } from '@/lib/types';
+import { APP_RELEASE, APP_WORKFLOW } from '@/lib/release';
 import { NotificationBell } from '@/components/NotificationBell';
 import {
   LayoutDashboard, ClipboardList, Building2, Store,
   FileBarChart, LogOut, Menu, X, Megaphone, User,
 } from 'lucide-react';
 
-// The Client Organization portal shell. Mirrors AdminLayout.tsx's sidebar +
-// top-bar pattern so the two apps feel like one product. IA is
-// deliberately a drill-down: Overview -> Campaigns -> (open one) -> its
-// Work Orders -> (open one) -> everything about that Work Order
-// (progress, shops+photos, report, map) lives nested inside its own
-// detail page. Shops also gets its own top-level entry — a client-wide
-// view across every campaign/Work Order, since at real scale a client
-// needs to find "that one site" without first remembering which campaign
-// or Work Order it lives under. Agencies and Reports stay top-level too,
-// for the same reason: genuinely cross-campaign views.
-//
-// No Billing / pricing anywhere in this portal, on purpose — a Client
-// Organization user never sees agency rate, Work Order amounts, or
-// invoice/payment data.
+// Client portal navigation: Overview -> Work Orders -> Work Order details,
+// with global Shops, Agencies and Reports available in one click.
+// Agency financial data is never queried or displayed in this portal.
 const NAV_ITEMS = [
   { to: '/client', label: 'Overview', icon: LayoutDashboard, end: true, accent: 'text-blue-400' },
-  { to: '/client/campaigns', label: 'Campaigns', icon: ClipboardList, end: false, accent: 'text-violet-400' },
+  { to: '/client/work-orders', label: 'Work Orders', icon: ClipboardList, end: false, accent: 'text-violet-400' },
   { to: '/client/shops', label: 'Shops', icon: Store, end: false, accent: 'text-purple-400' },
   { to: '/client/agencies', label: 'Agencies', icon: Building2, end: false, accent: 'text-amber-400' },
   { to: '/client/reports', label: 'Reports', icon: FileBarChart, end: false, accent: 'text-teal-400' },
@@ -76,7 +66,7 @@ export default function ClientPortalPage() {
             </div>
             <div className="leading-tight">
               <h1 className="font-semibold text-[15px]">Client Portal</h1>
-              <p className="text-[11px] text-slate-500">Campaign Tracking</p>
+              <p className="text-[11px] text-slate-500">Work Order Tracking</p>
             </div>
           </div>
           <button onClick={() => setSidebarOpen(false)} className="lg:hidden text-slate-400 hover:text-white">
@@ -125,6 +115,9 @@ export default function ClientPortalPage() {
               <LogOut className="w-4 h-4" />
             </button>
           </div>
+          <p className="px-2 text-[10px] text-slate-500" title={`Release ${APP_RELEASE} — ${APP_WORKFLOW}`} data-testid="release-marker">
+            Work Orders · v{APP_RELEASE}
+          </p>
         </div>
       </aside>
 

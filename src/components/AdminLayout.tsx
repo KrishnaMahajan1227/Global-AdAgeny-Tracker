@@ -7,6 +7,7 @@ import { ROLE_LABELS } from '@/lib/types';
 import { NotificationBell } from '@/components/NotificationBell';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { APP_RELEASE, APP_WORKFLOW } from '@/lib/release';
 import { LayoutDashboard, Building2, FileCheck, Palette,
   Printer, Wrench, FileText, IndianRupee, Settings, LogOut, Menu, X, PanelLeftClose, PanelLeftOpen,
   Map as MapIcon, ClipboardCheck, ClipboardList, Route as RouteIcon, User, ChevronRight,
@@ -94,7 +95,6 @@ export default function AdminLayout() {
   const navItems = [
     { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, show: isAdmin || isAccounts || isClientManager },
     { to: '/clients', label: 'Clients', icon: Building2, show: isAdmin || isClientManager },
-    { to: '/campaigns', label: 'Campaigns', icon: ClipboardList, show: isAdmin || isClientManager },
     { to: '/purchase-orders', label: 'Work Orders', icon: ClipboardList, show: isAdmin || isAccounts || isClientManager, badge: pendingCounts?.clientRequests },
     { to: '/survey-review', label: 'Survey Review', icon: FileCheck, show: isAdmin, badge: pendingCounts?.survey },
     { to: '/design', label: 'Design Queue', icon: Palette, show: isOwner || profile?.role === 'admin' || isDesigner, badge: (isOwner || profile?.role === 'admin' || isDesigner) ? pendingCounts?.design : undefined },
@@ -112,7 +112,7 @@ export default function AdminLayout() {
     if (!profile?.id || !profile.organization_id) return;
     const key = `adroute-admin-recent:${profile.organization_id}:${profile.id}`;
     const labels: Record<string, string> = {
-      '/dashboard': 'Dashboard', '/clients': 'Clients', '/campaigns': 'Campaigns', '/purchase-orders': 'Work Orders',
+      '/dashboard': 'Dashboard', '/clients': 'Clients', '/purchase-orders': 'Work Orders',
       '/supply-orders': 'Work Orders', '/survey-review': 'Survey Review', '/design': 'Design Queue',
       '/production': 'Production', '/installation-review': 'Installation Review',
       '/field-map': 'Field Map', '/route-planning': 'Route Planning', '/reports': 'Reports',
@@ -125,7 +125,7 @@ export default function AdminLayout() {
     try {
       const parsed = JSON.parse(sessionStorage.getItem(key) || '[]');
       if (Array.isArray(parsed)) previous = parsed.filter((p: any) =>
-        typeof p?.path === 'string' && p.path.startsWith('/') && typeof p.label === 'string');
+        typeof p?.path === 'string' && p.path.startsWith('/') && !/^\/(campaigns|projects)(\/|\?|$)/.test(p.path) && typeof p.label === 'string');
     } catch { /* Storage may be unavailable; navigation still works. */ }
     const next = [...previous.filter(p => p.path.split('?')[0] !== location.pathname),
       { path: currentPath, label }].slice(-3);
@@ -217,6 +217,9 @@ export default function AdminLayout() {
               <p className="text-sm font-medium truncate">{profile?.full_name}</p>
               <p className="text-xs text-slate-400">{ROLE_LABELS[profile?.role || ''] || profile?.role}</p>
             </div>
+          </div>
+          <div className={`mb-1 px-2 text-[10px] text-slate-500 ${sidebarCollapsed ? 'lg:hidden' : ''}`} title={`Release ${APP_RELEASE} — ${APP_WORKFLOW}`} data-testid="release-marker">
+            Work Orders · v{APP_RELEASE}
           </div>
           <button onClick={handleSignOut} title="Sign out" aria-label="Sign out" className="flex min-h-9 w-full items-center gap-2 rounded-lg px-2 text-sm text-slate-400 transition-colors hover:bg-slate-800 hover:text-white">
             <LogOut className="w-4 h-4" /> <span className={sidebarCollapsed ? 'lg:hidden' : ''}>Sign Out</span>

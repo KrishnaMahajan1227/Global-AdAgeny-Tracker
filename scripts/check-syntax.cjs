@@ -1,0 +1,4 @@
+const fs=require('fs');const path=require('path');const ts=require('/opt/nvm/versions/node/v22.16.0/lib/node_modules/typescript');
+let count=0,errors=0;
+function scan(dir){for(const d of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,d.name);if(d.isDirectory())scan(full);else if(/\.tsx?$/.test(d.name)){count++;const f=ts.createSourceFile(full,fs.readFileSync(full,'utf8'),ts.ScriptTarget.Latest,true,full.endsWith('tsx')?ts.ScriptKind.TSX:ts.ScriptKind.TS);for(const e of f.parseDiagnostics){const p=f.getLineAndCharacterOfPosition(e.start);console.log(`${full}:${p.line+1}:${p.character+1}: ${ts.flattenDiagnosticMessageText(e.messageText,' ')}`);errors++;}}}}
+scan(path.join(__dirname,'../src'));console.log('Parsed',count,'files, syntax errors:',errors);process.exitCode=errors?1:0;

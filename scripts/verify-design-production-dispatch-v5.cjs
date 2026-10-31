@@ -44,7 +44,7 @@ const supply = fs.readFileSync(path.join(root, 'src/pages/SupplyOrdersPage.tsx')
   pass('Folder pagination uses stable bounded windows',pages.length===4 && pages[1][0]===500 && pages[3][0]===1500);
   await assert.rejects(()=>fetchWorkflowFolderPages(async()=>[], 1001), /Invalid folder page size/);
   pass('Invalid page sizes are rejected',true);
-  pass('Folder hierarchy retained on Design and Production',designer.includes('campaignFolders') && designer.includes('zoneFolders') && production.includes('campaignFolders') && production.includes('zoneFolders'));
+  pass('Direct Client → Work Order → Zone folder hierarchy retained',designer.includes('clientFolders') && designer.includes('poFolders') && designer.includes('zoneFolders') && production.includes('clientFolders') && production.includes('poFolders') && production.includes('zoneFolders') && !production.includes("level === 'campaign'"));
   pass('Design and Production folder sources page beyond PostgREST 1000-row default',[designer,production].every(src=>src.includes('fetchWorkflowFolderPages(async (from, to)')));
   pass('Design and Production can process up to 100 rows per page',[designer,production].every(src=>src.includes('100/page') && src.includes('Select visible')));
   pass('Every bulk handoff retains failures for retry',designer.includes('result.failed.map(f => f.item)') && production.includes('result.failed.map(f => f.item)'));

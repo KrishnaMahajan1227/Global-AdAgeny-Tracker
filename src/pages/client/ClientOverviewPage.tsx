@@ -5,7 +5,7 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 import { Card, EmptyState, ProgressBar } from '@/components/ui';
 import { DonutChart } from '@/components/DonutChart';
-import type { PurchaseOrder, Campaign, ClientPOLineItemProgress } from '@/lib/types';
+import type { PurchaseOrder, ClientPOLineItemProgress } from '@/lib/types';
 import {
   siteBucket, stagePct, finalStage, receiptCompletionPercent, clientPoWorkStatus, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS,
 } from '@/lib/clientPortal';
@@ -95,17 +95,6 @@ export default function ClientOverviewPage() {
     refetchInterval: 20000,
   });
 
-  const { data: campaigns } = useQuery({
-    queryKey: ['client-overview-campaigns', orgId],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('campaigns').select('id, status').eq('client_org_id', orgId);
-      if (error) throw error;
-      return data as Pick<Campaign, 'id' | 'status'>[];
-    },
-    enabled: !!orgId,
-    refetchInterval: 20000,
-  });
-
   const { data: progress } = useQuery({
     queryKey: ['client-overview-progress', orgId],
     queryFn: async () => {
@@ -189,7 +178,7 @@ export default function ClientOverviewPage() {
   ]);
 
   const activePos = (pos || []).filter((po) => po.status !== 'cancelled' && po.assignment_status !== 'rejected');
-  const activeCampaignsCount = (campaigns || []).filter((c) => c.status === 'active').length;
+  const activeWorkOrdersCount = activePos.filter(po => po.status === 'active').length;
 
   const poById = new Map((pos || []).map((po) => [po.id, po]));
   const siteCounts = { pending: 0, in_progress: 0, completed: 0 };
@@ -292,12 +281,12 @@ export default function ClientOverviewPage() {
     pendingAcceptancePos.length > 0 && {
       key: 'pending', icon: Clock, color: 'text-amber-600 bg-amber-50',
       label: `${pendingAcceptancePos.length} Work Order${pendingAcceptancePos.length === 1 ? '' : 's'} awaiting agency acceptance`,
-      to: '/client/campaigns',
+      to: '/client/work-orders',
     },
     rejectedPos.length > 0 && {
       key: 'rejected', icon: XCircle, color: 'text-red-600 bg-red-50',
       label: `${rejectedPos.length} Work Order${rejectedPos.length === 1 ? '' : 's'} declined by the agency`,
-      to: '/client/campaigns',
+      to: '/client/work-orders',
     },
   ].filter((x): x is { key: string; icon: LucideIcon; color: string; label: string; to: string } => !!x);
 
@@ -310,10 +299,10 @@ export default function ClientOverviewPage() {
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">{greeting()}{firstName ? `, ${firstName}` : ''}</h1>
-          <p className="text-sm text-slate-500 mt-1">{today} · Your campaigns across every linked agency, at a glance</p>
+          <p className="text-sm text-slate-500 mt-1">{today} · Your Work Orders across every linked agency, at a glance</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Link to="/client/campaigns" className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-blue-600">Campaigns & Work Orders <ArrowRight size={14}/></Link>
+          <Link to="/client/work-orders" className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-blue-600">Work Orders <ArrowRight size={14}/></Link>
           <span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs font-medium text-slate-600" title="Client overview queries refresh approximately every 20 seconds; data may be slightly delayed."><span className="h-1.5 w-1.5 rounded-full bg-emerald-600"/> Auto-refresh</span>
         </div>
       </div>
@@ -327,7 +316,7 @@ export default function ClientOverviewPage() {
               <p className="text-xs text-slate-400 mt-0.5">Where every site stands, across all your Work Orders</p>
             </div>
             {totalSites === 0 ? (
-              <EmptyState icon={<Store className="w-10 h-10" />} title="No sites yet" subtitle="Sites will appear here once an agency starts work on your campaigns" />
+              <EmptyState icon={<Store className="w-10 h-10" />} title="No sites yet" subtitle="Sites will appear here once an agency starts work on your Work Orders" />
             ) : (
               <>
                 <div className="flex flex-col sm:flex-row items-center gap-6 mb-5">
@@ -375,7 +364,7 @@ export default function ClientOverviewPage() {
           <Card className="p-4">
             <h2 className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">At a Glance</h2>
             <div className="grid grid-cols-2 gap-3">
-              <KpiTile icon={Megaphone} label="Active Campaigns" value={activeCampaignsCount} color="#7c3aed" iconClass="text-violet-600 bg-violet-50" />
+              <KpiTile icon={Megaphone} label="Active Work Orders" value={activeWorkOrdersCount} color="#7c3aed" iconClass="text-violet-600 bg-violet-50" />
               <KpiTile icon={Store} label="Total Sites" value={totalSites} color="#9333ea" iconClass="text-purple-600 bg-purple-50" />
               <KpiTile icon={Building2} label="Linked Agencies" value={(links || []).length} color="#d97706" iconClass="text-amber-600 bg-amber-50" />
               <KpiTile icon={Bell} label="Updates This Week" value={updatesThisWeek} color="#2563eb" iconClass="text-blue-600 bg-blue-50" />
@@ -385,7 +374,7 @@ export default function ClientOverviewPage() {
           <Card className="p-4">
             <h2 className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-3">Quick Access</h2>
             <div className="grid grid-cols-2 gap-2.5">
-              <QuickAccessTile to="/client/campaigns" icon={ClipboardList} label="Campaigns" color="text-violet-600 bg-violet-50" />
+              <QuickAccessTile to="/client/work-orders" icon={ClipboardList} label="Work Orders" color="text-violet-600 bg-violet-50" />
               <QuickAccessTile to="/client/shops" icon={Store} label="Shops" color="text-purple-600 bg-purple-50" />
               <QuickAccessTile to="/client/agencies" icon={Building2} label="Agencies" color="text-amber-600 bg-amber-50" />
               <QuickAccessTile to="/client/reports" icon={FileBarChart} label="Reports" color="text-blue-600 bg-blue-50" />
@@ -577,12 +566,12 @@ export default function ClientOverviewPage() {
           <Card className="p-5">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold text-slate-900">Recent Work Orders</h2>
-              <Link to="/client/campaigns" className="text-sm text-blue-600 hover:underline flex items-center gap-1">
+              <Link to="/client/work-orders" className="text-sm text-blue-600 hover:underline flex items-center gap-1">
                 View all <ArrowRight className="w-3.5 h-3.5" />
               </Link>
             </div>
             {!posLoading && recentPos.length === 0 && (
-              <EmptyState icon={<ShoppingCart className="w-10 h-10" />} title="No campaigns yet" subtitle="Create your first Work Order from the Campaigns page" />
+              <EmptyState icon={<ShoppingCart className="w-10 h-10" />} title="No Work Orders yet" subtitle="Create a Work Order from the Work Orders page" />
             )}
             <div className="divide-y divide-slate-50">
               {recentPos.map((po) => {
@@ -590,7 +579,7 @@ export default function ClientOverviewPage() {
                 return (
                   <Link
                     key={po.id}
-                    to={po.campaign_id ? `/client/campaigns/${po.campaign_id}/po/${po.id}` : '/client/campaigns'}
+                    to={`/client/work-orders/${po.id}`}
                     className="flex items-center gap-3 px-2 py-3 hover:bg-slate-50/80 rounded-lg transition -mx-2"
                   >
                     <div className="min-w-0 flex-1">
@@ -624,10 +613,10 @@ export default function ClientOverviewPage() {
               <h2 className="text-sm font-semibold text-slate-700">Summary</h2>
             </div>
             {totalSites === 0 ? (
-              <p className="text-sm text-slate-500">No campaign activity yet — this summary will build itself in as soon as your first sites are underway.</p>
+              <p className="text-sm text-slate-500">No Work Order activity yet — this summary will build itself in as soon as your first sites are underway.</p>
             ) : (
               <p className="text-sm text-slate-500 leading-relaxed">
-                You have <span className="font-semibold text-slate-800">{activeCampaignsCount} active campaign{activeCampaignsCount === 1 ? '' : 's'}</span> running
+                You have <span className="font-semibold text-slate-800">{activeWorkOrdersCount} active Work Order{activeWorkOrdersCount === 1 ? '' : 's'}</span> running
                 {' '}<span className="font-semibold text-slate-800">{activePos.length} Work Order{activePos.length === 1 ? '' : 's'}</span> across
                 {' '}<span className="font-semibold text-slate-800">{(links || []).length} linked agenc{(links || []).length === 1 ? 'y' : 'ies'}</span>.
                 {' '}Of <span className="font-semibold text-slate-800">{totalSites} total sites</span>,

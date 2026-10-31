@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import { fileURLToPath, URL } from 'node:url';
+import { APP_RELEASE } from './src/lib/release';
 
 const buildId = `${Date.now()}`;
 
@@ -12,7 +13,7 @@ function deploymentVersionPlugin(): Plugin {
       this.emitFile({
         type: 'asset',
         fileName: 'version.json',
-        source: JSON.stringify({ buildId, builtAt: new Date().toISOString() }),
+        source: JSON.stringify({ buildId, release: APP_RELEASE, builtAt: new Date().toISOString(), features: { directWorkOrders: true, campaignsModule: false } }),
       });
     },
   };

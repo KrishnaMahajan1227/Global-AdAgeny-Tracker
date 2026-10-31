@@ -34,7 +34,7 @@ const images = {
   proof: `${A}/06_AdRoute_Nova_Living_Installation_Verified.webp`,
   ops: `${A}/07_AdRoute_Agency_Live_Operations.webp`,
   client: `${A}/08_AdRoute_Client_Office_Exterior.webp`,
-  reporting: `${A}/09_AdRoute_Client_Campaign_Review.webp`,
+  reporting: `${A}/09_AdRoute_Client_Work Order_Review.webp`,
   final: `${A}/10_AdRoute_Connected_Operations_Final_CTA.webp`,
 };
 
@@ -96,7 +96,7 @@ const chapters: Chapter[] = [
   {
     id: 'ops', no: '06', eyebrow: 'LIVE OPERATIONS',
     title: 'Every site moves into one operational view.',
-    body: 'Operations teams review proof, verify completion and understand campaign progress without chasing field updates.',
+    body: 'Operations teams review proof, verify completion and understand work order progress without chasing field updates.',
     image: images.ops, position: 'center 51%', align: 'right',
     chips: ['Site status', 'Recent activity', 'Proof', 'Team'],
     audience: 'AGENCY OPERATIONS', outcome: 'Teams manage many sites from one live operational picture.',
@@ -104,7 +104,7 @@ const chapters: Chapter[] = [
   {
     id: 'client', no: '07', eyebrow: 'CLIENT VISIBILITY',
     title: 'Clients see progress without chasing for updates.',
-    body: 'Verified field activity, campaign status and completed-site proof stay available through a clear client-facing view.',
+    body: 'Verified field activity, work order status and completed-site proof stay available through a clear client-facing view.',
     image: images.client, position: 'center 48%', align: 'left',
     chips: ['Overview', 'Progress', 'Verified sites', 'Reports'],
     audience: 'CLIENT', outcome: 'Clients get visibility without repeatedly asking the agency for updates.',
@@ -112,24 +112,24 @@ const chapters: Chapter[] = [
   {
     id: 'reporting', no: '08', eyebrow: 'REPORTING',
     title: 'From field proof to client-ready reporting.',
-    body: 'Verified installation data becomes a reliable record for campaign reviews, reporting and the next commercial step.',
+    body: 'Verified installation data becomes a reliable record for work order reviews, reporting and the next commercial step.',
     image: images.reporting, position: 'center 50%', align: 'right',
-    chips: ['Verified proof', 'Campaign review', 'Billing readiness'],
+    chips: ['Verified proof', 'Work Order review', 'Billing readiness'],
     audience: 'AGENCY + CLIENT', outcome: 'Verified execution becomes review-ready and commercially actionable.',
   },
 ];
 
 const capabilityItems = [
   { icon: WifiOff, title: 'Offline-first field workflows', body: 'Keep survey and installation work moving where connectivity is unreliable.' },
-  { icon: Navigation, title: 'Route & site planning', body: 'Coordinate teams around real locations and campaign priorities.' },
+  { icon: Navigation, title: 'Route & site planning', body: 'Coordinate teams around real locations and work order priorities.' },
   { icon: PackageCheck, title: 'Material & PO tracking', body: 'Keep production scope, materials and quantities tied to the job.' },
   { icon: ShieldCheck, title: 'GPS + photo verification', body: 'Maintain a defensible record of completed field activity.' },
   { icon: UsersRound, title: 'Role-based operations', body: 'Give every team exactly the operating context they need.' },
-  { icon: FileCheck2, title: 'Reports & analytics', body: 'Turn verified execution into clear campaign and client reporting.' },
+  { icon: FileCheck2, title: 'Reports & analytics', body: 'Turn verified execution into clear work order and client reporting.' },
 ];
 
 const team = [
-  ['Owner / Operations', 'Campaign control, approvals and progress'],
+  ['Owner / Operations', 'Work Order control, approvals and progress'],
   ['Surveyor', 'Measurements, photos and site context'],
   ['Designer', 'Creative mapped to the real site'],
   ['Production', 'Fabrication, materials, QC and dispatch'],
@@ -145,20 +145,20 @@ const finalNodes = [
   },
   {
     id: 'agency', label: 'AGENCY OPERATIONS', x: 46, y: 34,
-    body: 'Turn site information into design, production, field coordination and verified campaign progress.',
+    body: 'Turn site information into design, production, field coordination and verified work order progress.',
     tags: ['Design', 'Production', 'Live Ops', 'Verification'],
   },
   {
     id: 'client', label: 'CLIENT VISIBILITY', x: 82, y: 24,
-    body: 'Give clients a clear view of campaign progress, completed sites, verified photos and reporting.',
+    body: 'Give clients a clear view of work order progress, completed sites, verified photos and reporting.',
     tags: ['Progress', 'Proof Gallery', 'Reports'],
   },
 ] as const;
 
 const proofStages = [
   { id: 'field', no: '01', label: 'FIELD EVIDENCE', title: 'Proof is created where the work happens.', body: 'Installation teams capture completion at the physical site, keeping the evidence attached to the right location and job.', image: images.proof, meta: ['Site identity', 'Photo proof', 'Location context'] },
-  { id: 'ops', no: '02', label: 'AGENCY VERIFICATION', title: 'Operations validates the completion record.', body: 'The agency reviews site-linked proof, confirms completion and keeps campaign status aligned with what actually happened on ground.', image: images.ops, meta: ['Verification', 'Live status', 'Operational review'] },
-  { id: 'client', no: '03', label: 'CLIENT VISIBILITY', title: 'Verified execution becomes client-ready clarity.', body: 'Clients see completed work and campaign progress through a cleaner review layer grounded in verified field activity.', image: images.reporting, meta: ['Campaign review', 'Verified progress', 'Reporting'] },
+  { id: 'ops', no: '02', label: 'AGENCY VERIFICATION', title: 'Operations validates the completion record.', body: 'The agency reviews site-linked proof, confirms completion and keeps work order status aligned with what actually happened on ground.', image: images.ops, meta: ['Verification', 'Live status', 'Operational review'] },
+  { id: 'client', no: '03', label: 'CLIENT VISIBILITY', title: 'Verified execution becomes client-ready clarity.', body: 'Clients see completed work and work order progress through a cleaner review layer grounded in verified field activity.', image: images.reporting, meta: ['Work Order review', 'Verified progress', 'Reporting'] },
 ] as const;
 
 function AdRouteMark({ compact = false }: { compact?: boolean }) {
@@ -219,7 +219,7 @@ function ProcessOverlay({ id }: { id: string }) {
   if (id === 'ops') {
     return (
       <div className="ops-panel" aria-hidden="true">
-        <div className="ops-panel__top"><span>CAMPAIGN LIVE</span><b>Site 024</b></div>
+        <div className="ops-panel__top"><span>WORK ORDER LIVE</span><b>Site 024</b></div>
         <div className="ops-panel__stats"><span><b>128</b> Surveyed</span><span><b>96</b> Installed</span><span><b>34</b> Production</span></div>
         <div className="ops-panel__proof"><img src={images.proof} alt="" /><span><Check size={12} /> NOVA LIVING · Verified</span></div>
       </div>
@@ -262,7 +262,7 @@ function LandingPage() {
       { '@type': 'FAQPage', mainEntity: [
         { '@type': 'Question', name: 'What is AdRoute?', acceptedAnswer: { '@type': 'Answer', text: 'AdRoute is an operations platform for outdoor advertising, signage and field-branding agencies. It connects site survey, design and production, installation, verified proof, live operations, client visibility, reporting and billing readiness.' } },
         { '@type': 'Question', name: 'Who uses AdRoute?', acceptedAnswer: { '@type': 'Answer', text: 'Agency owners, operations teams, surveyors, installers, designers, production teams and clients use role-specific parts of the same connected workflow.' } },
-        { '@type': 'Question', name: 'How does AdRoute help clients?', acceptedAnswer: { '@type': 'Answer', text: 'Clients can review campaign progress, completed sites, verified installation photos and reporting without relying on repeated manual update requests.' } }
+        { '@type': 'Question', name: 'How does AdRoute help clients?', acceptedAnswer: { '@type': 'Answer', text: 'Clients can review work order progress, completed sites, verified installation photos and reporting without relying on repeated manual update requests.' } }
       ] }
     ] });
   }, []);
@@ -566,7 +566,7 @@ function LandingPage() {
         <div className="section-shell">
           <div className="value-kicker">WHY ADROUTE</div>
           <div className="value-heading-row">
-            <h2 id="value-heading">One operational record.<br />Two sides of the same campaign.</h2>
+            <h2 id="value-heading">One operational record.<br />Two sides of the same work order.</h2>
             <p>AdRoute is not only a field app and not only a client portal. It is the shared operating layer between the agency doing the work and the client paying for the outcome.</p>
           </div>
           <div className="value-columns">
@@ -574,14 +574,14 @@ function LandingPage() {
               <span>FOR THE AGENCY</span>
               <h3>Run execution without losing control between teams.</h3>
               <p>Turn field inputs into design and production work, coordinate installation, verify proof and keep every site moving toward billing readiness.</p>
-              <ul><li>Survey-to-production continuity</li><li>Site-level ownership and status</li><li>Materials, proof and verification in context</li><li>Live operational visibility across campaigns</li></ul>
+              <ul><li>Survey-to-production continuity</li><li>Site-level ownership and status</li><li>Materials, proof and verification in context</li><li>Live operational visibility across work orders</li></ul>
               <button onClick={() => scrollToJourney('production')}>See agency operations <ArrowRight size={14} /></button>
             </article>
             <article className="value-card value-card--client premium-tilt" onPointerMove={tiltMove} onPointerLeave={tiltLeave}>
               <span>FOR THE CLIENT</span>
               <h3>See what is happening without chasing for updates.</h3>
-              <p>Give clients a clear campaign view with verified progress, completed locations, installation photos and reporting grounded in real field activity.</p>
-              <ul><li>Campaign progress at a glance</li><li>Verified completed-site proof</li><li>Clear review and reporting trail</li><li>More confidence in completion and billing</li></ul>
+              <p>Give clients a clear work order view with verified progress, completed locations, installation photos and reporting grounded in real field activity.</p>
+              <ul><li>Work Order progress at a glance</li><li>Verified completed-site proof</li><li>Clear review and reporting trail</li><li>More confidence in completion and billing</li></ul>
               <button onClick={() => scrollToJourney('client')}>See client visibility <ArrowRight size={14} /></button>
             </article>
           </div>
@@ -664,7 +664,7 @@ function LandingPage() {
             <article className="premium-tilt" onPointerMove={tiltMove} onPointerLeave={tiltLeave}><b>01</b><h3>One site record, not scattered handoffs.</h3><p>Measurements, creative context, production status, installation and proof remain tied to the same location.</p></article>
             <article className="premium-tilt" onPointerMove={tiltMove} onPointerLeave={tiltLeave}><b>02</b><h3>Proof has context.</h3><p>Completed-site photos stay connected to site identity, field activity and verification instead of becoming loose files in chat threads.</p></article>
             <article className="premium-tilt" onPointerMove={tiltMove} onPointerLeave={tiltLeave}><b>03</b><h3>Agency control and client clarity.</h3><p>Operations teams manage execution while clients see a cleaner view of verified progress and completed work.</p></article>
-            <article className="premium-tilt" onPointerMove={tiltMove} onPointerLeave={tiltLeave}><b>04</b><h3>Designed for multi-site campaigns.</h3><p>The workflow is structured for many locations, roles and stages without losing visibility into what is blocked, active or complete.</p></article>
+            <article className="premium-tilt" onPointerMove={tiltMove} onPointerLeave={tiltLeave}><b>04</b><h3>Designed for multi-site work orders.</h3><p>The workflow is structured for many locations, roles and stages without losing visibility into what is blocked, active or complete.</p></article>
           </div>
           <div className="public-page-links" aria-label="Learn more about AdRoute">
             <Link to="/for-agencies">For agencies <ArrowRight size={14}/></Link>
@@ -679,9 +679,9 @@ function LandingPage() {
           <div><p>COMMON QUESTIONS</p><h2 id="faq-heading">Understand AdRoute before the demo.</h2></div>
           <div className="faq-list">
             <details><summary>What is AdRoute?</summary><p>AdRoute is an operations platform for outdoor advertising, signage and field-branding agencies. It connects site survey, design and production, installation, verified proof, live operations, client visibility, reporting and billing readiness.</p></details>
-            <details><summary>Who uses AdRoute?</summary><p>Agency owners and operations teams use it to coordinate work; surveyors and installers use field workflows; designers and production teams work from site-linked context; clients receive visibility into verified campaign progress.</p></details>
-            <details><summary>How does AdRoute help clients?</summary><p>Clients can review campaign progress, completed sites, verified installation photos and reporting without relying on repeated manual update requests.</p></details>
-            <details><summary>Does AdRoute replace the agency?</summary><p>No. The agency remains the team executing the campaign. AdRoute is the connected operational system that helps the agency coordinate execution and give clients reliable visibility.</p></details>
+            <details><summary>Who uses AdRoute?</summary><p>Agency owners and operations teams use it to coordinate work; surveyors and installers use field workflows; designers and production teams work from site-linked context; clients receive visibility into verified work order progress.</p></details>
+            <details><summary>How does AdRoute help clients?</summary><p>Clients can review work order progress, completed sites, verified installation photos and reporting without relying on repeated manual update requests.</p></details>
+            <details><summary>Does AdRoute replace the agency?</summary><p>No. The agency remains the team executing the work order. AdRoute is the connected operational system that helps the agency coordinate execution and give clients reliable visibility.</p></details>
           </div>
         </div>
       </section>

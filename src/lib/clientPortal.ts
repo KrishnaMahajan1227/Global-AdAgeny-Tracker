@@ -192,12 +192,20 @@ export interface ClientCampaignRow {
 export function buildClientCampaignRows(
   pos: { id: string; po_number: string; name?: string | null; po_date: string; status: string; assignment_status: string; fulfillment_type: FulfillmentType; delivery_receipt_required?: boolean | null; assigned_agency_id: string | null; agency_org?: { name: string } | null }[],
   shops: { purchase_order_id: string | null; status?: string }[],
-  progress: ClientPOLineItemProgress[]
+  progress: ClientPOLineItemProgress[],
+  groupedShops?: { purchase_order_id: string | null; status: string; shop_count: number }[]
 ): ClientCampaignRow[] {
   const siteCountByPo = new Map<string, number>();
   for (const s of shops) {
     if (!s.purchase_order_id) continue;
     siteCountByPo.set(s.purchase_order_id, (siteCountByPo.get(s.purchase_order_id) || 0) + 1);
+  }
+  if (groupedShops) {
+    siteCountByPo.clear();
+    for (const row of groupedShops) {
+      if (!row.purchase_order_id) continue;
+      siteCountByPo.set(row.purchase_order_id, (siteCountByPo.get(row.purchase_order_id) || 0) + row.shop_count);
+    }
   }
   const progressByPo = new Map<string, ClientPOLineItemProgress[]>();
   for (const row of progress) {
@@ -209,7 +217,7 @@ export function buildClientCampaignRows(
   return pos.map((po) => {
     const poProgress = progressByPo.get(po.id) || [];
     const completionPct = po.fulfillment_type === 'supply_only' && po.delivery_receipt_required
-      ? receiptCompletionPercent(shops.filter(shop => shop.purchase_order_id === po.id && !!shop.status).map(shop => ({status:shop.status!})))
+      ? receiptCompletionPercent(groupedShops ? groupedShops.filter(s => s.purchase_order_id === po.id).map(s => ({status:s.status,count:s.shop_count})) : shops.filter(shop => shop.purchase_order_id === po.id && !!shop.status).map(shop => ({status:shop.status!})))
       : stagePct(poProgress, finalStage(po.fulfillment_type));
     return {
       po_id: po.id,

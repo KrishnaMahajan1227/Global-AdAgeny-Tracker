@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
+import { fetchAllPages } from '@/lib/paginatedQuery';
 import { useAuth } from '@/lib/auth';
 import { Card, EmptyState, PageHeader, StatusBadge, Select } from '@/components/ui';
 import { LineItemProgressChart } from '@/components/LineItemProgressChart';
 import { exportClientCampaignReport, exportClientPhotoComplianceReport, exportClientSiteDetailReport, exportClientCampaignReportPDF, exportClientSiteDetailPDF } from '@/lib/reports';
-import { STATUS_LABELS, type PurchaseOrder, type ClientPOLineItemProgress, type Campaign, type WorkItem, type SurveyPhoto, type Organization } from '@/lib/types';
+import { STATUS_LABELS, type PurchaseOrder, type ClientPOLineItemProgress, type WorkItem, type SurveyPhoto, type Organization } from '@/lib/types';
 import {
   buildClientCampaignRows, CLIENT_PO_WORK_STATUS_LABELS, CLIENT_PO_WORK_STATUS_COLORS, stagePct, finalStage, receiptCompletionPercent,
 } from '@/lib/clientPortal';
@@ -37,7 +38,6 @@ export default function ClientReportsPage() {
   const { profile } = useAuth();
   const orgId = profile?.organization_id;
 
-  const [campaignFilter, setCampaignFilter] = useState('');
   const [agencyFilter, setAgencyFilter] = useState('');
   const [poFilter, setPoFilter] = useState('');
   const [progressPoId, setProgressPoId] = useState('');
@@ -56,28 +56,15 @@ export default function ClientReportsPage() {
 
   // Dropping the parent filters resets whichever child filter they'd
   // otherwise leave pointed at a Work Order that's no longer in scope.
-  useEffect(() => { setPoFilter(''); }, [campaignFilter, agencyFilter]);
+  useEffect(() => { setPoFilter(''); }, [agencyFilter]);
 
-  const { data: campaigns } = useQuery({
-    queryKey: ['client-reports-campaigns', orgId],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('campaigns').select('*').eq('client_org_id', orgId).order('created_at', { ascending: false });
-      if (error) throw error;
-      return data as Campaign[];
-    },
-    enabled: !!orgId,
-  });
 
   const { data: pos } = useQuery({
     queryKey: ['client-reports-pos', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('purchase_orders')
+      return fetchAllPages<PoRow>((a,b) => supabase.from('purchase_orders')
         .select('*, agency_org:organizations!purchase_orders_assigned_agency_id_fkey(name)')
-        .eq('client_org_id', orgId)
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      return data as PoRow[];
+        .eq('client_org_id', orgId).order('id').range(a,b));
     },
     enabled: !!orgId,
   });
@@ -85,9 +72,7 @@ export default function ClientReportsPage() {
   const { data: shops } = useQuery({
     queryKey: ['client-reports-shops', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('shops').select('id, name, city, district, address, status, purchase_order_id');
-      if (error) throw error;
-      return data as ShopRow[];
+      return fetchAllPages<ShopRow>((a,b) => supabase.from('shops').select('id, name, city, district, address, status, purchase_order_id').order('id').range(a,b));
     },
     enabled: !!orgId,
   });
@@ -95,9 +80,7 @@ export default function ClientReportsPage() {
   const { data: progress } = useQuery({
     queryKey: ['client-reports-progress', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('v_client_po_line_item_progress').select('*');
-      if (error) throw error;
-      return data as ClientPOLineItemProgress[];
+      return fetchAllPages<ClientPOLineItemProgress>((a,b) => supabase.from('v_client_po_line_item_progress').select('*').order('po_line_item_id').range(a,b));
     },
     enabled: !!orgId,
   });
@@ -105,9 +88,7 @@ export default function ClientReportsPage() {
   const { data: workItems } = useQuery({
     queryKey: ['client-reports-work-items', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('work_items').select('id, shop_id, work_type_name, survey_area, survey_quantity, approved_area, approved_quantity, excluded_from_calculations, created_at');
-      if (error) throw error;
-      return data as Pick<WorkItem, 'id' | 'shop_id' | 'work_type_name' | 'survey_area' | 'survey_quantity' | 'approved_area' | 'approved_quantity' | 'excluded_from_calculations' | 'created_at'>[];
+      return fetchAllPages<Pick<WorkItem, 'id' | 'shop_id' | 'work_type_name' | 'survey_area' | 'survey_quantity' | 'approved_area' | 'approved_quantity' | 'excluded_from_calculations' | 'created_at'>>((a,b) => supabase.from('work_items').select('id, shop_id, work_type_name, survey_area, survey_quantity, approved_area, approved_quantity, excluded_from_calculations, created_at').order('id').range(a,b));
     },
     enabled: !!orgId,
   });
@@ -115,9 +96,7 @@ export default function ClientReportsPage() {
   const { data: surveyPhotos } = useQuery({
     queryKey: ['client-reports-survey-photos', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('survey_photos').select('shop_id, photo_url, photo_type, created_at');
-      if (error) throw error;
-      return data as Pick<SurveyPhoto, 'shop_id' | 'photo_url' | 'photo_type' | 'created_at'>[];
+      return fetchAllPages<Pick<SurveyPhoto, 'shop_id' | 'photo_url' | 'photo_type' | 'created_at'>>((a,b) => supabase.from('survey_photos').select('shop_id, photo_url, photo_type, created_at').order('created_at').order('id').range(a,b));
     },
     enabled: !!orgId,
   });
@@ -130,14 +109,13 @@ export default function ClientReportsPage() {
   const { data: installPhotos } = useQuery({
     queryKey: ['client-reports-install-photos', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('installation_proofs').select('shop_id, photo_url, photo_type, captured_at');
-      if (error) throw error;
-      return (data || []).map((p) => ({ shop_id: p.shop_id, photo_url: p.photo_url, photo_type: p.photo_type, created_at: p.captured_at })) as { shop_id: string; photo_url: string; photo_type: string; created_at: string }[];
+      const data = await fetchAllPages<{ shop_id: string; photo_url: string; photo_type: string; captured_at: string }>((a,b) => supabase.from('installation_proofs').select('shop_id, photo_url, photo_type, captured_at').order('captured_at').order('id').range(a,b));
+      return data.map((p) => ({ shop_id: p.shop_id, photo_url: p.photo_url, photo_type: p.photo_type, created_at: p.captured_at }));
     },
     enabled: !!orgId,
   });
 
-  const campaignById = useMemo(() => new Map((campaigns || []).map((c) => [c.id, c])), [campaigns]);
+
 
   // Agencies actually present in this client's own POs — built from real
   // data, not a platform-wide list, since offering an agency this client
@@ -150,11 +128,10 @@ export default function ClientReportsPage() {
 
   const scopedPos = useMemo(
     () => (pos || []).filter((p) =>
-      (!campaignFilter || p.campaign_id === campaignFilter) &&
       (!agencyFilter || p.assigned_agency_id === agencyFilter) &&
       (!poFilter || p.id === poFilter)
     ),
-    [pos, campaignFilter, agencyFilter, poFilter]
+    [pos, agencyFilter, poFilter]
   );
   // Kept as an alias — every section below already reads this name; only
   // its definition changed to also respect the Agency/Work Order filters.
@@ -162,11 +139,10 @@ export default function ClientReportsPage() {
 
   const workOrderOptions = useMemo(() => {
     const scoped = (pos || []).filter((p) =>
-      (!campaignFilter || p.campaign_id === campaignFilter) &&
       (!agencyFilter || p.assigned_agency_id === agencyFilter)
     );
     return [{ value: '', label: 'All Work Orders' }, ...scoped.map((p) => ({ value: p.id, label: p.name ? `${p.name} (${p.po_number})` : p.po_number }))];
-  }, [pos, campaignFilter, agencyFilter]);
+  }, [pos, agencyFilter]);
 
   // ---- Campaign performance ----
   const campaignRows = useMemo(
@@ -177,10 +153,7 @@ export default function ClientReportsPage() {
   function handleExportCampaigns() {
     exportClientCampaignReport(
       campaignRows.map((r) => {
-        const po = posInCampaignFilter.find((p) => p.id === r.po_id);
-        const campaignName = po?.campaign_id ? campaignById.get(po.campaign_id)?.name || '—' : '—';
         return {
-          campaign_name: campaignName,
           po_number: r.po_number,
           po_date: r.po_date,
           agency_name: r.agency_name,
@@ -271,7 +244,6 @@ export default function ClientReportsPage() {
         city: s.city,
         district: s.district,
         address: s.address,
-        campaign_name: po?.campaign_id ? campaignById.get(po.campaign_id)?.name || '—' : '—',
         po_label: po ? (po.name || po.po_number) : '—',
         agency_name: po?.agency_org?.name || '—',
         status_label: STATUS_LABELS[s.status] || s.status,
@@ -282,7 +254,7 @@ export default function ClientReportsPage() {
         survey_photo_count: surveyCountByShop.get(s.id) || 0,
         installation_photo_count: installCountByShop.get(s.id) || 0,
       };
-    }), [shops, poIdsInFilter, poById, workItemsByShop, campaignById, surveyCountByShop, installCountByShop]);
+    }), [shops, poIdsInFilter, poById, workItemsByShop, surveyCountByShop, installCountByShop]);
 
   const siteShopIdsInFilter = useMemo(() => new Set(
     (shops || []).filter((s) => !s.purchase_order_id || poIdsInFilter.has(s.purchase_order_id)).map((s) => s.id)
@@ -324,7 +296,7 @@ export default function ClientReportsPage() {
       }
       const { generated, skipped } = await exportClientSiteDetailPDF(siteDetailRows, surveyByShop, installByShop, org);
       if (generated === 0) setPdfNotice({ kind: 'error', message: 'No sites in this scope yet.' });
-      else if (skipped > 0) setPdfNotice({ kind: 'success', message: `PDF ready — first ${generated} sites (${skipped} more matched this filter; narrow it with Campaign/Agency/Work Order to include them too).` });
+      else if (skipped > 0) setPdfNotice({ kind: 'success', message: `PDF ready — first ${generated} sites (${skipped} more matched this filter; narrow it with Agency/Work Order to include them too).` });
       else setPdfNotice({ kind: 'success', message: `PDF ready — ${generated} site(s), with photos.` });
     } catch {
       setPdfNotice({ kind: 'error', message: 'Could not generate the PDF. Please try again.' });
@@ -336,10 +308,7 @@ export default function ClientReportsPage() {
   async function handleExportCampaignPDF() {
     await exportClientCampaignReportPDF(
       campaignRows.map((r) => {
-        const po = posInCampaignFilter.find((p) => p.id === r.po_id);
-        const campaignName = po?.campaign_id ? campaignById.get(po.campaign_id)?.name || '—' : '—';
         return {
-          campaign_name: campaignName,
           po_number: r.po_number,
           po_date: r.po_date,
           agency_name: r.agency_name,
@@ -373,7 +342,6 @@ export default function ClientReportsPage() {
     setProgressLineItemId(firstLineItem?.po_line_item_id || '');
   }
 
-  const campaignOptions = [{ value: '', label: 'All Campaigns' }, ...(campaigns || []).map((c) => ({ value: c.id, label: c.name }))];
 
   const avgCompletionPct = useMemo(() => {
     const withPct = campaignRows.filter((r) => r.completion_pct != null);
@@ -383,17 +351,10 @@ export default function ClientReportsPage() {
 
   return (
     <div>
-      <PageHeader title="Reports" subtitle="Exports and progress reports across every campaign and linked agency" />
+      <PageHeader title="Reports" subtitle="Exports and progress reports across all Work Orders and linked agencies" />
 
-      {(campaigns || []).length > 0 && (
-        <Card className="p-4 mb-5">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label className="block text-xs font-medium text-slate-500 mb-1 flex items-center gap-1.5"><Megaphone className="w-3.5 h-3.5" /> Campaign</label>
-              <select value={campaignFilter} onChange={(e) => setCampaignFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
-                {campaignOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </div>
+      <Card className="p-4 mb-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-medium text-slate-500 mb-1 flex items-center gap-1.5"><Building2 className="w-3.5 h-3.5" /> Agency</label>
               <select value={agencyFilter} onChange={(e) => setAgencyFilter(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500">
@@ -408,7 +369,7 @@ export default function ClientReportsPage() {
             </div>
           </div>
         </Card>
-      )}
+
 
       {/* Summary strip — the four numbers a client actually wants at a
           glance before drilling into a table or export. */}
@@ -424,7 +385,7 @@ export default function ClientReportsPage() {
           <div className="flex items-start justify-between gap-4 flex-wrap mb-3">
             <div className="flex items-center gap-2">
               <FileBarChart className="w-4.5 h-4.5 text-slate-400" />
-              <h2 className="font-semibold text-slate-900">Campaign Performance</h2>
+              <h2 className="font-semibold text-slate-900">Work Order Performance</h2>
             </div>
             <div className="flex items-center gap-2">
               <button

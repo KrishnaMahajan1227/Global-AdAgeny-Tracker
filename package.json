@@ -9,7 +9,10 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
-    "verify:production-completion": "node scripts/verify-production-completion-fix.mjs"
+    "verify:production-completion": "node scripts/verify-production-completion-fix.mjs && node scripts/verify-owner-dashboard-demo.cjs",
+    "verify:release": "node scripts/check-syntax.cjs && node scripts/verify-runtime-jsx-symbols.cjs && node scripts/verify-campaign-removal.cjs && node scripts/verify-production-completion-fix.mjs && node scripts/verify-owner-dashboard-demo.cjs",
+    "verify:deployment": "node scripts/verify-live-release.cjs",
+    "verify:dist": "node scripts/verify-dist-release.cjs"
   },
   "dependencies": {
     "@googlemaps/markerclusterer": "^2.6.2",

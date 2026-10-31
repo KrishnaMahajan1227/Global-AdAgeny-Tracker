@@ -9,7 +9,7 @@ import { logAudit } from '@/lib/helpers';
 import { generateInvoicePDF } from '@/lib/reports';
 import { computeUtilization, formatRupees, UtilizationStage, defaultUtilizationStage } from '@/lib/poUtilization';
 import { Plus, FileText, Download, Trash2, ChevronRight, ShoppingCart, AlertTriangle, Pencil, Info, Search, MoreHorizontal, RefreshCw } from 'lucide-react';
-import type { Organization, Client, Invoice, InvoiceItem, PurchaseOrder, POLineItemUtilization, Project } from '@/lib/types';
+import type { Organization, Client, Invoice, InvoiceItem, PurchaseOrder, POLineItemUtilization } from '@/lib/types';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
 import { buildPendingAllocations, consolidateInvoiceLines, isFinalizedShop, billingStageLabel, validateInvoiceAllocationSelection, type BilledRow, type CompletedWorkRow, type RateRow } from '@/lib/poBilling';
 import { getShopCompletion } from '@/lib/workCompletion';
@@ -121,21 +121,6 @@ export default function BillingPage() {
       .select('*').eq('organization_id', orgId).order('name').range(a,b)),
     enabled: !!orgId,
   });
-
-  // Every project for the org, filtered client-side to the selected client —
-  // same pattern the Purchase Orders page already uses. Lets the invoice
-  // auto-fill (or let the owner manually pick) which project it belongs to,
-  // instead of that field silently sitting unused.
-  const { data: allProjects } = useQuery({
-    queryKey: ['projects-for-billing', orgId],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('projects').select('id, organization_id, client_id, name, description, start_date, end_date, status, is_demo, created_at').eq('organization_id', orgId).order('name');
-      if (error) throw error;
-      return data as Project[];
-    },
-    enabled: !!orgId,
-  });
-  const projectsForClient = (allProjects || []).filter((p) => !form.client_id || p.client_id === form.client_id);
 
   const { data: invoices, isLoading: invoicesLoading, error: invoicesError } = useQuery({
     queryKey: ['invoices', orgId],
@@ -1036,7 +1021,6 @@ export default function BillingPage() {
             <div className="space-y-3">
               <Select label="Client" value={form.client_id} onChange={selectClient} options={(clients || []).map(c => ({ value: c.id, label: c.name }))} required />
               <Select label="Work Order" value={form.purchase_order_id} onChange={selectPO} options={(purchaseOrders || []).filter(po=>!form.client_id || po.client_id===form.client_id).map(po=>({value:po.id,label:po.name ? `${po.name} (${po.po_number})` : po.po_number}))} />
-              {projectsForClient.length > 0 && <Select label="Project (optional)" value={form.project_id} onChange={v=>setForm({...form,project_id:v})} options={projectsForClient.map(p=>({value:p.id,label:p.name}))} />}
             </div>
           )}
           {selectedPO?.gst_percentage != null && parseFloat(form.gst_rate) !== selectedPO.gst_percentage && (

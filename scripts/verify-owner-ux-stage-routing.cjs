@@ -24,5 +24,5 @@ t('Dashboard finances require explicit owner view, and amounts are fetched only 
 t('Switching Work Orders resets financial mode',()=>{assert.match(work,/key=\{detailPo.id\}/);});
 t('Work Order KPI links use PO and stage',()=>{assert.match(work,/to=\{`\/shops\?po=\$\{encodeURIComponent\(po.id\)\}&stage=\$\{item.key\}`\}/);});
 t('Shop list deep links use server-side stage filtering',()=>{assert.match(shops,/const groupedStatuses = stageFilter/);assert.match(shops,/query = query.in\('status', groupedStatuses/);assert.match(shops,/fallback = fallback.in\('status', groupedStatuses/);});
-t('Dashboard links to exact Work Order, PO shop stages, and pipeline',()=>{assert.match(dash,/poUrl\(item.order.id\)/);assert.match(dash,/shopUrl\(item.order.id,stage.key\)/);assert.match(dash,/stageUrl\(stage.key\)/);});
+t('Dashboard links to exact Work Order and current PO stage without duplicate pipeline',()=>{assert.match(dash,/poUrl\(item.order.id\)/);assert.match(dash,/shopUrl\(item.order.id,stage.key\)/);assert.doesNotMatch(dash,/stageUrl\(stage.key\)/);assert.doesNotMatch(dash,/Site pipeline<\/h2>/);});
 console.log('ALL',passed,'OWNER UX / NAVIGATION CHECKS PASSED');

@@ -21,7 +21,7 @@ import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { computeImageHash, hammingDistance, DUPLICATE_HASH_THRESHOLD } from '@/lib/imageHash';
 import { haversineDistanceMeters, GPS_DISTANCE_FLAG_METERS } from '@/lib/geoDistance';
 import { reverseGeocode } from '@/lib/geocode';
-import { stampGeoTag, ensureLandscape } from '@/lib/geoStamp';
+import { stampGeoTag, ensureLandscape, formatGeoStampAddress, type PhotoCaptureMeta } from '@/lib/geoStamp';
 import { capturePhotoLocation } from '@/lib/captureLocation';
 import type { SurveyPhoto, BoardMarking, WorkItem, POWorkContext, POLineItemWorkContext } from '@/lib/types';
 import {
@@ -30,6 +30,7 @@ import {
   Paintbrush, ClipboardList, ImagePlus, Trash2, PlusCircle,
 } from 'lucide-react';
 import { FieldMapView, NotificationsView, ProfileView, navigateToShop, AssignedShopList } from './SurveyorPage';
+import { ShopAdditionalDetails } from '@/components/ShopAdditionalDetails';
 
 type MobileTab = 'home' | 'work' | 'map' | 'notifications' | 'profile';
 
@@ -570,16 +571,18 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     void uploadSavedRedo(draft);
   }, [online, redoDrafts, redoBusy]);
 
-  async function queueRedoImage(c: any, dataUrl: string, fileName: string) {
+  async function queueRedoImage(c: any, dataUrl: string, fileName: string, meta?: PhotoCaptureMeta) {
     if (!profile) return;
     setCameraFor(null);
     setRedoError('');
     try {
       // Keep geo-stamp while preserving a durable original capture locally until the RPC acknowledges it.
       let stamped = dataUrl;
+      const redoGps = meta?.source === 'camera' ? await capturePhotoLocation(null) : null;
       try { stamped = await stampGeoTag(await ensureLandscape(dataUrl), {
-        siteName: shop?.name, addressLine: [shop?.address, shop?.city, shop?.state].filter(Boolean).join(', '),
-        lat: gps?.lat ?? null, lng: gps?.lng ?? null, accuracy: gps?.accuracy ?? null,
+        siteName: shop?.name, addressLine: formatGeoStampAddress(shop),
+        lat: redoGps?.lat ?? null, lng: redoGps?.lng ?? null, accuracy: redoGps?.accuracy ?? null, timestamp: meta?.capturedAt || new Date(),
+        timestampLabel: meta?.source === 'camera' ? 'Captured' : 'Imported',
       }); } catch { /* Keep the original captured file if stamping is unavailable. */ }
       const draft: RedoDraft = { id: redoDraftId(profile.id, c.id), userId: profile.id, shopId,
         stage: 'installation', correctionId: c.id, status: 'queued', updatedAt: new Date().toISOString(),
@@ -953,7 +956,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     }
   }
 
-  async function handlePhotoCaptured(dataUrl: string, fileName: string, forcedAngle?: 'front' | 'side' | 'other', explicitWorkItemId?: string, caption?: string) {
+  async function handlePhotoCaptured(dataUrl: string, fileName: string, forcedAngle?: 'front' | 'side' | 'other', explicitWorkItemId?: string, caption?: string, meta?: PhotoCaptureMeta) {
     // cameraFor doubles as the angle here ('front' / 'side' / 'other') —
     // photo_type stays the constant 'installed' (matches the existing
     // check constraint); angle is the new, separate column that Section 7
@@ -968,17 +971,18 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
     // just a lat/lng column that only some screens bother to read.
     // Falls back to the plain photo if stamping fails for any reason —
     // never blocks a real installation photo from uploading.
-    const photoGps = await capturePhotoLocation(gps);
+    const photoGps = meta?.source === 'camera' ? await capturePhotoLocation(null) : null;
     if (photoGps) { setGps(photoGps); setGpsStatus('captured'); }
     let uploadDataUrl = dataUrl;
     try {
       uploadDataUrl = await ensureLandscape(dataUrl);
       uploadDataUrl = await stampGeoTag(uploadDataUrl, {
         siteName: shop?.name,
-        addressLine: [shop?.address, shop?.city, shop?.state].filter(Boolean).join(', ') || null,
+        addressLine: formatGeoStampAddress(shop) || null,
         lat: photoGps?.lat ?? null,
         lng: photoGps?.lng ?? null,
         accuracy: photoGps?.accuracy ?? null,
+        timestamp: meta?.capturedAt || new Date(), timestampLabel: meta?.source === 'camera' ? 'Captured' : 'Imported',
       });
     } catch (stampErr) {
       console.error('[handlePhotoCaptured] geo-tag stamp failed (non-fatal, uploading unstamped):', stampErr);
@@ -1230,7 +1234,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
         <div className="min-w-0"><h1 className="truncate text-sm font-semibold text-slate-900">Installation corrections</h1><p className="truncate text-xs text-slate-500">{shop?.name || 'Shop'} · {(correctionTasks || []).length} returned</p></div>
       </div>
       <CameraCapture open={!!cameraFor?.startsWith('redo:')} onClose={() => setCameraFor(null)} title="Replacement installation proof"
-        onCapture={(dataUrl, name) => { const selected = correctionTasks!.find((c: any) => c.id === cameraFor?.slice(5)); if (selected) void queueRedoImage(selected, dataUrl, name); }} />
+        onCapture={(dataUrl, name, meta) => { const selected = correctionTasks!.find((c: any) => c.id === cameraFor?.slice(5)); if (selected) void queueRedoImage(selected, dataUrl, name, meta); }} />
       <div className="space-y-3 p-3">
         {!online && <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800">Offline — captured evidence remains on this device and will retry on reconnect.</div>}
         <p className="text-xs leading-5 text-slate-600">Only returned items need correction. Approved records stay unchanged. Replacement proof takes the place of the old submitted proof when saved.</p>
@@ -1321,7 +1325,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
       <CameraCapture
         open={!!cameraFor}
         onClose={() => setCameraFor(null)}
-        onCapture={(dataUrl, fileName) => handlePhotoCaptured(dataUrl, fileName, undefined, selectedProofWorkItemId || undefined)}
+        onCapture={(dataUrl, fileName, meta) => handlePhotoCaptured(dataUrl, fileName, undefined, selectedProofWorkItemId || undefined, undefined, meta)}
         title={cameraFor ? `${cameraFor.charAt(0).toUpperCase()}${cameraFor.slice(1)} Photo` : 'Photo'}
       />
 
@@ -1364,8 +1368,10 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
               <div className="space-y-2 text-sm text-slate-600">
                 <p>Client: {shop.clients?.name}</p>
                 <p>Address: {shop.address || 'N/A'}</p>
-                <p>City: {shop.city}, {shop.state}</p>
+                <p>Location: {[shop.village, shop.taluka, shop.city, shop.district, shop.state, shop.pincode].filter(Boolean).join(', ') || 'Not entered'}</p>
+                <button type="button" onClick={() => navigateToShop(shop)} className="font-medium text-blue-700 underline">Open location in Maps</button>
               </div>
+              <ShopAdditionalDetails details={shop.extra_details} />
             </Card>
 
             {correctionTasks && correctionTasks.length > 0 && <Card className="p-4 border border-amber-300 bg-amber-50"><p className="font-semibold text-sm text-amber-900">Correction-only installation · {correctionTasks.length} item{correctionTasks.length===1?'':'s'}</p><p className="text-xs text-amber-700 mt-1">Only the affected Work Item(s) are shown below. Previously accepted evidence is preserved.</p><div className="mt-2 space-y-1">{correctionTasks.map((c:any)=><div key={c.id} className="text-xs bg-white/80 border border-amber-200 rounded px-2 py-1.5"><b>{c.issue_type==='installation_photo'?'Replace installation photo':'Redo work item'}</b>{c.note?` — ${c.note}`:''}</div>)}</div></Card>}
@@ -2035,7 +2041,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
     }
   }
 
-  async function handlePhotoCaptured(dataUrl: string, fileName: string, forcedAngle?: 'front' | 'side' | 'other') {
+  async function handlePhotoCaptured(dataUrl: string, fileName: string, forcedAngle?: 'front' | 'side' | 'other', meta?: PhotoCaptureMeta) {
     const angle = nextAngle;
     setCameraOpen(false);
     if (!profile || !jobId || !shopId) return;
@@ -2043,16 +2049,17 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
       // Same geo-tag stamp as the normal Installation Wizard — the site
       // name and address the ground crew themselves just typed in, plus
       // GPS + timestamp, burned onto the photo itself.
-      const photoGps = await capturePhotoLocation(gps);
+      const photoGps = meta?.source === 'camera' ? await capturePhotoLocation(null) : null;
       if (photoGps) { setGps(photoGps); setGpsStatus('captured'); }
       let uploadDataUrl = dataUrl;
       try {
-        uploadDataUrl = await stampGeoTag(dataUrl, {
+        uploadDataUrl = await stampGeoTag(await ensureLandscape(dataUrl), {
           siteName: shopName || siteName,
           addressLine: [address, city, state].filter(Boolean).join(', ') || null,
           lat: photoGps?.lat ?? null,
           lng: photoGps?.lng ?? null,
           accuracy: photoGps?.accuracy ?? null,
+          timestamp: meta?.capturedAt || new Date(), timestampLabel: meta?.source === 'camera' ? 'Captured' : 'Imported',
         });
       } catch (stampErr) {
         console.error('[DirectInstallWizard] geo-tag stamp failed (non-fatal, uploading unstamped):', stampErr);
@@ -2166,7 +2173,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
 
   return (
     <div className="min-h-screen bg-slate-50 pb-24 max-w-md mx-auto">
-      <CameraCapture open={cameraOpen} onClose={() => setCameraOpen(false)} onCapture={handlePhotoCaptured} title={`Site Photo (${nextAngle})`} />
+      <CameraCapture open={cameraOpen} onClose={() => setCameraOpen(false)} onCapture={(dataUrl, name, meta) => handlePhotoCaptured(dataUrl, name, undefined, meta)} title={`Site Photo (${nextAngle})`} />
 
       <div className="bg-white border-b border-slate-200 sticky top-0 z-30">
         <div className="flex items-center justify-between p-4">

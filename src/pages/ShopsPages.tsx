@@ -23,8 +23,10 @@ import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { formatDim, LENGTH_UNIT_OPTIONS, toFeet, itemSizeLabel , trimNum, unitShort } from '@/lib/units';
 import { fulfillmentTypeLabel } from '@/lib/poUtilization';
+import { allowsShopAssignment } from '@/lib/fulfillment';
 import { geocodeAddress, buildAddressQuery } from '@/lib/geocode';
-import { findShopHeaderRow, findExtraHeaders, buildShopRows, resolveZoneIds, type ParsedShopRow } from '@/lib/shopBulkUpload';
+import { stampImportedShopPhoto } from '@/lib/geoStamp';
+import { findExtraHeaders, validateNewShopBulkHeaders, buildShopRows, resolveZoneIds, findShopWorkbookTable, assertBulkShopRows, buildBulkShopRecords, validateBulkShopScope, findMissingShopNames, shopMapsUrl, isUsableShopAddress, type ParsedShopRow } from '@/lib/shopBulkUpload';
 import { runBackfillPipeline, BACKFILL_INELIGIBLE_STATUSES, type BackfillStage } from '@/lib/backfillPipeline';
 import { downloadBulkBackfillTemplate, parseBulkBackfillWorkbook, type BulkBackfillParsedShop, type BulkBackfillShopRow } from '@/lib/bulkBackfillExcel';
 import { INDIA_STATES, INDIA_CITIES_BY_STATE, ALL_INDIA_CITIES } from '@/lib/indiaLocations';
@@ -338,9 +340,9 @@ export function ClientsPage() {
             <Input label="Contact Phone" value={form.contact_phone} onChange={(v) => setForm({ ...form, contact_phone: v })} />
           </div>
           <Input label="Contact Email" type="email" value={form.contact_email} onChange={(v) => setForm({ ...form, contact_email: v })} />
-          <Textarea label="Address" value={form.address} onChange={(v) => setForm({ ...form, address: v })} rows={2} />
+          <Textarea label="Full Address" value={form.address} onChange={(v) => setForm({ ...form, address: v })} rows={2} />
           <div className="grid grid-cols-2 gap-4">
-            <Combobox label="City" value={form.city} onChange={(v) => setForm({ ...form, city: v })} options={form.state && INDIA_CITIES_BY_STATE[form.state] ? INDIA_CITIES_BY_STATE[form.state] : ALL_INDIA_CITIES} />
+            <Combobox label="City (optional)" value={form.city} onChange={(v) => setForm({ ...form, city: v })} options={form.state && INDIA_CITIES_BY_STATE[form.state] ? INDIA_CITIES_BY_STATE[form.state] : ALL_INDIA_CITIES} />
             <Combobox label="State" value={form.state} onChange={(v) => setForm({ ...form, state: v })} options={INDIA_STATES} />
           </div>
           <Input label="GST Number" value={form.gst_number} onChange={(v) => setForm({ ...form, gst_number: v })} />
@@ -489,8 +491,8 @@ export function ShopsPage() {
   }
 
   const [form, setForm] = useState({
-    name: '', client_id: '', project_id: '', owner_name: '', contact_phone: '',
-    address: '', city: '', district: '', zone_id: '', state: '', latitude: '', longitude: '', purchase_order_id: '',
+    name: '', client_id: '', project_id: '', owner_name: '', contact_person_name: '', owner_phone: '', contact_phone: '',
+    address: '', village: '', city: '', district: '', taluka: '', pincode: '', zone_id: '', state: '', latitude: '', longitude: '', purchase_order_id: '',
     signage_language: '',
   });
 
@@ -564,7 +566,7 @@ export function ShopsPage() {
   const [bulkHeaders, setBulkHeaders] = useState<string[]>([]);
   const [bulkHeaderRowIndex, setBulkHeaderRowIndex] = useState(0);
   const [bulkExtraHeaders, setBulkExtraHeaders] = useState<string[]>([]);
-  const [bulkIncludedExtra, setBulkIncludedExtra] = useState<Record<string, boolean>>({});
+  const [bulkIncludedExtra, setBulkIncludedExtra] = useState<Record<string, boolean | null>>({});
   const [bulkFileName, setBulkFileName] = useState('');
   const [bulkError, setBulkError] = useState('');
   const [bulkUploadResult, setBulkUploadResult] = useState<string | null>(null);
@@ -604,9 +606,9 @@ export function ShopsPage() {
   const { data: purchaseOrders } = useQuery({
     queryKey: ['purchase_orders', orgId],
     queryFn: async () => {
-      const { data, error } = await supabase.from('purchase_orders').select('id, po_number, client_id, fulfillment_type, status').eq('organization_id', orgId).eq('status', 'active').neq('fulfillment_type', 'direct_install').order('po_number');
+      const { data, error } = await supabase.from('purchase_orders').select('id, po_number, client_id, project_id, fulfillment_type, status').eq('organization_id', orgId).eq('status', 'active').neq('fulfillment_type', 'direct_install').order('po_number');
       if (error) throw error;
-      return data as Pick<PurchaseOrder, 'id' | 'po_number' | 'client_id' | 'fulfillment_type' | 'status'>[];
+      return data as Pick<PurchaseOrder, 'id' | 'po_number' | 'client_id' | 'project_id' | 'fulfillment_type' | 'status'>[];
     },
     enabled: !!orgId,
   });
@@ -619,7 +621,7 @@ export function ShopsPage() {
   const [fastTrackOpen, setFastTrackOpen] = useState(false);
   const [ftForm, setFtForm] = useState({
     name: '', client_id: '', project_id: '', owner_name: '', contact_phone: '',
-    address: '', city: '', district: '', zone_id: '', state: '', purchase_order_id: '',
+    address: '', city: '', district: '', taluka: '', pincode: '', zone_id: '', state: '', purchase_order_id: '',
   });
   const [ftStage, setFtStage] = useState<BackfillStage>('production_done');
   type FtItem = { key: string; workTypeId: string; workTypeName: string; material: string; width: string; height: string; unit: string; quantity: string };
@@ -661,7 +663,7 @@ export function ShopsPage() {
   });
 
   function resetFastTrack() {
-    setFtForm({ name: '', client_id: '', project_id: '', owner_name: '', contact_phone: '', address: '', city: '', district: '', zone_id: '', state: '', purchase_order_id: '' });
+    setFtForm({ name: '', client_id: '', project_id: '', owner_name: '', contact_phone: '', address: '', city: '', district: '', taluka: '', pincode: '', zone_id: '', state: '', purchase_order_id: '' });
     setFtStage('production_done');
     setFtItems([{ key: crypto.randomUUID(), workTypeId: '', workTypeName: '', material: '', width: '', height: '', unit: 'ft', quantity: '1' }]);
     setFtSurveyorId(''); setFtDesignerId(''); setFtProductionId(''); setFtInstallerId(''); setFtNote('');
@@ -1182,6 +1184,14 @@ export function ShopsPage() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
+      if (!isUsableShopAddress(form.address)) throw new Error('Enter the full shop address before saving.');
+      const gpsLatSet = form.latitude.trim() !== '';
+      const gpsLngSet = form.longitude.trim() !== '';
+      if (gpsLatSet !== gpsLngSet) throw new Error('Enter both GPS coordinates, or leave both empty.');
+      if (gpsLatSet && (!Number.isFinite(Number(form.latitude)) || Math.abs(Number(form.latitude)) > 90 ||
+          !Number.isFinite(Number(form.longitude)) || Math.abs(Number(form.longitude)) > 180)) {
+        throw new Error('GPS coordinates are invalid (Latitude -90…90, Longitude -180…180).');
+      }
       // Nobody hand-types lat/long in practice — if it wasn't filled in
       // (or found via the "Locate on Map" button), geocode the address
       // right before saving so every shop still ends up with an accurate
@@ -1203,8 +1213,8 @@ export function ShopsPage() {
       const payload = {
         name: form.name, client_id: form.client_id,
         project_id: form.project_id || null,
-        owner_name: form.owner_name, contact_phone: form.contact_phone,
-        address: form.address, city: form.city, district: form.district,
+        owner_name: form.owner_name, contact_person_name: form.contact_person_name || null, owner_phone: form.owner_phone || null, contact_phone: form.contact_phone,
+        address: form.address, village: form.village || null, city: form.city, district: form.district, taluka: form.taluka || null, pincode: form.pincode || null,
         zone_id: form.zone_id || null, state: form.state,
         latitude, longitude, purchase_order_id: form.purchase_order_id || null,
         signage_language: form.signage_language || null,
@@ -1279,6 +1289,20 @@ export function ShopsPage() {
     mutationFn: async () => {
       if (!bulkUserId || selectedShopIds.size === 0) throw new Error('Pick a person and at least one shop first.');
       const targetShops = (shops || []).filter((s) => selectedShopIds.has(s.id));
+      if (targetShops.length !== selectedShopIds.size) throw new Error('Shop selection changed. Re-select the shops before assigning.');
+      const parentIds = [...new Set(targetShops.map((s) => s.purchase_order_id).filter((id): id is string => !!id))];
+      if (parentIds.length) {
+        const { data: parents, error: parentsError } = await supabase.from('purchase_orders')
+          .select('id, fulfillment_type').eq('organization_id', orgId).in('id', parentIds);
+        if (parentsError) throw new Error(`Could not check Work Order fulfillment: ${parentsError.message}`);
+        if ((parents || []).length !== parentIds.length) throw new Error('Could not verify every selected Work Order. Refresh and retry.');
+        const parentType = new Map((parents || []).map((p) => [p.id, p.fulfillment_type]));
+        const incompatible = targetShops.filter((shop) => shop.purchase_order_id &&
+          !allowsShopAssignment(parentType.get(shop.purchase_order_id), bulkRole));
+        if (incompatible.length) {
+          throw new Error(`${bulkRole} is not a required role for ${incompatible.length} selected site(s) under their fulfillment type. Deselect incompatible shops or choose another role. Example: ${incompatible[0].name}.`);
+        }
+      }
       const person = (bulkPeople || []).find((p) => p.id === bulkUserId);
       let assigned = 0, skipped = 0, failed = 0;
 
@@ -1326,18 +1350,19 @@ export function ShopsPage() {
           const previousHolders = (existing || []).filter(
             (a) => a.shop_id === shop.id && a.user_id !== bulkUserId && a.status === 'assigned'
           );
-          for (const prev of previousHolders) {
-            const { error: supersedeError } = await supabase
+          if (previousHolders.length) {
+            // One atomic update for all former holders: failure must NOT proceed
+            // to the new assignment and leave two active assignees.
+            const { data: superseded, error: supersedeError } = await supabase
               .from('shop_assignments')
               .update({ status: 'declined' })
-              .eq('id', prev.id);
-            if (supersedeError) { failed++; continue; }
-            await createNotification(
-              prev.user_id,
-              'Reassigned',
-              `You've been reassigned off ${shop.name} — it now belongs to someone else.`,
-              'info'
-            );
+              .in('id', previousHolders.map((prev) => prev.id))
+              .select('id');
+            if (supersedeError || (superseded || []).length !== previousHolders.length) { failed++; continue; }
+            for (const prev of previousHolders) {
+              await createNotification(prev.user_id, 'Reassigned',
+                `You've been reassigned off ${shop.name} — it now belongs to someone else.`, 'info');
+            }
           }
 
           const { error } = await supabase.from('shop_assignments').insert({
@@ -1394,30 +1419,18 @@ export function ShopsPage() {
 
   const bulkUploadMutation = useMutation({
     mutationFn: async () => {
-      if (!bulkClientId) throw new Error('Pick a client first.');
-      if (bulkParsedRows.length === 0) throw new Error('No valid rows found — every row needs at least a Name.');
-      // Resolve every distinct "Zone" text in the sheet to a real zone_id
-      // (reusing an existing zone or creating one) so these shops are
-      // actually zone-filterable, not just zone-labeled.
-      const zoneIds = await resolveZoneIds(orgId!, bulkProjectId || null, bulkParsedRows.map((r) => r.known.zone));
-      const rows = bulkParsedRows.map(({ known, extra }) => ({
-        organization_id: orgId,
-        client_id: bulkClientId,
-        project_id: bulkProjectId || null,
-        purchase_order_id: bulkPurchaseOrderId || null,
-        name: known.name,
-        owner_name: known.owner_name || null,
-        contact_phone: known.contact_phone || null,
-        address: known.address || null,
-        village: known.village || null,
-        city: known.city || null,
-        district: known.district || null,
-        zone: known.zone || null,
-        zone_id: known.zone ? zoneIds.get(known.zone.trim().toLowerCase()) || null : null,
-        state: known.state || null,
-        status: 'pending',
-        extra_details: extra,
-      }));
+      if (!orgId) throw new Error('Your agency session expired. Please sign in again.');
+      assertBulkShopRows(bulkParsedRows); // Do not create zones for a duplicate/invalid sheet.
+      const scope = validateBulkShopScope({
+        organizationId: orgId,
+        clientId: bulkClientId,
+        projectId: bulkProjectId || null,
+        purchaseOrderId: bulkPurchaseOrderId || null,
+      }, projects || [], purchaseOrders || []);
+      const zoneIds = await resolveZoneIds(scope.organizationId, scope.projectId, bulkParsedRows.map((r) => r.known.zone));
+      const rows = buildBulkShopRecords(bulkParsedRows, scope, zoneIds);
+      // A single PostgREST insert keeps the shop rows in the upload atomic:
+      // a failed batch never leaves half the shops imported.
       const { error } = await supabase.from('shops').insert(rows);
       if (error) throw error;
       await logAudit('shops', null, 'insert', null, null, null, `Bulk-uploaded ${rows.length} shop(s) from Excel/CSV`);
@@ -1431,6 +1444,11 @@ export function ShopsPage() {
       // show up for the first time (a fresh area added to a campaign),
       // so this needs to refresh immediately, not on a 5-minute delay.
       queryClient.invalidateQueries({ queryKey: ['shops-locations', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['po-shop-links', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['agency-operations-dashboard', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['client-site-progress', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['shops-reports', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['report-zones', orgId] });
       setBulkUploadResult(`${count} shop${count === 1 ? '' : 's'} added successfully.`);
       resetBulkState(false);
     },
@@ -1461,22 +1479,43 @@ export function ShopsPage() {
     reader.onload = (e) => {
       try {
         const wb = XLSX.read(e.target?.result, { type: 'binary' });
-        const sheet = wb.Sheets[wb.SheetNames[0]];
-        const aoa = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1 });
-        const found = findShopHeaderRow(aoa);
+        const matched = findShopWorkbookTable(wb.SheetNames, (sheetName) =>
+          XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[sheetName], { header: 1, range: 0, raw: false, blankrows: true })
+        );
+        const aoa = matched?.aoa || [];
+        const found = matched ? { headerRowIndex: matched.headerRowIndex, headers: matched.headers } : null;
         if (!found) {
           setBulkError('Could not find a "Name" column in this file — check that it has a header row with at least a Name/Shop Name column.');
           setBulkAoa(null);
           return;
         }
-        const extras = findExtraHeaders(found.headers);
+        // Validate required/duplicate headers. Unknown client-specific columns
+        // are automatically saved in shop.extra_details, not rejected.
+        validateNewShopBulkHeaders(found.headers);
+        const missingNames = findMissingShopNames(aoa, found.headerRowIndex, found.headers);
+        if (missingNames.length) {
+          setBulkError(`Missing shop Name in spreadsheet row${missingNames.length === 1 ? '' : 's'} ${missingNames.slice(0, 10).join(', ')}${missingNames.length > 10 ? '…' : ''}. Correct those rows before uploading.`);
+          setBulkAoa(null);
+          return;
+        }
+        // Prompt before upload; never silently create shops missing a real address
+        // or with a partial/invalid GPS pin. Optional fields remain blank.
+        try {
+          const previewRows = buildShopRows(aoa, found.headerRowIndex, found.headers, new Set<string>());
+          assertBulkShopRows(previewRows);
+        } catch (validationError) {
+          setBulkError(validationError instanceof Error ? validationError.message : 'Check shop details in the Excel file.');
+          setBulkAoa(null);
+          return;
+        }
+        const extras = findExtraHeaders(found.headers, aoa, found.headerRowIndex);
         setBulkAoa(aoa);
         setBulkHeaders(found.headers);
         setBulkHeaderRowIndex(found.headerRowIndex);
         setBulkExtraHeaders(extras);
         setBulkIncludedExtra(Object.fromEntries(extras.map((h) => [h, true])));
-      } catch {
-        setBulkError("Could not read this file. Make sure it's a valid .xlsx, .xls, or .csv file.");
+      } catch (err) {
+        setBulkError(err instanceof Error ? err.message : "Could not read this file. Make sure it's a valid .xlsx, .xls, or .csv file.");
         setBulkAoa(null);
       }
     };
@@ -1526,7 +1565,7 @@ export function ShopsPage() {
 
   function openAdd() {
     setEditShop(null);
-    setForm({ name: '', client_id: '', project_id: '', owner_name: '', contact_phone: '', address: '', city: '', district: '', zone_id: '', state: '', latitude: '', longitude: '', purchase_order_id: '', signage_language: '' });
+    setForm({ name: '', client_id: '', project_id: '', owner_name: '', contact_person_name: '', owner_phone: '', contact_phone: '', address: '', village: '', city: '', district: '', taluka: '', pincode: '', zone_id: '', state: '', latitude: '', longitude: '', purchase_order_id: '', signage_language: '' });
     setGeocodeStatus(null);
     setModalOpen(true);
   }
@@ -1535,8 +1574,8 @@ export function ShopsPage() {
     setEditShop(shop);
     setForm({
       name: shop.name, client_id: shop.client_id, project_id: shop.project_id || '',
-      owner_name: shop.owner_name || '', contact_phone: shop.contact_phone || '',
-      address: shop.address || '', city: shop.city || '', district: shop.district || '',
+      owner_name: shop.owner_name || '', contact_person_name: shop.contact_person_name || '', owner_phone: shop.owner_phone || '', contact_phone: shop.contact_phone || '',
+      address: shop.address || '', village: shop.village || '', city: shop.city || '', district: shop.district || '', taluka: shop.taluka || '', pincode: shop.pincode || '',
       zone_id: shop.zone_id || '', state: shop.state || '',
       latitude: shop.latitude?.toString() || '', longitude: shop.longitude?.toString() || '',
       purchase_order_id: shop.purchase_order_id || '',
@@ -1979,10 +2018,11 @@ export function ShopsPage() {
               .map((po) => ({ value: po.id, label: `${po.po_number} · ${fulfillmentTypeLabel(po.fulfillment_type)}` }))}
           />
           <div className="grid grid-cols-2 gap-4">
-            <Input label="Owner Name" value={form.owner_name} onChange={(v) => setForm({ ...form, owner_name: v })} />
-            <Input label="Contact Phone" value={form.contact_phone} onChange={(v) => setForm({ ...form, contact_phone: v })} />
+            <Input label="Owner Number (optional)" value={form.owner_phone} onChange={(v) => setForm({ ...form, owner_phone: v })} />
+            <Input label="Contact Person (optional)" value={form.contact_person_name} onChange={(v) => setForm({ ...form, contact_person_name: v })} />
+            <Input label="Contact Person Number (optional)" value={form.contact_phone} onChange={(v) => setForm({ ...form, contact_phone: v })} />
           </div>
-          {(purchaseOrders || []).find((po) => po.id === form.purchase_order_id)?.fulfillment_type !== 'supply_only' && (
+          {editShop && (purchaseOrders || []).find((po) => po.id === form.purchase_order_id)?.fulfillment_type !== 'supply_only' && (
             <Input
               label="Signage Language (optional)"
               value={form.signage_language}
@@ -1990,10 +2030,15 @@ export function ShopsPage() {
               placeholder="e.g. Hindi, Marathi, English"
             />
           )}
-          <Textarea label="Address" value={form.address} onChange={(v) => setForm({ ...form, address: v })} rows={2} />
+          <Textarea label="Full Address (required)" value={form.address} onChange={(v) => { setForm({ ...form, address: v, latitude: '', longitude: '' }); setGeocodeStatus(null); }} rows={2} />
+          <Input label="Village (optional)" value={form.village} onChange={(v) => setForm({ ...form, village: v })} />
           <div className="grid grid-cols-2 gap-4">
-            <Combobox label="City" value={form.city} onChange={(v) => setForm({ ...form, city: v })} options={form.state && INDIA_CITIES_BY_STATE[form.state] ? INDIA_CITIES_BY_STATE[form.state] : ALL_INDIA_CITIES} />
-            <Input label="District" value={form.district} onChange={(v) => setForm({ ...form, district: v })} />
+            <Combobox label="City (optional)" value={form.city} onChange={(v) => setForm({ ...form, city: v })} options={form.state && INDIA_CITIES_BY_STATE[form.state] ? INDIA_CITIES_BY_STATE[form.state] : ALL_INDIA_CITIES} />
+            <Input label="District (optional)" value={form.district} onChange={(v) => setForm({ ...form, district: v })} />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <Input label="Taluka / Tehsil (optional)" value={form.taluka} onChange={(v) => setForm({ ...form, taluka: v })} />
+            {/* PIN stays on historical records, but isn't requested for new shops. */}
           </div>
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Zone</label>
@@ -2022,7 +2067,7 @@ export function ShopsPage() {
           <div className="border border-slate-200 rounded-lg p-3 space-y-2">
             <div className="flex items-center justify-between gap-3">
               <p className="text-xs text-slate-500">
-                We'll pin the shop on the map from the address above — no need to type coordinates by hand.
+                We'll try to locate the address on the map. Automatic geocoding is approximate; verify the pin before visiting.
               </p>
               <button
                 type="button"
@@ -2041,18 +2086,18 @@ export function ShopsPage() {
               </p>
             )}
 
-            <details className="text-xs text-slate-400">
+            {editShop && <details className="text-xs text-slate-400">
               <summary className="cursor-pointer select-none">Enter coordinates manually instead</summary>
               <div className="grid grid-cols-2 gap-4 mt-2">
                 <Input label="Latitude" type="number" value={form.latitude} onChange={(v) => setForm({ ...form, latitude: v })} step="any" />
                 <Input label="Longitude" type="number" value={form.longitude} onChange={(v) => setForm({ ...form, longitude: v })} step="any" />
               </div>
-            </details>
+            </details>}
           </div>
 
           <button
             onClick={() => saveMutation.mutate()}
-            disabled={saveMutation.isPending}
+            disabled={saveMutation.isPending || !form.name.trim() || !form.client_id || !isUsableShopAddress(form.address)}
             className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition disabled:opacity-50"
           >
             {saveMutation.isPending ? 'Saving...' : editShop ? 'Update Shop' : 'Add Shop'}
@@ -2215,36 +2260,41 @@ export function ShopsPage() {
       {/* BULK UPLOAD */}
       <Modal open={bulkOpen} onClose={() => resetBulkState()} title="Bulk Upload Shops" size="lg">
         <div className="space-y-4">
+          <a href="/templates/AdRoute_Universal_Shops_Bulk_Upload_Template.xlsx" download="AdRoute_Shops_Flexible_Template.xlsx" className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100">
+            Download Shops Excel Template (.xlsx)
+          </a>
+          <p className="text-xs text-slate-500">Fill the first sheet: Shop Name and Address are required; all other common fields are optional. You can append FMM/FSM Name or any other custom heading—populated values are saved automatically as Additional Shop Details. GPS is captured and verified during live field photography.</p>
           <div className="grid grid-cols-2 gap-4">
             <Select
               label="Client"
               value={bulkClientId}
-              onChange={(v) => { setBulkClientId(v); setBulkPurchaseOrderId(''); }}
+              onChange={(v) => { setBulkClientId(v); setBulkProjectId(''); setBulkPurchaseOrderId(''); }}
               options={(clients || []).map((c) => ({ value: c.id, label: c.name }))}
               required
             />
             <Select
               label="Project (optional)"
               value={bulkProjectId}
-              onChange={setBulkProjectId}
+              onChange={(v) => { setBulkProjectId(v); if (bulkPurchaseOrderId && (purchaseOrders || []).find((po) => po.id === bulkPurchaseOrderId)?.project_id && (purchaseOrders || []).find((po) => po.id === bulkPurchaseOrderId)?.project_id !== v) setBulkPurchaseOrderId(''); }}
               options={(projects || []).filter((p) => !bulkClientId || p.client_id === bulkClientId).map((p) => ({ value: p.id, label: p.name }))}
             />
           </div>
           <Select
             label="Purchase Order (optional)"
             value={bulkPurchaseOrderId}
-            onChange={setBulkPurchaseOrderId}
+            onChange={(v) => { setBulkPurchaseOrderId(v); const po = (purchaseOrders || []).find((item) => item.id === v); if (po?.project_id) setBulkProjectId(po.project_id); }}
             options={(purchaseOrders || [])
               .filter((po) => !bulkClientId || po.client_id === bulkClientId)
               .map((po) => ({ value: po.id, label: `${po.po_number} · ${fulfillmentTypeLabel(po.fulfillment_type)}` }))}
           />
 
+          {bulkPurchaseOrderId && <p className="text-xs text-blue-700">Shops will be linked to the selected Work Order and its project (if any).</p>}
           <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5">
             <p className="text-xs text-slate-500">
               Upload a .xlsx, .xls, or .csv file with one row per shop — any column order, any position in the file.
               Every client sends their list a little differently, so recognized columns can be named any of these:{' '}
-              <span className="font-medium text-slate-700">Name</span> (required), Owner Name / Contact Person, Contact Phone,
-              Address, City, District, Zone, State, Village (optional). Any other column in the file will be shown below so
+              <span className="font-medium text-slate-700">Name and Full Address</span> (required), Owner Name / Contact Person, Contact Phone,
+              Village, City, Taluka, District, PIN Code, Zone, State, Latitude and Longitude (optional). Any other column in the file will be shown below so
               you can choose to keep it as an extra detail on each shop.
             </p>
           </div>
@@ -2260,21 +2310,26 @@ export function ShopsPage() {
           {bulkExtraHeaders.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-3">
               <p className="text-xs font-medium text-amber-800 mb-2">
-                Found {bulkExtraHeaders.length} extra column{bulkExtraHeaders.length === 1 ? '' : 's'} in this file that aren't part of the standard fields. Keep them as additional details on each shop?
+                Found {bulkExtraHeaders.length} extra column{bulkExtraHeaders.length === 1 ? '' : 's'} in this file that aren't part of the standard fields. All are automatically kept as additional shop details. Use Skip only if you do not want a column imported.
               </p>
               <div className="space-y-1.5">
                 {bulkExtraHeaders.map((h) => (
-                  <label key={h} className="flex items-center gap-2 text-sm text-amber-900">
-                    <input
-                      type="checkbox"
-                      checked={!!bulkIncludedExtra[h]}
-                      onChange={(e) => setBulkIncludedExtra({ ...bulkIncludedExtra, [h]: e.target.checked })}
-                      className="rounded border-amber-300"
-                    />
-                    {h}
+                  <label key={h} className="flex flex-wrap items-center justify-between gap-2 text-sm text-amber-900">
+                    <span className="break-all font-medium">{h}</span>
+                    <select
+                      aria-label={`How should ${h} be handled?`}
+                      value={bulkIncludedExtra[h] === true ? 'keep' : bulkIncludedExtra[h] === false ? 'skip' : ''}
+                      onChange={(e) => setBulkIncludedExtra((current) => ({ ...current, [h]: e.target.value === 'keep' ? true : e.target.value === 'skip' ? false : null }))}
+                      className="max-w-full rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs"
+                    >
+                      <option value="">Choose action...</option>
+                      <option value="keep">Keep as shop detail</option>
+                      <option value="skip">Skip this column</option>
+                    </select>
                   </label>
                 ))}
               </div>
+
             </div>
           )}
 
@@ -2628,7 +2683,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const canAssign = profile?.role === 'agency_owner' || profile?.role === 'admin' || profile?.role === 'demo';
   const canCrudShop = profile?.role === 'agency_owner' || profile?.role === 'admin' || profile?.role === 'demo';
   const [detailEditOpen, setDetailEditOpen] = useState(false);
-  const [detailForm, setDetailForm] = useState({ name: '', owner_name: '', contact_phone: '', address: '', city: '', district: '', state: '', signage_language: '' });
+  const [detailForm, setDetailForm] = useState({ name: '', owner_name: '', contact_person_name: '', contact_phone: '', address: '', city: '', district: '', taluka: '', pincode: '', state: '', signage_language: '' });
   const [editWorkItem, setEditWorkItem] = useState<WorkItem | null>(null);
   type WorkItemForm = { work_type_id: string; work_type_name: string; po_line_item_id: string; material: string; materialOther: boolean; width: string; wUnit: string; height: string; hUnit: string; quantity: string };
   const BLANK_ITEM_FORM: WorkItemForm = { work_type_id: '', work_type_name: '', po_line_item_id: '', material: '', materialOther: false, width: '', wUnit: 'ft', height: '', hUnit: 'ft', quantity: '1' };
@@ -2747,8 +2802,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   useEffect(() => {
     if (!shop) return;
     setDetailForm({
-      name: shop.name || '', owner_name: shop.owner_name || '', contact_phone: shop.contact_phone || '',
-      address: shop.address || '', city: shop.city || '', district: shop.district || '', state: shop.state || '',
+      name: shop.name || '', owner_name: shop.owner_name || '', contact_person_name: shop.contact_person_name || '', contact_phone: shop.contact_phone || '',
+      address: shop.address || '', city: shop.city || '', district: shop.district || '', taluka: shop.taluka || '', pincode: shop.pincode || '', state: shop.state || '',
       signage_language: shop.signage_language || '',
     });
   }, [shop?.id, shop?.updated_at]);
@@ -2756,7 +2811,13 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const detailUpdateMutation = useMutation({
     mutationFn: async () => {
       if (!detailForm.name.trim()) throw new Error('Shop name is required.');
-      const { error } = await supabase.from('shops').update({ ...detailForm, name: detailForm.name.trim() }).eq('id', shopId);
+      if (!isUsableShopAddress(detailForm.address)) throw new Error('Enter the full shop address before saving.');
+      const locationChanged = !!shop && (['address','city','district','taluka','pincode','state'] as const)
+        .some((key) => detailForm[key].trim() !== String(shop[key] || '').trim());
+      const { error } = await supabase.from('shops').update({
+        ...detailForm, name: detailForm.name.trim(),
+        ...(locationChanged ? { latitude: null, longitude: null } : {}),
+      }).eq('id', shopId);
       if (error) throw error;
       await logAudit('shops', shopId, 'update', null, null, null, `Updated shop details: ${detailForm.name}`);
     },
@@ -2911,11 +2972,13 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         try {
           const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
           const path = `${orgId}/${surveyId}/${Date.now()}-${crypto.randomUUID()}-${i + 1}-${safeName}`;
-          const { error: upErr } = await supabase.storage.from('survey-photos').upload(path, file);
+          const evidenceFile = await stampImportedShopPhoto(file, shop || {});
+          const imagePath = path.replace(/\.[^.\/]+$/, '') + '-geotag.jpg';
+          const { error: upErr } = await supabase.storage.from('survey-photos').upload(imagePath, evidenceFile);
           if (upErr) throw upErr;
-          const { data: u } = supabase.storage.from('survey-photos').getPublicUrl(path);
-          const { data: photo, error: dbErr } = await supabase.from('survey_photos').insert({ organization_id: orgId, survey_id: surveyId, shop_id: shopId, storage_path: path, photo_url: u.publicUrl, photo_type: surveyPhotoType, caption: surveyPhotoCaption.trim() || `Survey photo ${i + 1}` }).select('id').single();
-          if (dbErr) { await supabase.storage.from('survey-photos').remove([path]); throw dbErr; }
+          const { data: u } = supabase.storage.from('survey-photos').getPublicUrl(imagePath);
+          const { data: photo, error: dbErr } = await supabase.from('survey_photos').insert({ organization_id: orgId, survey_id: surveyId, shop_id: shopId, storage_path: imagePath, photo_url: u.publicUrl, photo_type: surveyPhotoType, caption: surveyPhotoCaption.trim() || `Survey photo ${i + 1}` }).select('id').single();
+          if (dbErr) { await supabase.storage.from('survey-photos').remove([imagePath]); throw dbErr; }
           const mappedWorkItemId = surveyPhotoFileMap[i];
           if (mappedWorkItemId) {
             // Prefer the semantic link table when the migration is deployed. For older deployments,
@@ -2985,14 +3048,16 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         const file = installUploadFiles[i];
         const safe = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
         const path = `${orgId}/${jobId}/admin-${Date.now()}-${i}-${safe}`;
-        const up = await supabase.storage.from('installation-proof').upload(path, file);
+        const evidenceFile = await stampImportedShopPhoto(file, shop || {});
+        const imagePath = path.replace(/\.[^.\/]+$/, '') + '-geotag.jpg';
+        const up = await supabase.storage.from('installation-proof').upload(imagePath, evidenceFile);
         if (up.error) throw up.error;
-        const url = supabase.storage.from('installation-proof').getPublicUrl(path).data.publicUrl;
+        const url = supabase.storage.from('installation-proof').getPublicUrl(imagePath).data.publicUrl;
         const { error: insErr } = await supabase.from('installation_proofs').insert({
           organization_id: orgId, installation_job_id: jobId, shop_id: shopId, work_item_id: installUploadMap[i],
-          storage_path: path, photo_url: url, photo_type: 'installed', angle: 'other', caption: installUploadCaption || null,
+          storage_path: imagePath, photo_url: url, photo_type: 'installed', angle: 'other', caption: installUploadCaption || null,
         });
-        if (insErr) { await supabase.storage.from('installation-proof').remove([path]); throw insErr; }
+        if (insErr) { await supabase.storage.from('installation-proof').remove([imagePath]); throw insErr; }
       }
       setInstallUploadOpen(false); setInstallUploadFiles([]); setInstallUploadMap({}); setInstallUploadCaption('');
       await queryClient.invalidateQueries({ queryKey: ['shop-installations', shopId] });
@@ -3285,7 +3350,9 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
   const assignMutation = useMutation({
     mutationFn: async () => {
       if (!assignUserId || !assignModal || !shop) throw new Error('Pick a person to assign first.');
-      if (assignModal === 'surveyor' && shop.purchase_orders?.fulfillment_type === 'production_install') throw new Error('Survey is not required for Production & Installation. Select Design Review instead.');
+      if (!allowsShopAssignment(shop.purchase_orders?.fulfillment_type, assignModal)) {
+        throw new Error(`The ${assignModal} role is not applicable to this Work Order's fulfillment type.`);
+      }
 
       // Designers are owned by design_tasks rather than shop_assignments.
       // Keep one canonical task per shop and update/reassign it here so the
@@ -3627,8 +3694,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-3 text-xs sm:grid-cols-3 xl:grid-cols-5">
             {([
               ['Shop / site', shop.name], ['Client', shop.clients?.name], ['Project', shop.projects?.name],
-              ['Owner', shop.owner_name], ['Phone', shop.contact_phone], ['Signage language', shop.signage_language],
-              ['Address', shop.address], ['Village', shop.village], ['City', shop.city], ['District', shop.district],
+              ['Owner', shop.owner_name], ['Owner Number', shop.owner_phone], ['Contact Person', shop.contact_person_name], ['Contact Person Number', shop.contact_phone], ['Signage language', shop.signage_language],
+              ['Address', shop.address], ['Village', shop.village], ['City', shop.city], ['Taluka', shop.taluka], ['District', shop.district], ['PIN Code', shop.pincode],
               ['State', shop.state], ['Zone', shop.zones?.name || shop.zone],
               ['Fulfilment', shop.purchase_orders?.fulfillment_type ? String(shop.purchase_orders.fulfillment_type).replace(/_/g, ' ') : ''],
               ['Created', shop.created_at ? new Date(shop.created_at).toLocaleDateString('en-IN') : ''],
@@ -3639,7 +3706,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           <div className="mt-3 flex flex-wrap gap-3 text-xs">
             {shop.contact_phone && <SecureAnchor href={`tel:${shop.contact_phone}`} className="text-blue-700 underline">Call shop</SecureAnchor>}
             {shop.contact_phone && String(shop.contact_phone).replace(/\D/g, '').length >= 10 && <SecureAnchor href={`https://wa.me/${String(shop.contact_phone).replace(/\D/g, '').length === 10 ? '91' : ''}${String(shop.contact_phone).replace(/\D/g, '')}`} target="_blank" rel="noreferrer" className="text-blue-700 underline">WhatsApp</SecureAnchor>}
-            {shop.latitude != null && shop.longitude != null && <SecureAnchor href={`https://www.google.com/maps?q=${shop.latitude},${shop.longitude}`} target="_blank" rel="noreferrer" className="text-blue-700 underline">View on map</SecureAnchor>}
+            {shopMapsUrl(shop) && <SecureAnchor href={shopMapsUrl(shop)!} target="_blank" rel="noreferrer" className="text-blue-700 underline">{shop.latitude != null && shop.longitude != null ? 'View GPS pin on map' : 'Search address on map (verify location)'}</SecureAnchor>}
           </div>
         </details>
       </div>
@@ -3929,11 +3996,12 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       <Modal open={detailEditOpen} onClose={() => setDetailEditOpen(false)} title="Edit Shop Details" size="lg">
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3"><Input label="Shop / Site Name" value={detailForm.name} onChange={(v) => setDetailForm({ ...detailForm, name: v })} required /><Input label="Owner Name" value={detailForm.owner_name} onChange={(v) => setDetailForm({ ...detailForm, owner_name: v })} /></div>
-          <div className="grid grid-cols-2 gap-3"><Input label="Phone" value={detailForm.contact_phone} onChange={(v) => setDetailForm({ ...detailForm, contact_phone: v })} /><Input label="Signage Language" value={detailForm.signage_language} onChange={(v) => setDetailForm({ ...detailForm, signage_language: v })} /></div>
-          <Textarea label="Address" value={detailForm.address} onChange={(v) => setDetailForm({ ...detailForm, address: v })} rows={2} />
-          <div className="grid grid-cols-3 gap-3"><Input label="City" value={detailForm.city} onChange={(v) => setDetailForm({ ...detailForm, city: v })} /><Input label="District" value={detailForm.district} onChange={(v) => setDetailForm({ ...detailForm, district: v })} /><Input label="State" value={detailForm.state} onChange={(v) => setDetailForm({ ...detailForm, state: v })} /></div>
+          <div className="grid grid-cols-2 gap-3"><Input label="Contact Person" value={detailForm.contact_person_name} onChange={(v) => setDetailForm({ ...detailForm, contact_person_name: v })} /><Input label="Phone" value={detailForm.contact_phone} onChange={(v) => setDetailForm({ ...detailForm, contact_phone: v })} /><Input label="Signage Language" value={detailForm.signage_language} onChange={(v) => setDetailForm({ ...detailForm, signage_language: v })} /></div>
+          <Textarea label="Full Address (required)" value={detailForm.address} onChange={(v) => setDetailForm({ ...detailForm, address: v })} rows={2} />
+          <div className="grid grid-cols-3 gap-3"><Input label="City (optional)" value={detailForm.city} onChange={(v) => setDetailForm({ ...detailForm, city: v })} /><Input label="District (optional)" value={detailForm.district} onChange={(v) => setDetailForm({ ...detailForm, district: v })} /><Input label="State (optional)" value={detailForm.state} onChange={(v) => setDetailForm({ ...detailForm, state: v })} /></div>
+          <div className="grid grid-cols-2 gap-3"><Input label="Taluka / Tehsil (optional)" value={detailForm.taluka} onChange={(v) => setDetailForm({ ...detailForm, taluka: v })} /><Input label="PIN Code (optional)" value={detailForm.pincode} onChange={(v) => setDetailForm({ ...detailForm, pincode: v })} /></div>
           {detailUpdateMutation.isError && <p className="text-sm text-red-600">{(detailUpdateMutation.error as Error).message}</p>}
-          <button onClick={() => detailUpdateMutation.mutate()} disabled={detailUpdateMutation.isPending || !detailForm.name.trim()} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{detailUpdateMutation.isPending ? 'Saving...' : 'Save Shop Changes'}</button>
+          <button onClick={() => detailUpdateMutation.mutate()} disabled={detailUpdateMutation.isPending || !detailForm.name.trim() || !isUsableShopAddress(detailForm.address)} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg disabled:opacity-50">{detailUpdateMutation.isPending ? 'Saving...' : 'Save Shop Changes'}</button>
         </div>
       </Modal>
 

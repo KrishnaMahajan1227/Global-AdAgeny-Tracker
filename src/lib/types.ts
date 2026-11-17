@@ -215,10 +215,14 @@ export interface Shop {
   project_id: string | null;
   name: string;
   owner_name: string | null;
+  contact_person_name?: string | null;
+  owner_phone?: string | null;
   contact_phone: string | null;
   address: string | null;
   city: string | null;
   district: string | null;
+  taluka?: string | null;
+  pincode?: string | null;
   village: string | null;
   zone: string | null;
   zone_id: string | null;

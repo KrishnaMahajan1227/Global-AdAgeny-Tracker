@@ -87,12 +87,17 @@ export function buildAddressQuery(parts: {
   address?: string | null;
   city?: string | null;
   district?: string | null;
+  taluka?: string | null;
+  village?: string | null;
+  pincode?: string | null;
   state?: string | null;
 }): string {
-  return [parts.address, parts.district, parts.city, parts.state, 'India']
+  const locationParts = [parts.address, parts.village, parts.taluka, parts.city, parts.district, parts.state, parts.pincode]
     .map((p) => (p || '').trim())
-    .filter(Boolean)
-    .join(', ');
+    .filter(Boolean);
+  // Do NOT geocode a country-level default when no usable shop address exists.
+  // That would create a false location pin in the middle of India.
+  return locationParts.length ? [...locationParts, 'India'].join(', ') : '';
 }
 
 export interface GeocodableShop {
@@ -102,6 +107,9 @@ export interface GeocodableShop {
   address?: string | null;
   city?: string | null;
   district?: string | null;
+  taluka?: string | null;
+  village?: string | null;
+  pincode?: string | null;
   state?: string | null;
 }
 

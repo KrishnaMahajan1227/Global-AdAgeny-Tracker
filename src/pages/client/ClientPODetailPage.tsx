@@ -10,7 +10,7 @@ import { LineItemProgressChart } from '@/components/LineItemProgressChart';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
 import { InstallationPhotoGrid } from '@/components/InstallationPhotoGrid';
 import { ShopForm, emptyShopFormValues } from '@/components/ShopForm';
-import { findShopHeaderRow, findExtraHeaders, buildShopRows, resolveZoneIds, type ParsedShopRow } from '@/lib/shopBulkUpload';
+import { findExtraHeaders, validateNewShopBulkHeaders, buildShopRows, resolveZoneIds, findShopWorkbookTable, assertBulkShopRows, buildBulkShopRecords, findMissingShopNames, shopMapsUrl, type ParsedShopRow, isUsableShopAddress } from '@/lib/shopBulkUpload';
 import { formatDim } from '@/lib/units';
 import { logAudit, notifyLinkedOrg } from '@/lib/helpers';
 import type { PurchaseOrder, ClientPOLineItemProgress, SurveyPhoto, BoardMarking, WorkItem } from '@/lib/types';
@@ -29,9 +29,9 @@ import { ClientPoSiteMap } from './ClientPoSiteMap';
 
 type PoRow = PurchaseOrder & { agency_org: { name: string } | null };
 type ShopRow = {
-  id: string; name: string; owner_name: string | null; contact_phone: string | null;
-  address: string | null; city: string | null; district: string | null; village: string | null;
-  zone: string | null; state: string | null;
+  id: string; name: string; owner_name: string | null; contact_person_name: string | null; owner_phone: string | null; contact_phone: string | null;
+  address: string | null; city: string | null; district: string | null; taluka: string | null; pincode: string | null; village: string | null;
+  zone: string | null; zone_id: string | null; state: string | null;
   status: string; latitude: number | null; longitude: number | null;
   extra_details: Record<string, string> | null;
 };
@@ -103,7 +103,7 @@ export default function ClientPODetailPage() {
   const [bulkHeaders, setBulkHeaders] = useState<string[]>([]);
   const [bulkHeaderRowIndex, setBulkHeaderRowIndex] = useState(0);
   const [bulkExtraHeaders, setBulkExtraHeaders] = useState<string[]>([]);
-  const [bulkIncludedExtra, setBulkIncludedExtra] = useState<Record<string, boolean>>({});
+  const [bulkIncludedExtra, setBulkIncludedExtra] = useState<Record<string, boolean | null>>({});
   const [bulkFileName, setBulkFileName] = useState('');
   const [bulkError, setBulkError] = useState('');
 
@@ -154,7 +154,7 @@ export default function ClientPODetailPage() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('shops')
-        .select('id, name, owner_name, contact_phone, address, city, district, village, zone, state, status, latitude, longitude, extra_details')
+        .select('id, name, owner_name, contact_person_name, owner_phone, contact_phone, address, city, district, taluka, pincode, village, zone, zone_id, state, status, latitude, longitude, extra_details')
         .eq('purchase_order_id', poId)
         .order('created_at');
       if (error) throw error;
@@ -375,24 +375,35 @@ export default function ClientPODetailPage() {
   // existing site is only offered per-shop, while that specific site is
   // still 'pending' (no field work recorded on it yet) — RLS-enforced,
   // migration 0053.
-  const canAddShop = po?.origin === 'client_created';
+  const canAddShop = po?.origin === 'client_created' && po.fulfillment_type !== 'direct_install';
   const canModifyShop = (shop: ShopRow) => po?.origin === 'client_created' && shop.status === 'pending';
 
   const addShopMutation = useMutation({
     mutationFn: async () => {
-      if (!po || !agencyLink?.agency_client_id) throw new Error('Could not resolve this agency — try again in a moment.');
+      if (!isUsableShopAddress(shopForm.address)) throw new Error('Enter the full shop address (building, road/locality and landmark if available).');
+      if (po?.fulfillment_type === 'direct_install') throw new Error('On-site Execution requires the installer field flow with GPS and photos; a pre-created site cannot replace it.');
+      if (!po || po.origin !== 'client_created' || !po.assigned_agency_id || !agencyLink?.agency_client_id) throw new Error('Could not resolve this client-created Work Order and agency.');
+      const zoneIds = await resolveZoneIds(po.assigned_agency_id, po.project_id || null, [shopForm.zone]);
+      const zone_id = shopForm.zone.trim() ? zoneIds.get(shopForm.zone.trim().toLocaleLowerCase()) : null;
+      if (shopForm.zone.trim() && !zone_id) throw new Error('Could not map the selected zone to this Work Order.');
       const { error } = await supabase.from('shops').insert({
         organization_id: po.assigned_agency_id,
         client_id: agencyLink.agency_client_id,
+        project_id: po.project_id || null,
         purchase_order_id: po.id,
         name: shopForm.name.trim(),
         owner_name: shopForm.owner_name || null,
+        contact_person_name: shopForm.contact_person_name || null,
+        owner_phone: shopForm.owner_phone || null,
         contact_phone: shopForm.contact_phone || null,
         address: shopForm.address || null,
         village: shopForm.village || null,
         city: shopForm.city || null,
         district: shopForm.district || null,
+        taluka: shopForm.taluka || null,
+        pincode: shopForm.pincode || null,
         zone: shopForm.zone || null,
+        zone_id: zone_id || null,
         state: shopForm.state || null,
       });
       if (error) throw error;
@@ -407,15 +418,34 @@ export default function ClientPODetailPage() {
   const editShopMutation = useMutation({
     mutationFn: async () => {
       if (!editShopTarget) return;
+      if (!isUsableShopAddress(shopForm.address)) throw new Error('Enter the full shop address (building, road/locality and landmark if available).');
+      // A changed postal location invalidates the old GPS pin. Never show
+      // an outdated coordinate as the newly edited shop's real location.
+      const locationChanged = ['address','village','city','district','taluka','pincode','state']
+        .some((key) => String(shopForm[key as keyof typeof shopForm] || '').trim() !==
+          String(editShopTarget[key as keyof typeof editShopTarget] || '').trim());
+      let zone_id = editShopTarget.zone_id;
+      if (shopForm.zone.trim().toLocaleLowerCase() !== (editShopTarget.zone || '').trim().toLocaleLowerCase()) {
+        if (!po?.assigned_agency_id) throw new Error('Work Order agency could not be verified.');
+        const zoneIds = await resolveZoneIds(po.assigned_agency_id, po.project_id || null, [shopForm.zone]);
+        zone_id = shopForm.zone.trim() ? (zoneIds.get(shopForm.zone.trim().toLocaleLowerCase()) || null) : null;
+        if (shopForm.zone.trim() && !zone_id) throw new Error('Could not map the selected zone to this Work Order.');
+      }
       const { error } = await supabase.from('shops').update({
+        ...(locationChanged ? { latitude: null, longitude: null } : {}),
         name: shopForm.name.trim(),
         owner_name: shopForm.owner_name || null,
+        contact_person_name: shopForm.contact_person_name || null,
+        owner_phone: shopForm.owner_phone || null,
         contact_phone: shopForm.contact_phone || null,
         address: shopForm.address || null,
         village: shopForm.village || null,
         city: shopForm.city || null,
         district: shopForm.district || null,
+        taluka: shopForm.taluka || null,
+        pincode: shopForm.pincode || null,
         zone: shopForm.zone || null,
+        zone_id: zone_id || null,
         state: shopForm.state || null,
       }).eq('id', editShopTarget.id);
       if (error) throw error;
@@ -450,37 +480,31 @@ export default function ClientPODetailPage() {
 
   const bulkAddShopsMutation = useMutation({
     mutationFn: async () => {
-      if (!po || !agencyLink?.agency_client_id) throw new Error('Could not resolve this agency — try again in a moment.');
-      if (bulkParsedRows.length === 0) throw new Error('No valid rows found — every row needs at least a Name.');
-      // Resolve every distinct "Zone" text in the sheet to a real zone_id
-      // under the AGENCY's org (migration 0065 allows this cross-org
-      // read/create for a client_admin on their own client_created PO) so
-      // these shops are actually zone-filterable for the agency, not just
-      // zone-labeled.
-      const zoneIds = await resolveZoneIds(po.assigned_agency_id!, po.project_id || null, bulkParsedRows.map((r) => r.known.zone));
-      const rows = bulkParsedRows.map(({ known, extra }) => ({
-        organization_id: po.assigned_agency_id,
-        client_id: agencyLink.agency_client_id,
-        purchase_order_id: po.id,
-        name: known.name,
-        owner_name: known.owner_name || null,
-        contact_phone: known.contact_phone || null,
-        address: known.address || null,
-        village: known.village || null,
-        city: known.city || null,
-        district: known.district || null,
-        zone: known.zone || null,
-        zone_id: known.zone ? zoneIds.get(known.zone.trim().toLowerCase()) || null : null,
-        state: known.state || null,
-        extra_details: extra,
-      }));
+      if (po?.fulfillment_type === 'direct_install') throw new Error('On-site Execution requires the installer field flow with GPS and photos; a pre-created site cannot replace it.');
+      if (!po || po.origin !== 'client_created' || !po.assigned_agency_id || !agencyLink?.agency_client_id) {
+        throw new Error('Could not resolve an active agency for this client-created Work Order.');
+      }
+      assertBulkShopRows(bulkParsedRows);
+      const scope = {
+        organizationId: po.assigned_agency_id,
+        clientId: agencyLink.agency_client_id,
+        projectId: po.project_id || null,
+        purchaseOrderId: po.id,
+      };
+      const zoneIds = await resolveZoneIds(scope.organizationId, scope.projectId, bulkParsedRows.map((r) => r.known.zone));
+      const rows = buildBulkShopRecords(bulkParsedRows, scope, zoneIds);
       const { error } = await supabase.from('shops').insert(rows);
       if (error) throw error;
       await logAudit('shops', po.id, 'insert', null, null, null, `Bulk-uploaded ${rows.length} sites from Excel`);
-      return rows.length;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['client-po-shops', poId] });
+      queryClient.invalidateQueries({ queryKey: ['client-shops-all'] });
+      queryClient.invalidateQueries({ queryKey: ['client-overview-shop-status-counts', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['client-overview-shops-geo', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['client-reports-shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['client-map-shops', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['client-campaigns-shops-rollup', orgId] });
       resetBulkState();
       setBulkUploadOpen(false);
     },
@@ -502,9 +526,9 @@ export default function ClientPODetailPage() {
   }
   function openEditShop(shop: ShopRow) {
     setShopForm({
-      name: shop.name, owner_name: shop.owner_name || '', contact_phone: shop.contact_phone || '',
+      name: shop.name, owner_name: shop.owner_name || '', contact_person_name: shop.contact_person_name || '', owner_phone: shop.owner_phone || '', contact_phone: shop.contact_phone || '',
       address: shop.address || '', village: shop.village || '', city: shop.city || '',
-      district: shop.district || '', zone: shop.zone || '', state: shop.state || '',
+      district: shop.district || '', taluka: shop.taluka || '', pincode: shop.pincode || '', zone: shop.zone || '', state: shop.state || '',
     });
     setEditShopTarget(shop);
   }
@@ -517,22 +541,43 @@ export default function ClientPODetailPage() {
       try {
         const data = e.target?.result;
         const wb = XLSX.read(data, { type: 'binary' });
-        const sheet = wb.Sheets[wb.SheetNames[0]];
-        const aoa = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1 });
-        const found = findShopHeaderRow(aoa);
+        const matched = findShopWorkbookTable(wb.SheetNames, (sheetName) =>
+          XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[sheetName], { header: 1, range: 0, raw: false, blankrows: true })
+        );
+        const aoa = matched?.aoa || [];
+        const found = matched ? { headerRowIndex: matched.headerRowIndex, headers: matched.headers } : null;
         if (!found) {
           setBulkError('Could not find a "Name" column in this file — check the file has a header row with at least a Name column.');
           setBulkAoa(null);
           return;
         }
-        const extras = findExtraHeaders(found.headers);
+        // Validate required/duplicate headers. Unknown client-specific columns
+        // are automatically saved in shop.extra_details, not rejected.
+        validateNewShopBulkHeaders(found.headers);
+        const missingNames = findMissingShopNames(aoa, found.headerRowIndex, found.headers);
+        if (missingNames.length) {
+          setBulkError(`Missing shop Name in spreadsheet row${missingNames.length === 1 ? '' : 's'} ${missingNames.slice(0, 10).join(', ')}${missingNames.length > 10 ? '…' : ''}. Correct those rows before uploading.`);
+          setBulkAoa(null);
+          return;
+        }
+        // Prompt before upload; never silently create shops missing a real address
+        // or with a partial/invalid GPS pin. Optional fields remain blank.
+        try {
+          const previewRows = buildShopRows(aoa, found.headerRowIndex, found.headers, new Set<string>());
+          assertBulkShopRows(previewRows);
+        } catch (validationError) {
+          setBulkError(validationError instanceof Error ? validationError.message : 'Check shop details in the Excel file.');
+          setBulkAoa(null);
+          return;
+        }
+        const extras = findExtraHeaders(found.headers, aoa, found.headerRowIndex);
         setBulkAoa(aoa);
         setBulkHeaders(found.headers);
         setBulkHeaderRowIndex(found.headerRowIndex);
         setBulkExtraHeaders(extras);
         setBulkIncludedExtra(Object.fromEntries(extras.map((h) => [h, true])));
-      } catch {
-        setBulkError('Could not read this file. Make sure it\'s a valid .xlsx or .csv file.');
+      } catch (err) {
+        setBulkError(err instanceof Error ? err.message : 'Could not read this file. Make sure it\'s a valid .xlsx or .csv file.');
         setBulkAoa(null);
       }
     };
@@ -558,7 +603,7 @@ export default function ClientPODetailPage() {
     const q = shopSearch.trim().toLowerCase();
     return (shops || []).filter((s) => {
       if (q) {
-        const haystack = [s.name, s.city, s.district, s.village, s.zone, s.address, s.owner_name, s.contact_phone].filter(Boolean).join(' ').toLowerCase();
+        const haystack = [s.name, s.city, s.district, s.village, s.zone, s.address, s.owner_name, s.owner_phone, s.contact_phone].filter(Boolean).join(' ').toLowerCase();
         if (!haystack.includes(q)) return false;
       }
       if (shopStatusFilter && s.status !== shopStatusFilter) return false;
@@ -797,6 +842,7 @@ export default function ClientPODetailPage() {
               </div>
             )}
           </div>
+          {po.fulfillment_type === 'direct_install' && <p className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">On-site Execution sites are created by the assigned installer in the field, with GPS and work photos. Pre-creating sites from Excel would bypass this workflow.</p>}
 
           <Card className="p-4 mb-4">
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
@@ -1069,7 +1115,7 @@ export default function ClientPODetailPage() {
         {addShopMutation.isError && <p className="text-sm text-red-600 mt-3">{(addShopMutation.error as Error).message}</p>}
         <button
           onClick={() => addShopMutation.mutate()}
-          disabled={addShopMutation.isPending || !shopForm.name.trim()}
+          disabled={addShopMutation.isPending || !shopForm.name.trim() || !isUsableShopAddress(shopForm.address)}
           className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition disabled:opacity-50 mt-4"
         >
           {addShopMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
@@ -1083,7 +1129,7 @@ export default function ClientPODetailPage() {
         {editShopMutation.isError && <p className="text-sm text-red-600 mt-3">{(editShopMutation.error as Error).message}</p>}
         <button
           onClick={() => editShopMutation.mutate()}
-          disabled={editShopMutation.isPending || !shopForm.name.trim()}
+          disabled={editShopMutation.isPending || !shopForm.name.trim() || !isUsableShopAddress(shopForm.address)}
           className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition disabled:opacity-50 mt-4"
         >
           {editShopMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
@@ -1094,11 +1140,14 @@ export default function ClientPODetailPage() {
       {/* Bulk Upload via Excel */}
       <Modal open={bulkUploadOpen} onClose={() => { setBulkUploadOpen(false); resetBulkState(); }} title="Bulk Upload Shops" size="lg">
         <div className="space-y-4">
+          <a href="/templates/AdRoute_Universal_Shops_Bulk_Upload_Template.xlsx" download="AdRoute_Shops_Flexible_Template.xlsx" className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100">
+            Download Shops Excel Template (.xlsx)
+          </a>
+          <p className="text-xs text-slate-500">Fill the first sheet: Shop Name and Address are required; all other common fields are optional. You can append FMM/FSM Name or any other custom heading—populated values are saved automatically as Additional Shop Details. GPS is captured and verified during live field photography.</p>
           <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5">
             <p className="text-xs text-slate-500">
               Upload a .xlsx or .csv file with one row per site. Always-recognized columns (any order, any position in the file):{' '}
-              <span className="font-medium text-slate-700">Name</span> (required), Owner Name / Contact Person, Contact Phone, Address, City, District, Zone, State, Village (optional).
-              Any other column in your file will be shown below so you can choose whether to keep it.
+              <span className="font-medium text-slate-700">Name and Full Address</span> (required), Owner Number, Contact Person, Contact Person Number, Zone, State, Village, Taluka, City and District (optional). Additional columns are kept automatically as shop details.
             </p>
           </div>
 
@@ -1114,21 +1163,26 @@ export default function ClientPODetailPage() {
           {bulkExtraHeaders.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-3">
               <p className="text-xs font-medium text-amber-800 mb-2">
-                Found {bulkExtraHeaders.length} extra column{bulkExtraHeaders.length === 1 ? '' : 's'} in your file that aren't part of the standard fields. Keep them as additional details on each site?
+                Found {bulkExtraHeaders.length} extra column{bulkExtraHeaders.length === 1 ? '' : 's'} in your file that aren't part of the standard fields. All are automatically kept as additional site details. Use Skip only if you do not want a column imported.
               </p>
               <div className="space-y-1.5">
                 {bulkExtraHeaders.map((h) => (
-                  <label key={h} className="flex items-center gap-2 text-sm text-amber-900">
-                    <input
-                      type="checkbox"
-                      checked={!!bulkIncludedExtra[h]}
-                      onChange={(e) => setBulkIncludedExtra({ ...bulkIncludedExtra, [h]: e.target.checked })}
-                      className="rounded border-amber-300"
-                    />
-                    {h}
+                  <label key={h} className="flex flex-wrap items-center justify-between gap-2 text-sm text-amber-900">
+                    <span className="break-all font-medium">{h}</span>
+                    <select
+                      aria-label={`How should ${h} be handled?`}
+                      value={bulkIncludedExtra[h] === true ? 'keep' : bulkIncludedExtra[h] === false ? 'skip' : ''}
+                      onChange={(e) => setBulkIncludedExtra((current) => ({ ...current, [h]: e.target.value === 'keep' ? true : e.target.value === 'skip' ? false : null }))}
+                      className="max-w-full rounded-md border border-amber-300 bg-white px-2 py-1.5 text-xs"
+                    >
+                      <option value="">Choose action...</option>
+                      <option value="keep">Keep as shop detail</option>
+                      <option value="skip">Skip this column</option>
+                    </select>
                   </label>
                 ))}
               </div>
+
             </div>
           )}
 
@@ -1219,9 +1273,12 @@ export default function ClientPODetailPage() {
                 {drawerShop.address && <DetailRow label="Address" value={drawerShop.address} />}
                 {drawerShop.village && <DetailRow label="Village" value={drawerShop.village} />}
                 {drawerShop.city && <DetailRow label="City" value={drawerShop.city} />}
+                {drawerShop.taluka && <DetailRow label="Taluka" value={drawerShop.taluka} />}
                 {drawerShop.district && <DetailRow label="District" value={drawerShop.district} />}
+                {drawerShop.pincode && <DetailRow label="PIN Code" value={drawerShop.pincode} />}
                 {drawerShop.zone && <DetailRow label="Zone" value={drawerShop.zone} />}
                 {drawerShop.state && <DetailRow label="State" value={drawerShop.state} />}
+                {shopMapsUrl(drawerShop) && <a href={shopMapsUrl(drawerShop)!} target="_blank" rel="noopener noreferrer" className="inline-block text-xs font-medium text-blue-700 underline">{drawerShop.latitude != null && drawerShop.longitude != null ? 'View GPS pin on map' : 'Search address on map (verify location)'}</a>}
                 {!drawerShop.address && !drawerShop.village && !drawerShop.city && !drawerShop.district && !drawerShop.zone && !drawerShop.state && (
                   <p className="text-xs text-slate-400">No location details added.</p>
                 )}
@@ -1232,8 +1289,10 @@ export default function ClientPODetailPage() {
               <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Contact</h3>
               <dl className="space-y-1.5 text-sm">
                 {drawerShop.owner_name && <DetailRow label="Owner" value={drawerShop.owner_name} />}
-                {drawerShop.contact_phone && <DetailRow label="Phone" value={drawerShop.contact_phone} />}
-                {!drawerShop.owner_name && !drawerShop.contact_phone && <p className="text-xs text-slate-400">No contact details added.</p>}
+                {drawerShop.contact_person_name && <DetailRow label="Contact Person" value={drawerShop.contact_person_name} />}
+                {drawerShop.owner_phone && <DetailRow label="Owner Number" value={drawerShop.owner_phone} />}
+                {drawerShop.contact_phone && <DetailRow label="Contact Person Number" value={drawerShop.contact_phone} />}
+                {!drawerShop.owner_name && !drawerShop.owner_phone && !drawerShop.contact_phone && <p className="text-xs text-slate-400">No contact details added.</p>}
               </dl>
             </div>
 

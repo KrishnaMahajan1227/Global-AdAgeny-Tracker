@@ -1,5 +1,6 @@
 import { SecureImage, SecureAnchor } from '@/lib/secureMedia';
 import { FieldNavigation } from '@/components/FieldNavigation';
+import { ShopAdditionalDetails } from '@/components/ShopAdditionalDetails';
 import { fieldNotice, fieldConfirm } from '@/lib/fieldDialogs';
 import { loadFieldAssignments, loadAssignedFieldShop } from '@/lib/fieldAssignments';
 import { MarkedPhotoGrid } from '@/components/MarkedPhotoGrid';
@@ -18,7 +19,7 @@ import {
 import { syncAllPendingDrafts, syncDraft } from '@/lib/syncManager';
 import { SurveyCorrectionFixer } from '@/components/SurveyCorrectionFixer';
 import { CameraCapture } from '@/components/CameraCapture';
-import { stampGeoTag } from '@/lib/geoStamp';
+import { stampGeoTag, formatGeoStampAddress, type PhotoCaptureMeta } from '@/lib/geoStamp';
 import { capturePhotoLocation } from '@/lib/captureLocation';
 import { VoiceMicButton, VoiceSizeButton } from '@/components/VoiceMicButton';
 import { BoardMarkerCanvas } from '@/components/BoardMarkerCanvas';
@@ -79,6 +80,9 @@ export function navigateToShop(shop: {
   latitude?: number | null;
   longitude?: number | null;
   address?: string | null;
+  village?: string | null;
+  taluka?: string | null;
+  pincode?: string | null;
   city?: string | null;
   district?: string | null;
   state?: string | null;
@@ -89,7 +93,7 @@ export function navigateToShop(shop: {
     window.open(`https://www.google.com/maps/dir/?api=1&destination=${shop.latitude},${shop.longitude}`, '_blank');
     return;
   }
-  const query = buildAddressQuery({ address: shop.address, city: shop.city, district: shop.district, state: shop.state }) || shop.name || '';
+  const query = buildAddressQuery({ address: shop.address, village: shop.village, taluka: shop.taluka, pincode: shop.pincode, city: shop.city, district: shop.district, state: shop.state }) || shop.name || '';
   if (query) {
     window.open(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(query)}`, '_blank');
   } else {
@@ -1036,14 +1040,15 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   // (see currentPhotoLocalId) — so marking a board happens right after
   // taking its photo, not as a separate step the surveyor has to remember
   // to come back and do for every photo.
-  async function handlePhotoCaptured(dataUrl: string, fileName: string) {
-    const photoGps = await capturePhotoLocation(gps);
+  async function handlePhotoCaptured(dataUrl: string, fileName: string, meta?: PhotoCaptureMeta) {
+    const photoGps = meta?.source === 'camera' ? await capturePhotoLocation(null) : null;
     if (photoGps) { setGps(photoGps); setGpsStatus('captured'); }
     try {
       dataUrl = await stampGeoTag(dataUrl, {
         siteName: shop?.name,
-        addressLine: [shop?.address, shop?.city, shop?.state].filter(Boolean).join(', '),
+        addressLine: formatGeoStampAddress(shop),
         lat: photoGps?.lat ?? null, lng: photoGps?.lng ?? null, accuracy: photoGps?.accuracy ?? null,
+        timestamp: meta?.capturedAt || new Date(), timestampLabel: meta?.source === 'camera' ? 'Captured' : 'Imported',
       });
     } catch (err) { console.warn('Survey photo stamping failed', err); }
     const draftPhoto: DraftPhoto = {
@@ -1051,7 +1056,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
       dataUrl,
       fileName,
       photoType: 'survey',
-      captureLat: photoGps?.lat ?? null, captureLng: photoGps?.lng ?? null, captureAccuracy: photoGps?.accuracy ?? null, capturedAt: new Date().toISOString(),
+      captureLat: photoGps?.lat ?? null, captureLng: photoGps?.lng ?? null, captureAccuracy: photoGps?.accuracy ?? null, capturedAt: meta?.source === 'camera' ? meta.capturedAt.toISOString() : undefined,
       uploaded: false,
     };
     const nextPhotos = [...photos, draftPhoto];
@@ -1310,7 +1315,8 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
           <div className="space-y-4">
             {shop && <Card className="p-3">
               <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-semibold text-slate-900 truncate">{shop.name}</p><p className="mt-0.5 text-xs text-slate-600 truncate">{shop.clients?.name || 'Client'}{shop.purchase_orders ? ` · ${shop.purchase_orders.name || shop.purchase_orders.po_number || 'Work Order'}` : ''}</p></div><button type="button" onClick={() => navigateToShop(shop)} className="text-xs text-blue-600 flex items-center gap-1"><Navigation className="w-3.5 h-3.5"/> Map</button></div>
-              <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]"><div className="rounded-xl bg-slate-50 px-2.5 py-2 text-slate-600"><p className="font-medium text-slate-500">Address</p><p className="mt-0.5 line-clamp-2">{[shop.address, shop.city, shop.district, shop.state].filter(Boolean).join(', ') || 'Not entered'}</p></div><div className={`rounded-xl px-2.5 py-2 ${gps ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}><p className="font-medium opacity-80">Device GPS</p><p className="mt-0.5">{gps ? `${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)} (±${Math.round(gps.accuracy)}m)` : 'Awaiting location permission'}</p></div></div>
+              <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]"><div className="rounded-xl bg-slate-50 px-2.5 py-2 text-slate-600"><p className="font-medium text-slate-500">Address</p><p className="mt-0.5 line-clamp-2">{[shop.address, shop.village, shop.taluka, shop.city, shop.district, shop.state, shop.pincode].filter(Boolean).join(', ') || 'Not entered'}</p></div><div className={`rounded-xl px-2.5 py-2 ${gps ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}><p className="font-medium opacity-80">Device GPS</p><p className="mt-0.5">{gps ? `${gps.lat.toFixed(5)}, ${gps.lng.toFixed(5)} (±${Math.round(gps.accuracy)}m)` : 'Awaiting location permission'}</p></div></div>
+              <ShopAdditionalDetails details={shop.extra_details} />
               {lastReview && <p className={lastReview.status === 'rejected' ? 'mt-2 text-xs text-red-700' : 'mt-2 text-xs text-amber-700'}>{lastReview.status === 'rejected' ? 'Rejected' : 'Redo'}: {lastReview.review_note || 'See review details'}</p>}
               {!!correctionTasks?.length && <p className="mt-1 text-xs text-amber-700">Redo requested for {correctionTasks.length} specific item(s); approved items remain unchanged.</p>}
             </Card>}
@@ -1376,7 +1382,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
                     const file = e.target.files?.[0];
                     if (!file) return;
                     const reader = new FileReader();
-                    reader.onload = () => handlePhotoCaptured(reader.result as string, file.name);
+                    reader.onload = () => handlePhotoCaptured(reader.result as string, file.name, { source: 'gallery', capturedAt: new Date() });
                     reader.readAsDataURL(file);
                     e.target.value = '';
                   }}

@@ -7,9 +7,10 @@ import { STATUS_LABELS } from '@/lib/types';
 import { mapPinBucket, MAP_PIN_COLORS, MAP_PIN_LABELS, MapPinBucket } from '@/lib/clientPortal';
 import { AlertCircle, MapPin, X, Image as ImageIcon, Loader2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
+import { shopMapsUrl } from '@/lib/shopBulkUpload';
 
 type MapShop = {
-  id: string; name: string; address: string | null; city: string | null; state: string | null;
+  id: string; name: string; address: string | null; city: string | null; state: string | null; district?: string | null; taluka?: string | null; pincode?: string | null;
   status: string; latitude: number | null; longitude: number | null;
 };
 type PhotoRow = { id: string; photo_url: string; caption: string | null; photo_type: string };
@@ -37,6 +38,7 @@ export function ClientPoSiteMap({ shops, fulfillmentType, receiptRequired = fals
 
   const geoShops = useMemo(() => shops.filter((s) => s.latitude != null && s.longitude != null), [shops]);
   const selectedShop = geoShops.find((s) => s.id === selectedShopId) || null;
+  const addressOnlyShops = useMemo(() => shops.filter((s) => (s.latitude == null || s.longitude == null) && !!s.address?.trim()), [shops]);
 
   const { data: selectedPhotos, isLoading: photosLoading } = useQueryShopPhotos(selectedShopId);
 
@@ -92,7 +94,13 @@ export function ClientPoSiteMap({ shops, fulfillmentType, receiptRequired = fals
           <AlertCircle className="w-5 h-5" />
           <p className="font-medium">Map isn't configured</p>
         </div>
-        <p className="text-sm text-slate-500">Ask your agency to configure the map for this platform.</p>
+        <p className="text-sm text-slate-500">Interactive pins require a Google Maps API key. You can still search each shop address or open saved GPS coordinates below.</p>
+        <div className="mt-3 max-h-56 space-y-1 overflow-y-auto">
+          {shops.map((shop) => {
+            const url = shopMapsUrl(shop);
+            return url ? <a key={shop.id} href={url} target="_blank" rel="noopener noreferrer" className="block truncate text-sm font-medium text-blue-700 underline">{shop.name} {shop.latitude != null && shop.longitude != null ? '· GPS pin' : '· address search'}</a> : null;
+          })}
+        </div>
       </Card>
     );
   }
@@ -111,6 +119,16 @@ export function ClientPoSiteMap({ shops, fulfillmentType, receiptRequired = fals
             ))}
           </div>
           <p className="text-xs text-slate-400 pt-2 mt-2 border-t border-slate-100">{geoShops.length} of {shops.length} sites plotted</p>
+          {addressOnlyShops.length > 0 && (
+            <div className="mt-3 border-t border-amber-100 pt-2">
+              <p className="text-xs font-medium text-amber-800">{addressOnlyShops.length} address-only site{addressOnlyShops.length === 1 ? '' : 's'} not pinned yet</p>
+              <p className="mt-1 text-xs text-slate-500">Address search is not an exact geotag. Verify the location before a field visit.</p>
+              <div className="mt-2 space-y-1">
+                {addressOnlyShops.slice(0, 10).map((s) => <a key={s.id} href={shopMapsUrl(s) || '#'} target="_blank" rel="noopener noreferrer" className="block truncate text-xs text-blue-700 underline" title={s.name}>{s.name}</a>)}
+                {addressOnlyShops.length > 10 && <p className="text-xs text-slate-400">+ {addressOnlyShops.length - 10} more not pinned</p>}
+              </div>
+            </div>
+          )}
         </Card>
       </div>
 

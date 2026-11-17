@@ -205,11 +205,8 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
           // need a contact person + phone + full address just like a
           // courier needs to know where and who to hand the box to, even
           // though there's no GPS survey / board-marking / installer job.
-          // owner_name doubles as "delivery contact person" here (the
-          // shops table has no separate contact_person column and this
-          // path deliberately reuses shops rather than forking into a new
-          // supply_destinations table — see CHANGES.md).
-          owner_name: form.new_shop_contact_person.trim() || null,
+          // Delivery contact is not the owner. Preserve separate fields.
+          contact_person_name: form.new_shop_contact_person.trim() || null,
           contact_phone: form.new_shop_contact_phone.trim() || null,
           address: form.new_shop_address.trim() || null,
           purchase_order_id: selectedPO.id,
@@ -249,7 +246,7 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
       // aren't in `form` at all).
       const { data: shopForDestination } = await supabase
         .from('shops')
-        .select('name, owner_name, contact_phone, address, zone_id')
+        .select('name, contact_person_name, owner_name, contact_phone, address, zone_id')
         .eq('id', shopId)
         .maybeSingle();
       const { error: destError } = await supabase.from('supply_destinations').insert({
@@ -259,7 +256,7 @@ function ProductionEntriesTab({ workOrderId }: { workOrderId: string }) {
         zone_id: shopForDestination?.zone_id || null,
         shop_id: shopId,
         destination_name: shopForDestination?.name || form.new_shop_name.trim() || 'Delivery point',
-        contact_person: shopForDestination?.owner_name || null,
+        contact_person: shopForDestination?.contact_person_name || shopForDestination?.owner_name || null,
         contact_phone: shopForDestination?.contact_phone || null,
         address: shopForDestination?.address || null,
         quantity: qty,

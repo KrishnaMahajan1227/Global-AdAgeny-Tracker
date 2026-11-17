@@ -14,7 +14,8 @@
     "verify:deployment": "node scripts/verify-live-release.cjs",
     "verify:dist": "node scripts/verify-dist-release.cjs",
     "verify:security": "node scripts/check-syntax.cjs && node scripts/verify-security-release.cjs && node scripts/verify-phase7-security.cjs",
-    "verify:po-line-items": "node scripts/verify-po-line-items-runtime.cjs"
+    "verify:po-line-items": "node scripts/verify-po-line-items-runtime.cjs",
+    "verify:bulk-shops": "node scripts/verify-shop-bulk-mapping.cjs && node scripts/verify-ten-field-shops.cjs"
   },
   "dependencies": {
     "@googlemaps/markerclusterer": "^2.6.2",

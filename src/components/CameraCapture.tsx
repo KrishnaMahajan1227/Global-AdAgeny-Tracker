@@ -1,4 +1,5 @@
 import { SecureImage } from '@/lib/secureMedia';
+import type { PhotoCaptureMeta } from '@/lib/geoStamp';
 import { useEffect, useRef, useState } from 'react';
 import { Camera, X, RotateCcw, Check, Loader2, ImageIcon } from 'lucide-react';
 
@@ -12,7 +13,7 @@ import { Camera, X, RotateCcw, Check, Loader2, ImageIcon } from 'lucide-react';
 interface CameraCaptureProps {
   open: boolean;
   onClose: () => void;
-  onCapture: (dataUrl: string, fileName: string) => void;
+  onCapture: (dataUrl: string, fileName: string, meta?: PhotoCaptureMeta) => void;
   title?: string;
   /** Survey flow skips the redundant Retake/Use Photo step and opens marking immediately. */
   autoUsePhoto?: boolean;
@@ -23,10 +24,12 @@ export function CameraCapture({ open, onClose, onCapture, title, autoUsePhoto = 
   const streamRef = useRef<MediaStream | null>(null);
   const [status, setStatus] = useState<'opening' | 'live' | 'error'>('opening');
   const [shot, setShot] = useState<string | null>(null);
+  const shotCapturedAt = useRef<Date | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setShot(null);
+    shotCapturedAt.current = null;
     setStatus('opening');
 
     let cancelled = false;
@@ -98,22 +101,24 @@ export function CameraCapture({ open, onClose, onCapture, title, autoUsePhoto = 
     const captured = canvas.toDataURL('image/jpeg', 0.92);
     if (autoUsePhoto) {
       // The survey wizard creates the local draft and opens its marker immediately.
-      onCapture(captured, `photo-${Date.now()}.jpg`);
+      onCapture(captured, `photo-${Date.now()}.jpg`, { source: 'camera', capturedAt: new Date() });
       streamRef.current?.getTracks().forEach((t) => t.stop());
       onClose();
     } else {
+      shotCapturedAt.current = new Date();
       setShot(captured);
     }
   }
 
   function confirm() {
     if (!shot) return;
-    onCapture(shot, `photo-${Date.now()}.jpg`);
+    onCapture(shot, `photo-${Date.now()}.jpg`, { source: 'camera', capturedAt: shotCapturedAt.current || new Date() });
     streamRef.current?.getTracks().forEach((t) => t.stop());
     onClose();
   }
 
   function retake() {
+    shotCapturedAt.current = null;
     setShot(null);
   }
 
@@ -126,7 +131,7 @@ export function CameraCapture({ open, onClose, onCapture, title, autoUsePhoto = 
       const file = (e.target as HTMLInputElement).files?.[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => onCapture(reader.result as string, file.name);
+      reader.onload = () => onCapture(reader.result as string, file.name, { source: 'native-picker', capturedAt: new Date() });
       reader.readAsDataURL(file);
       onClose();
     };
@@ -149,7 +154,7 @@ export function CameraCapture({ open, onClose, onCapture, title, autoUsePhoto = 
       const reader = new FileReader();
       reader.onload = () => {
         streamRef.current?.getTracks().forEach((t) => t.stop());
-        onCapture(reader.result as string, file.name);
+        onCapture(reader.result as string, file.name, { source: 'gallery', capturedAt: new Date() });
         onClose();
       };
       reader.readAsDataURL(file);

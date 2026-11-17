@@ -39,6 +39,16 @@ export const FULFILLMENT_PRESETS: Array<{
   },
 ];
 
+/** Only offer people/steps that belong to the Work Order's delivery method.
+ * Legacy custom POs retain their explicit per-line workflow and are handled separately. */
+export function allowsShopAssignment(type: string | null | undefined, role: 'surveyor' | 'designer' | 'installer'): boolean {
+  const preset = fulfillmentPreset(type);
+  if (!preset) return true; // historical custom or an unlinked site
+  return role === 'surveyor' ? preset.requirements.requires_survey
+    : role === 'designer' ? preset.requirements.requires_design
+    : preset.requirements.requires_installation;
+}
+
 export const historicalFulfillmentOption = {value:'custom', label:'Legacy custom scope', description:'Existing orders retain their own PO line requirements.'} as const;
 export function fulfillmentPreset(value: string | null | undefined) { return FULFILLMENT_PRESETS.find(option => option.value === value); }
 export function fulfillmentOptions(current?: string | null) {

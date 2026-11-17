@@ -1138,6 +1138,7 @@ export function exportShopsToExcel(
       'State': shop.state || '',
       'Status': shop.status,
       'Owner': shop.owner_name || '',
+      'Contact Person': shop.contact_person_name || '',
       'Phone': shop.contact_phone || '',
       'Address': shop.address || '',
       'Work Items': items.length,
@@ -1147,6 +1148,7 @@ export function exportShopsToExcel(
       'Survey Photos (count)': surveyCountByShop.get(shop.name) || 0,
       'Installation Photos (count)': installCountByShop.get(shop.name) || 0,
       'Design Files (count)': designCountByShop.get(shop.name) || 0,
+      ...Object.fromEntries(Object.entries(shop.extra_details || {}).map(([key, value]) => [`Extra: ${key}`, /^[\s]*[=+@\-]/.test(String(value)) ? `’${value}` : value])),
     };
   });
 
@@ -1385,6 +1387,8 @@ export interface ClientSiteDetailRow {
   city: string | null;
   district: string | null;
   address: string | null;
+  contact_person_name?: string | null;
+  extra_details?: Record<string, string> | null;
   po_label: string;
   agency_name: string;
   status_label: string;
@@ -1427,13 +1431,23 @@ export async function exportClientSiteDetailReport(
   sitesSheet.columns = [
     {header:'Site',key:'name',width:29},{header:'City',key:'city',width:18},
     {header:'District',key:'district',width:20},{header:'Address',key:'address',width:44},
+    {header:'Contact Person',key:'contactPerson',width:25},
     {header:'Work Order',key:'order',width:28},{header:'Agency',key:'agency',width:26},
     {header:'Status',key:'status',width:22},{header:'Work Types',key:'types',width:37},
     {header:'Area (sq.ft)',key:'area',width:16},{header:'Quantity',key:'qty',width:14},
     {header:'Assigned On',key:'assigned',width:18},
     {header:'Survey Photos',key:'survey',width:16},{header:'Install Photos',key:'install',width:16},
   ];
+  const extraKeys = Array.from(new Set(sites.flatMap((r) => Object.keys(r.extra_details || {})))).sort();
+  // Extra headings are prefixed so client-supplied names cannot overwrite the
+  // canonical Work Order / Status / Address report columns.
+  for (const [i, key] of extraKeys.entries()) sitesSheet.columns = [
+    ...sitesSheet.columns.map((c) => ({ header: String(c.header || ''), key: String(c.key || ''), width: c.width || 18 })),
+    { header: `Extra: ${key}`, key: `extra_${i}`, width: 26 },
+  ];
   for (const r of sites) sitesSheet.addRow({
+    ...Object.fromEntries(extraKeys.map((key,i) => [`extra_${i}`, safe(r.extra_details?.[key])])),
+    contactPerson:safe(r.contact_person_name),
     name:safe(r.shop_name),city:safe(r.city),district:safe(r.district),
     address:safe(r.address),order:safe(r.po_label),agency:safe(r.agency_name),
     status:safe(r.status_label),types:safe(r.work_types),area:r.total_area_sqft ?? null,

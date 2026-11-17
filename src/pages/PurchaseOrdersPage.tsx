@@ -42,7 +42,7 @@ const emptyPoForm = {
   notes: '', payment_terms: '', gst_percentage: '',
 };
 
-const emptyLineForm = { work_type_id: '', description: '', uom: 'sqft', budgeted_qty: '', budgeted_area: '', rate: '', hsn_code: '' };
+const emptyLineForm = { work_type_id: '', description: '', uom: 'sqft' as POLineItem['uom'], budgeted_qty: '', budgeted_area: '', rate: '', hsn_code: '' };
 
 const PO_PAGE_SIZES = [10, 25, 50, 100];
 
@@ -1747,10 +1747,15 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
     },
   });
 
-  const isAreaUom = form.uom === 'sqft';
+  // Keep the imported isAreaUom() helper callable. A local boolean with the
+  // same name shadowed it and crashed the modal when users added a line item.
+  const isAreaBasedLine = isAreaUom(form.uom);
 
   const saveMutation = useMutation({
     mutationFn: async () => {
+      // A disabled button normally prevents invalid input, but the mutation
+      // itself also guards against stale clicks / programmatic invocation.
+      if (!canSaveLineItem) throw new Error('Enter a description, a positive area/quantity and a valid non-negative rate.');
       const payload = {
         organization_id: orgId,
         purchase_order_id: po.id,
@@ -1761,8 +1766,8 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
         // stays null, so utilization math (which picks area vs qty by
         // uom) never accidentally reads a stale value left over from a
         // UOM the item was previously set to.
-        budgeted_qty: !isAreaUom && form.budgeted_qty ? Number(form.budgeted_qty) : null,
-        budgeted_area: isAreaUom && form.budgeted_area ? Number(form.budgeted_area) : null,
+        budgeted_qty: !isAreaBasedLine && form.budgeted_qty ? Number(form.budgeted_qty) : null,
+        budgeted_area: isAreaBasedLine && form.budgeted_area ? Number(form.budgeted_area) : null,
         rate: form.rate ? Number(form.rate) : null,
         hsn_code: form.hsn_code || null,
       };
@@ -1777,6 +1782,9 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['po_line_items', po.id] });
       queryClient.invalidateQueries({ queryKey: ['purchase_orders', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['po-utilization', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['po-execution-reconciliation', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['po-billing-items', orgId] });
       setForm(emptyLineForm);
       setEditItem(null);
       setRateSource(null);
@@ -1794,6 +1802,9 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['po_line_items', po.id] });
       queryClient.invalidateQueries({ queryKey: ['purchase_orders', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['po-utilization', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['po-execution-reconciliation', orgId] });
+      queryClient.invalidateQueries({ queryKey: ['po-billing-items', orgId] });
     },
     onSuccess: () => setDeleteItem(null),
   });
@@ -1815,12 +1826,20 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
   }
 
   function changeUom(v: string) {
+    // Keep the form's UOM narrowed to the database-supported union.
+    if (v !== 'sqft' && v !== 'piece' && v !== 'lot') return;
     // Clear the field that no longer applies so switching UOM mid-entry
     // can't leave a stale qty/area value sitting behind the scenes.
-    setForm({ ...form, uom: v, budgeted_qty: v === 'sqft' ? '' : form.budgeted_qty, budgeted_area: v === 'sqft' ? form.budgeted_area : '' });
+    setForm(previous => ({ ...previous, uom: v, budgeted_qty: v === 'sqft' ? '' : previous.budgeted_qty, budgeted_area: v === 'sqft' ? previous.budgeted_area : '' }));
   }
 
-  const canSaveLineItem = !!form.description && !!form.rate && (isAreaUom(form.uom) ? !!form.budgeted_area : !!form.budgeted_qty);
+  const budgetText = isAreaBasedLine ? form.budgeted_area : form.budgeted_qty;
+  const budgetNumber = Number(budgetText);
+  const rateNumber = Number(form.rate);
+  const canSaveLineItem = form.description.trim().length > 0
+    && ['sqft', 'piece', 'lot'].includes(form.uom)
+    && budgetText.trim().length > 0 && Number.isFinite(budgetNumber) && budgetNumber > 0
+    && form.rate.trim().length > 0 && Number.isFinite(rateNumber) && rateNumber >= 0;
 
   // Computed straight from the (always-fresh, query-invalidated) items
   // list rather than po.total_amount, so this total updates the instant a
@@ -1914,7 +1933,7 @@ function POLineItemsModal({ po, onClose, canDelete, utilization }: { po: Purchas
           </div>
           <div className="grid grid-cols-3 gap-3 mb-3">
             <Select label="UOM" value={form.uom} onChange={changeUom} options={UOM_OPTIONS} required />
-            {isAreaUom ? (
+            {isAreaBasedLine ? (
               <Input label="Budgeted Area (sqft)" type="number" value={form.budgeted_area} onChange={(v) => setForm({ ...form, budgeted_area: v })} required />
             ) : (
               <Input label="Budgeted Qty" type="number" value={form.budgeted_qty} onChange={(v) => setForm({ ...form, budgeted_qty: v })} required />

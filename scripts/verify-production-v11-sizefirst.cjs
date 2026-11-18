@@ -62,8 +62,24 @@ mock.versions=[{id:'v1',file_name:'one.png',file_url:'https://valid/image.png',s
 mock.links=[{design_version_id:'v1',work_item_id:'board-1'},{design_version_id:'v1',work_item_id:'board-2'},{design_version_id:'v2',work_item_id:'board-2'},{design_version_id:'v2',work_item_id:'other-shop'}];
 out=await fn('po','shop-1',['board-1','board-2']);
 check('explicit 1:1 mapping',()=>assert.deepEqual(Array.from(out.byItem['board-1'],v=>v.id),['v1']));
-check('explicit 1:many shared artwork mapping',()=>assert.deepEqual(Array.from(out.byItem['board-2'],v=>v.id),['v2','v1']));
+check('latest artwork per board hides older approved version',()=>assert.deepEqual(Array.from(out.byItem['board-2'],v=>v.id),['v2']));
 check('foreign shop board excluded',()=>assert(!out.byItem['other-shop']));
+// Shared initial artwork stays current for board B while a newer two-file
+// batch supersedes it on board A. This must not mix old/new designs.
+mock.versions=[
+  {id:'shared',file_name:'initial.pdf',file_url:'https://valid/shared',status:'approved',version_number:1,upload_batch_id:'first'},
+  {id:'front',file_name:'front.png',file_url:'https://valid/front',status:'approved',version_number:2,upload_batch_id:'revised'},
+  {id:'back',file_name:'back.pdf',file_url:'https://valid/back',status:'approved',version_number:3,upload_batch_id:'revised'},
+];
+mock.links=[
+  {design_version_id:'shared',work_item_id:'board-1'},
+  {design_version_id:'shared',work_item_id:'board-2'},
+  {design_version_id:'front',work_item_id:'board-1'},
+  {design_version_id:'back',work_item_id:'board-1'},
+];
+out=await fn('po','shop-1',['board-1','board-2']);
+check('revised board A receives both current batch files, not stale shared file',()=>assert.deepEqual(Array.from(out.byItem['board-1'],v=>v.id),['back','front']));
+check('untouched board B retains shared original file',()=>assert.deepEqual(Array.from(out.byItem['board-2'],v=>v.id),['shared']));
 mock.order={id:'po',shop_id:'shop-2',design_task_id:'task-1'};
 out=await fn('po','shop-1',['board-1']);
 check('wrong-shop request refused',()=>assert.match(out.warning,/changed/));

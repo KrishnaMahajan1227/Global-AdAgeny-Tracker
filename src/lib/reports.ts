@@ -1138,8 +1138,8 @@ export function exportShopsToExcel(
       'State': shop.state || '',
       'Status': shop.status,
       'Owner': shop.owner_name || '',
-      'Contact Person': shop.contact_person_name || '',
-      'Phone': shop.contact_phone || '',
+      'Officer Name': shop.contact_person_name || '',
+      'Officer Number': shop.contact_phone || '',
       'Address': shop.address || '',
       'Work Items': items.length,
       'Total Area (sq ft)': totalArea,
@@ -1388,6 +1388,7 @@ export interface ClientSiteDetailRow {
   district: string | null;
   address: string | null;
   contact_person_name?: string | null;
+  contact_phone?: string | null;
   extra_details?: Record<string, string> | null;
   po_label: string;
   agency_name: string;
@@ -1431,7 +1432,8 @@ export async function exportClientSiteDetailReport(
   sitesSheet.columns = [
     {header:'Site',key:'name',width:29},{header:'City',key:'city',width:18},
     {header:'District',key:'district',width:20},{header:'Address',key:'address',width:44},
-    {header:'Contact Person',key:'contactPerson',width:25},
+    {header:'Officer Name',key:'contactPerson',width:25},
+    {header:'Officer Number',key:'officerNumber',width:22},
     {header:'Work Order',key:'order',width:28},{header:'Agency',key:'agency',width:26},
     {header:'Status',key:'status',width:22},{header:'Work Types',key:'types',width:37},
     {header:'Area (sq.ft)',key:'area',width:16},{header:'Quantity',key:'qty',width:14},
@@ -1447,7 +1449,7 @@ export async function exportClientSiteDetailReport(
   ];
   for (const r of sites) sitesSheet.addRow({
     ...Object.fromEntries(extraKeys.map((key,i) => [`extra_${i}`, safe(r.extra_details?.[key])])),
-    contactPerson:safe(r.contact_person_name),
+    contactPerson:safe(r.contact_person_name),officerNumber:safe(r.contact_phone),
     name:safe(r.shop_name),city:safe(r.city),district:safe(r.district),
     address:safe(r.address),order:safe(r.po_label),agency:safe(r.agency_name),
     status:safe(r.status_label),types:safe(r.work_types),area:r.total_area_sqft ?? null,
@@ -1562,6 +1564,7 @@ export async function exportClientSiteDetailPDF(
     doc.setTextColor(71, 85, 105);
     const infoLines = [
       `${[site.city, site.district].filter(Boolean).join(', ') || '—'}${site.address ? ' — ' + site.address : ''}`,
+      `Officer: ${site.contact_person_name || '—'}   |   Officer Number: ${site.contact_phone || '—'}`,
       `Work Order: ${site.po_label}   |   Agency: ${site.agency_name}`,
       `Status: ${site.status_label}   |   Work Type(s): ${site.work_types}   |   Assigned: ${site.assigned_on}`,
     ];
@@ -1851,9 +1854,14 @@ export async function buildDesignComparisonRows(
 ): Promise<DesignComparisonRow[]> {
   const numbering = numberMarkingsByPhoto(markings);
   const versionsByItem = new Map<string, DesignVersion[]>();
+  const versionIndex = new Map(designVersions.map((version) => [version.id, version]));
+  const seenLinks = new Set<string>();
   for (const link of designVersionItems) {
-    const v = designVersions.find((dv) => dv.id === link.design_version_id);
-    if (!v) continue;
+    const v = versionIndex.get(link.design_version_id);
+    if (!v || ['deleted', 'rejected'].includes(v.status)) continue;
+    const key = `${link.work_item_id}:${v.id}`;
+    if (seenLinks.has(key)) continue;
+    seenLinks.add(key);
     const list = versionsByItem.get(link.work_item_id) || [];
     list.push(v);
     versionsByItem.set(link.work_item_id, list);
@@ -1979,7 +1987,7 @@ async function drawBoardComparisonBlock(
   doc.setFontSize(8.5);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(71, 85, 105);
-  doc.text('SURVEYED & MARKED', x, capY);
+  doc.text(row.photo ? 'SURVEYED & MARKED' : 'WORK SCOPE', x, capY);
   doc.text('UPLOADED DESIGN', x + colW + gutter, capY);
   doc.setTextColor(0, 0, 0);
 
@@ -2158,7 +2166,7 @@ async function addDesignComparisonSlides(
       { x: 0.5, y: showShopKicker ? 0.88 : 0.75, w: 12, h: 0.35, fontSize: 12, color: '64748B' }
     );
 
-    slide.addText('SURVEYED & MARKED', { x: 0.5, y: 1.25, w: 5.8, h: 0.3, fontSize: 10, color: '4338CA', bold: true });
+    slide.addText(row.photo ? 'SURVEYED & MARKED' : 'WORK SCOPE', { x: 0.5, y: 1.25, w: 5.8, h: 0.3, fontSize: 10, color: '4338CA', bold: true });
     slide.addText('UPLOADED DESIGN', { x: 6.9, y: 1.25, w: 5.8, h: 0.3, fontSize: 10, color: '4338CA', bold: true });
 
     // Both columns use the exact same box (x width, y top, height) so the

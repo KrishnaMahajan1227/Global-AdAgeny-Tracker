@@ -14,7 +14,7 @@ import {
 import { Download, FileBarChart, Image as ImageIcon, PieChart, AlertTriangle, Megaphone, Building2, ShoppingCart, CheckCircle2, Loader2, FileDown } from 'lucide-react';
 
 type PoRow = PurchaseOrder & { agency_org: { name: string } | null };
-type ShopRow = { id: string; name: string; city: string | null; district: string | null; address: string | null; contact_person_name: string | null; extra_details: Record<string, string> | null; status: string; purchase_order_id: string | null };
+type ShopRow = { id: string; name: string; city: string | null; district: string | null; address: string | null; contact_person_name: string | null; contact_phone: string | null; extra_details: Record<string, string> | null; status: string; purchase_order_id: string | null };
 
 const SURVEYED_OR_LATER = new Set([
   'surveyed', 'approval_pending', 'approved', 'design_pending', 'designing', 'design_ready', 'in_review',
@@ -73,7 +73,7 @@ export default function ClientReportsPage() {
   const { data: shops } = useQuery({
     queryKey: ['client-reports-shops', orgId],
     queryFn: async () => {
-      return fetchAllPages<ShopRow>((a,b) => supabase.from('shops').select('id, name, city, district, address, contact_person_name, extra_details, status, purchase_order_id').order('id').range(a,b));
+      return fetchAllPages<ShopRow>((a,b) => supabase.from('shops').select('id, name, city, district, address, contact_person_name, contact_phone, extra_details, status, purchase_order_id').order('id').range(a,b));
     },
     enabled: !!orgId,
   });
@@ -267,7 +267,7 @@ export default function ClientReportsPage() {
         city: s.city,
         district: s.district,
         address: s.address,
-        contact_person_name: s.contact_person_name, extra_details: s.extra_details,
+        contact_person_name: s.contact_person_name, contact_phone: s.contact_phone, extra_details: s.extra_details,
         po_label: po ? (po.name || po.po_number) : '—',
         agency_name: po?.agency_org?.name || '—',
         status_label: STATUS_LABELS[s.status] || s.status,

@@ -31,8 +31,8 @@ export function ShopForm({ form, setForm }: { form: ShopFormValues; setForm: (f:
         <Input label="Owner Number (optional)" value={form.owner_phone} onChange={(v) => setForm({ ...form, owner_phone: v })} placeholder="e.g. +91 98765 43210" />
       </div>
       <div className="grid grid-cols-2 gap-4">
-        <Input label="Contact Person (optional)" value={form.contact_person_name} onChange={(v) => setForm({ ...form, contact_person_name: v })} placeholder="Person to contact on site" />
-        <Input label="Contact Person Number (optional)" value={form.contact_phone} onChange={(v) => setForm({ ...form, contact_phone: v })} placeholder="+91 90000 00000" />
+        <Input label="Officer Name (optional)" value={form.contact_person_name} onChange={(v) => setForm({ ...form, contact_person_name: v })} placeholder="Person to contact on site" />
+        <Input label="Officer Number (optional)" value={form.contact_phone} onChange={(v) => setForm({ ...form, contact_phone: v })} placeholder="+91 90000 00000" />
         <Input label="Zone" value={form.zone} onChange={(v) => setForm({ ...form, zone: v })} placeholder="e.g. North Zone" />
       </div>
       <Input label="Full Address" value={form.address} onChange={(v) => setForm({ ...form, address: v })} placeholder="Shop/building, road/locality, landmark, PIN if known" required />

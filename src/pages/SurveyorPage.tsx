@@ -1270,7 +1270,7 @@ function SurveyWizard({ shopId, onExit }: { shopId: string; onExit: (nextShopId?
   const steps = ['Capture & Mark', 'Review & Submit'];
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-24 max-w-md mx-auto">
+    <div data-adroute-unsaved="true" className="min-h-screen bg-slate-50 pb-24 max-w-md mx-auto">
       {!isOnline && (
         <div className="bg-amber-500 text-white text-xs font-medium py-1.5 px-4 flex items-center justify-center gap-1.5">
           <WifiOff className="w-3.5 h-3.5" /> Offline — saving to this phone, will sync later

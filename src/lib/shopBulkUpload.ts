@@ -14,9 +14,9 @@ import { supabase } from './supabase';
 export const SHOP_FIELD_ALIASES: Record<string, string[]> = {
   name: ['name', 'shop name', 'site name', 'store name', 'outlet name', 'retailer name', 'dealer name', 'shop', 'site', 'shop / site name', 'site / shop name'],
   owner_name: ['owner name', 'owner', 'shop owner'], // legacy owner name, never conflate with contact person
-  contact_person_name: ['contact person', 'contact person name', 'contact name', 'contactperson', 'site contact person', 'person'],
+  contact_person_name: ['officer name', 'officer', 'officer contact', 'contact person', 'contact person name', 'contact name', 'contactperson', 'site contact person', 'person'],
   owner_phone: ['owner number', 'owner phone', 'owner mobile', 'owner mobile number', 'shop owner number', 'shop owner phone'],
-  contact_phone: ['contact person number', 'contact person phone', 'contact person mobile', 'contact person mobile number', 'contact phone', 'contact', 'contact number', 'phone', 'phone no', 'phone no.', 'mobile', 'mobile no', 'mobile no.', 'phone number', 'mobile number', 'contact no', 'contact no.'],
+  contact_phone: ['officer number', 'officer phone', 'officer mobile', 'officer mobile number', 'contact person number', 'contact person phone', 'contact person mobile', 'contact person mobile number', 'contact phone', 'contact', 'contact number', 'phone', 'phone no', 'phone no.', 'mobile', 'mobile no', 'mobile no.', 'phone number', 'mobile number', 'contact no', 'contact no.'],
   address: ['address', 'shop address', 'site address', 'full address', 'complete address', 'location address'],
   village: ['village', 'gaon', 'gram'],
   city: ['city', 'town'],
@@ -101,9 +101,9 @@ export function findShopWorkbookTable(
 /** Common columns stay simple; any additional client-specific columns are saved
  * as shop.extra_details (JSONB). Do NOT dynamically modify SQL schema for
  * untrusted workbook headings or allow spreadsheets to override scope IDs.
- * Contact Person is distinct from the historical owner_name field. */
+ * Officer Name is distinct from the historical owner_name field. */
 export const NEW_SHOP_TEMPLATE_FIELDS = [
-  'Shop Name', 'Address', 'Owner Number', 'Contact Person', 'Contact Person Number',
+  'Shop Name', 'Address', 'Owner Number', 'Officer Name', 'Officer Number',
   'Zone', 'State', 'Village', 'Taluka', 'City', 'District',
 ] as const;
 

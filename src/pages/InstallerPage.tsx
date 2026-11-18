@@ -1305,7 +1305,7 @@ function InstallationWizard({ shopId, onExit }: { shopId: string; onExit: (nextS
   const visibleStep = step === 1 ? 1 : step === 3 ? 2 : 3;
 
   return (
-    <div className="min-h-screen bg-slate-50 max-w-md mx-auto">
+    <div data-adroute-unsaved="true" className="min-h-screen bg-slate-50 max-w-md mx-auto">
       <div className="bg-white border-b border-slate-200 sticky top-0 z-30">
         <div className="flex items-center justify-between p-4">
           <button onClick={() => onExit()} className="text-sm text-slate-500">Cancel</button>
@@ -2172,7 +2172,7 @@ function DirectInstallWizard({ onExit }: { onExit: () => void }) {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-24 max-w-md mx-auto">
+    <div data-adroute-unsaved="true" className="min-h-screen bg-slate-50 pb-24 max-w-md mx-auto">
       <CameraCapture open={cameraOpen} onClose={() => setCameraOpen(false)} onCapture={(dataUrl, name, meta) => handlePhotoCaptured(dataUrl, name, undefined, meta)} title={`Site Photo (${nextAngle})`} />
 
       <div className="bg-white border-b border-slate-200 sticky top-0 z-30">

@@ -131,7 +131,7 @@ type ProductionOrderDetail = {
 
 // The Production workbench never guesses which design belongs to a board.
 // Only explicit design_version_items links may display an approved artwork.
-type ProductionArtwork = { id: string; file_name: string | null; file_url: string; status: string; version_number: number };
+type ProductionArtwork = { id: string; file_name: string | null; file_url: string; status: string; version_number: number; upload_batch_id?: string | null };
 type ProductionArtworkState = { byItem: Record<string, ProductionArtwork[]>; warning: string | null };
 
 const EMPTY_ARTWORK: ProductionArtworkState = { byItem: {}, warning: null };
@@ -149,7 +149,7 @@ async function fetchApprovedProductionArtwork(orderId: string, shopId: string, i
   if (!order.design_task_id || !itemIds.length) return EMPTY_ARTWORK;
 
   const { data: versions, error: versionsError } = await supabase.from('design_versions')
-    .select('id,file_name,file_url,status,version_number')
+    .select('id,file_name,file_url,status,version_number,upload_batch_id')
     .eq('design_task_id', order.design_task_id).eq('status', 'approved')
     .order('version_number', { ascending: false }).limit(200);
   if (versionsError) return { ...EMPTY_ARTWORK, warning: `Artwork unavailable: ${versionsError.message}` };
@@ -168,7 +168,14 @@ async function fetchApprovedProductionArtwork(orderId: string, shopId: string, i
     if (!version) continue;
     (byItem[link.work_item_id] ||= []).push(version as ProductionArtwork);
   }
-  for (const matches of Object.values(byItem)) matches.sort((a, b) => b.version_number - a.version_number);
+  // A shared artwork file may be current for Board B but superseded for
+  // Board A. File status alone is insufficient: resolve the most recent
+  // approved upload batch *per work item* to avoid stale duplicate artwork.
+  for (const [workItemId, matches] of Object.entries(byItem)) {
+    matches.sort((a, b) => b.version_number - a.version_number || b.id.localeCompare(a.id));
+    const batch = matches[0].upload_batch_id || matches[0].id;
+    byItem[workItemId] = matches.filter(file => (file.upload_batch_id || file.id) === batch);
+  }
   return { byItem, warning: null };
 }
 

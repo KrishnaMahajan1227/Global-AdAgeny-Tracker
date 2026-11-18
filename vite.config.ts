@@ -28,7 +28,8 @@ export default defineConfig({
     deploymentVersionPlugin(),
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // Activation is deferred until the app is idle, so open forms are never lost.
+      registerType: 'prompt',
       injectRegister: 'auto',
       includeAssets: ['favicon-16x16.png', 'favicon-32x32.png', 'apple-touch-icon.png'],
       manifest: {
@@ -48,8 +49,8 @@ export default defineConfig({
         ],
       },
       workbox: {
-        skipWaiting: true,
-        clientsClaim: true,
+        skipWaiting: false,
+        clientsClaim: false,
         cleanupOutdatedCaches: true,
         navigateFallbackDenylist: [/^\/api\//, /^\/version\.json/],
         // Precache the app shell (JS/CSS/HTML/icons) so the app opens even with no network.

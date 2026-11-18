@@ -44,13 +44,25 @@ export function isPrivateStorageUrl(src: string): boolean {
   return parsePrivateStorageUrl(src) !== null;
 }
 
-export async function resolveSecureUrl(src: string): Promise<string> {
+/** Prefer storage_path for legacy proofs whose persisted photo_url became stale.
+ * The returned URL is NOT public access: SecureImage signs it against RLS.
+ */
+export function evidenceStorageUrl(bucket: 'survey-photos' | 'design-files' | 'installation-proof', storagePath?: string | null): string | null {
+  if (!storagePath || storagePath.includes('..') || storagePath.startsWith('/') || /^(https?:|data:|blob:)/i.test(storagePath)) return null;
+  return supabase.storage.from(bucket).getPublicUrl(storagePath).data.publicUrl;
+}
+
+export async function resolveSecureUrl(src: string, forceRefresh = false): Promise<string> {
   const parsed = parsePrivateStorageUrl(src);
   if (!parsed) return src;
   const { data: auth } = await supabase.auth.getUser();
   const user = auth.user;
   if (!user) throw new Error('Sign in required to view private evidence');
   const key = `${user.id}:${parsed.bucket}:${parsed.path}`;
+  if (forceRefresh) {
+    cache.delete(key);
+    pending.delete(key);
+  }
   const cached = cache.get(key);
   if (cached && cached.expires > Date.now()) return cached.url;
   let request = pending.get(key);
@@ -84,11 +96,35 @@ export function useSecureMediaUrl(src?: string | null): string | undefined {
   return resolved;
 }
 
-/** Drop-in <img> replacement for DB evidence URLs, preserving native image props. */
+// A genuine missing or inaccessible file must never render as a broken-image icon.
+// A lightweight local SVG fallback requires no network and discloses no private URL.
+const PHOTO_UNAVAILABLE = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240"><rect width="320" height="240" rx="12" fill="#f1f5f9"/><rect x="105" y="71" width="110" height="77" rx="8" fill="none" stroke="#94a3b8" stroke-width="5"/><path d="M115 133l27-27 20 20 15-16 28 23" fill="none" stroke="#94a3b8" stroke-width="5"/><text x="160" y="177" font-family="Arial,sans-serif" font-size="13" fill="#64748b" text-anchor="middle">Preview unavailable</text></svg>'
+)}`;
+
+const PHOTO_LOADING = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240"><rect width="320" height="240" fill="#f8fafc"/><text x="160" y="125" font-family="Arial,sans-serif" font-size="13" fill="#64748b" text-anchor="middle">Loading preview…</text></svg>'
+)}`;
+
+/** Signed evidence images retry once with a fresh token when a signed URL
+ * expires (a common reason an approved proof looks broken later in review).
+ * A genuinely missing file displays a clear fallback, not a broken icon.
+ */
 export const SecureImage = forwardRef<HTMLImageElement, ImgHTMLAttributes<HTMLImageElement>>(
-  function SecureImage({ src, ...props }, ref) {
+  function SecureImage({ src, onError, ...props }, ref) {
     const safeSrc = useSecureMediaUrl(src);
-    return <img ref={ref} src={safeSrc} {...props} />;
+    const [reissuedSrc, setReissuedSrc] = useState<string | null>(null);
+    const [unavailable, setUnavailable] = useState(false);
+    const [retrying, setRetrying] = useState(false);
+    useEffect(() => { setReissuedSrc(null); setUnavailable(false); setRetrying(false); }, [src]);
+    const activeSrc = unavailable ? PHOTO_UNAVAILABLE : reissuedSrc || safeSrc;
+    return <img ref={ref} src={activeSrc || (src ? PHOTO_LOADING : undefined)} {...props} onError={event => {
+      if (unavailable) return;
+      if (src && isPrivateStorageUrl(src) && !retrying) {
+        setRetrying(true);
+        void resolveSecureUrl(src, true).then(setReissuedSrc).catch(() => { setUnavailable(true); onError?.(event); });
+      } else { setUnavailable(true); onError?.(event); }
+    }} />;
   }
 );
 

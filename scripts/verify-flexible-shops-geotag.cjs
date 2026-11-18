@@ -25,14 +25,14 @@ function parse(headers,row,include){
  bulk.validateNewShopBulkHeaders(headers);
  return bulk.buildShopRows(data,f.headerRowIndex,f.headers,new Set(include));
 }
-test('11 base fields include separate Contact Person and both phone numbers',()=>{
- assert.deepEqual(base,['Shop Name','Address','Owner Number','Contact Person','Contact Person Number','Zone','State','Village','Taluka','City','District']);
+test('11 base fields include separate Officer Name and both phone numbers',()=>{
+ assert.deepEqual(base,['Shop Name','Address','Owner Number','Officer Name','Officer Number','Zone','State','Village','Taluka','City','District']);
 });
 test('FMM/FSM Name and arbitrary new columns accepted without schema changes',()=>{
  assert.doesNotThrow(()=>bulk.validateNewShopBulkHeaders([...base,'FMM/FSM Name','Store Code','Hoarding Width']));
 });
 test('Required headers still validated',()=>{
- assert.throws(()=>bulk.validateNewShopBulkHeaders(['Contact Person','Address']),/Shop Name/);
+ assert.throws(()=>bulk.validateNewShopBulkHeaders(['Officer Name','Address']),/Shop Name/);
  assert.throws(()=>bulk.validateNewShopBulkHeaders(['Shop Name','FMM\/FSM Name']),/Address/);
 });
 test('Duplicate known aliases and normalized arbitrary headers blocked',()=>{
@@ -42,7 +42,7 @@ test('Duplicate known aliases and normalized arbitrary headers blocked',()=>{
 test('Prototype injection names rejected without database insert',()=>{
  for(const name of ['__proto__','constructor','prototype']) assert.throws(()=>bulk.validateNewShopBulkHeaders([...base,name]),/Unsafe/);
 });
-test('Proper field columns save Contact Person separately, not owner_name',()=>{
+test('Proper field columns save Officer separately, not owner_name',()=>{
  const r=parse(base,['Ravi Shop','Main Road','09876543210','Nisha','09123456780','North','Maharashtra','','','',''])[0];
  const out=bulk.buildBulkShopRecords([r],scope,new Map([['north','zone1']]))[0];
  assert.equal(out.contact_person_name,'Nisha');assert.equal(out.contact_phone,'09123456780');assert.equal(out.owner_phone,'09876543210');assert.equal(out.owner_name,null);

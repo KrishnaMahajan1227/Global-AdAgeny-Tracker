@@ -416,6 +416,7 @@ export interface DesignVersion {
   organization_id: string;
   design_task_id: string;
   version_number: number;
+  upload_batch_id?: string | null;
   storage_path: string;
   file_url: string;
   file_name: string | null;

@@ -1,0 +1,21 @@
+AdRoute Fulfillment Sizing & Artwork Release | 2026-11-17
+
+Changed/new from previous GeoTag/Flexible Shops ZIP:
+ - QA_FULFILLMENT_SIZING_OFFICER_RELEASE.md
+ - README_FULFILLMENT_SIZING_OFFICER_RELEASE.md
+ - public/templates/AdRoute_Universal_Shops_Bulk_Upload_Template.xlsx
+ - scripts/verify-flexible-shops-geotag.cjs
+ - scripts/verify-fulfillment-sizes-officers.cjs
+ - src/components/ShopForm.tsx
+ - src/lib/noSurveySizing.ts
+ - src/lib/reports.ts
+ - src/lib/shopBulkUpload.ts
+ - src/pages/DesignerPage.tsx
+ - src/pages/ShopsPages.tsx
+ - src/pages/client/ClientPODetailPage.tsx
+ - src/pages/client/ClientReportsPage.tsx
+ - src/pages/client/ClientShopsPage.tsx
+ - supabase/migrations/20261117200000_0118_shop_scale_and_no_survey_size_indexes.sql
+
+Do not include local .env in source ZIP. Preserve existing project environment variables.
+Read README_FULFILLMENT_SIZING_OFFICER_RELEASE.md and QA_FULFILLMENT_SIZING_OFFICER_RELEASE.md before staging.

@@ -4,10 +4,12 @@ import { runBoundedWorkflowBatch, summarizeWorkflowBatch } from '@/lib/workflowB
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
+import { hasUsableApprovedSize, usesPreDesignMeasurements } from '@/lib/noSurveySizing';
 import { useAuth } from '@/lib/auth';
 import { Card, StatusBadge, EmptyState, PageHeader, Modal, Textarea, Select } from '@/components/ui';
 import { logAudit, createNotification } from '@/lib/helpers';
-import { ItemLevelReviewPanel } from '@/components/ItemLevelReviewPanel';
+import { getCompanyApprovalStatus } from '@/lib/companyApproval';
+import { latestReviewArtworkByItem, reviewArtworkCoverage, validateDesignCorrection, reviewQueueFromSelection, reviewQueueRemaining, latestReviewArtworkGroupByItem } from '@/lib/designReview';
 import { CompanyApprovalHandoff } from '@/components/CompanyApprovalHandoff';
 import { useRealtimeInvalidate } from '@/lib/useRealtimeInvalidate';
 import { WorkItem, SurveyPhoto, BoardMarking, DesignVersion, DesignVersionItem, Shop, Organization } from '@/lib/types';
@@ -242,6 +244,21 @@ async function exportShopDesignReport(row: DesignTaskRow, detailData: ShopDesign
 // production person, and flip the shop + work items over — the exact
 // same sequence whether it's done for one shop from the modal or for
 // several at once from the bulk toolbar.
+async function decideDesignReview(row: DesignTaskRow, redoItemIds: string[] = [], note = '') {
+  // One database transaction for all board decisions. The RPC rejects stale
+  // tasks, incomplete artwork and missing company approvals before finalization.
+  const { data, error } = await supabase.rpc('design_review_decide', {
+    p_task_id: row.design_task_id, p_redo_item_ids: redoItemIds, p_note: note.trim() || null,
+  });
+  if (error) {
+    if (/design_review_decide|schema cache|could not find the function/i.test(error.message)) {
+      throw new Error('Design Review database migration 0119 is missing. Apply the pending migration before approving.');
+    }
+    throw new Error(`Design review failed: ${error.message}`);
+  }
+  return data as { finalized: boolean; left_review?: boolean };
+}
+
 async function sendDesignTaskToProduction(row: DesignTaskRow, assignedTo: string) {
   if (!assignedTo) throw new Error('Select a production team member first.');
   // One atomic, audited operation; no partial design/order/shop state on network failure.
@@ -321,8 +338,32 @@ export default function DesignerPage() {
   // one shop's detail loaded once, on demand, then opens its modal.
   const [quickActionLoadingId, setQuickActionLoadingId] = useState<string | null>(null);
   const [reviewTask, setReviewTask] = useState<(DesignTaskRow & ShopDesignDetail) | null>(null);
+  // Review selected shops sequentially. Only one shop's artwork is loaded at a
+  // time; each decision remains independently validated and atomic in the DB.
+  const [reviewQueue, setReviewQueue] = useState<DesignTaskRow[]>([]);
+  const [reviewQueueTotal, setReviewQueueTotal] = useState(0);
+  const reviewRequestId = useRef(0);
   const [requestingChanges, setRequestingChanges] = useState(false);
   const [changesNote, setChangesNote] = useState('');
+  const [reviewCorrectionIds, setReviewCorrectionIds] = useState<Set<string>>(new Set());
+  const reviewArtwork = useMemo(() => latestReviewArtworkByItem(
+    reviewTask?.versions || [], reviewTask?.versionItems || [],
+  ), [reviewTask]);
+  const reviewArtworkGroups = useMemo(() => latestReviewArtworkGroupByItem(
+    reviewTask?.versions || [], reviewTask?.versionItems || [],
+  ), [reviewTask]);
+  const reviewCoverage = useMemo(() => reviewArtworkCoverage(
+    reviewTask?.items || [], reviewArtwork,
+  ), [reviewTask, reviewArtwork]);
+  // Same query as CompanyApprovalHandoff: React Query de-duplicates requests.
+  // An unknown approval state is not permission to bypass a company gate.
+  const companyApproval = useQuery({
+    queryKey: ['phase2-company-approval', 'design', reviewTask?.design_task_id],
+    queryFn: () => getCompanyApprovalStatus('design', reviewTask!.design_task_id),
+    enabled: !!reviewTask && canApprove,
+    staleTime: 8000,
+  });
+  const companyGateReady = !!companyApproval.data && (!companyApproval.data.required || companyApproval.data.valid);
 
   // Multi-select — owner/admin only ("review and approve multiple at
   // once"). Only shops actually awaiting a decision (`in_review`) can be
@@ -344,6 +385,18 @@ export default function DesignerPage() {
   // Existing saved drafts also count toward a complete design; uploading a
   // revision for one board must not force reuploading all of its siblings.
   const uploadEditableItems = useMemo(() => editableDesignBoards(uploadTask?.items || []), [uploadTask]);
+  const uploadLatestVersionByItem = useMemo(() => {
+    const byVersion = new Map((uploadTask?.versions || [])
+      .filter(v => !['deleted', 'rejected'].includes(v.status)).map(v => [v.id, v]));
+    const mapped = new Map<string, DesignVersion>();
+    for (const link of uploadTask?.versionItems || []) {
+      const version = byVersion.get(link.design_version_id);
+      if (!version) continue;
+      const previous = mapped.get(link.work_item_id);
+      if (!previous || version.version_number > previous.version_number) mapped.set(link.work_item_id, version);
+    }
+    return mapped;
+  }, [uploadTask]);
   const uploadCoverage = useMemo(() => designCoverage(
     uploadTask?.items || [], uploadTask?.versions || [], uploadTask?.versionItems || [], stagedFiles,
   ), [uploadTask, stagedFiles]);
@@ -387,6 +440,8 @@ export default function DesignerPage() {
   }, [search]);
 
   useEffect(() => { setPage(0); setSelectedRowIds(new Set()); }, [activeTab, debouncedSearch, typeFilter, boardProgressFilter, sortDir, clientFilter, poFilter, zoneFilter]);
+  // Selection belongs to the visible page, not stale IDs from prior pages.
+  useEffect(() => { setSelectedRowIds(new Set()); }, [page, pageSize]);
 
   const { data: productionPeople } = useQuery({
     queryKey: ['org-production-people', orgId],
@@ -666,72 +721,36 @@ export default function DesignerPage() {
     }
   }
 
+  // Only Designer -> Review handoff lives here. Review decisions use the
+  // separate design_review_decide RPC below, never an ad-hoc status update.
   const updateStatusMutation = useMutation({
-    mutationFn: async ({
-      row, status, assignedTo, versions,
-    }: { row: DesignTaskRow; status: string; assignedTo?: string; versions?: DesignVersion[]; advance?: boolean }) => {
-      if (status === 'in_review') {
-        if (!(canApprove || (isDesigner && row.designer_id === profile?.id))) {
-          throw new Error('Only the assigned Designer or Owner/Admin may submit this design for review.');
-        }
-        const liveDetail = await fetchShopDetail(row.shop_id, row.design_task_id);
-        const coverage = designCoverage(liveDetail.items, liveDetail.versions, liveDetail.versionItems, []);
-        if (!coverage.ready) {
-          throw new Error('Cannot submit for review: some boards have no mapped artwork. Open Upload to link the correct design file to each marking.');
-        }
-      }
-      if ((status === 'approved' || status === 'ready_for_production') && !canApprove) {
-        throw new Error('Only Owner/Admin may approve designs or send them to Production.');
-      }
+    mutationFn: async ({ row, status, assignedTo }: {
+      row: DesignTaskRow; status: 'in_review' | 'ready_for_production'; assignedTo?: string;
+    }) => {
       if (status === 'ready_for_production') {
-        if (!assignedTo) throw new Error('Pick a production person to assign this order to first.');
+        if (!canApprove) throw new Error('Only Owner/Admin can send an approved design to Production.');
+        if (!assignedTo) throw new Error('Select a production person first.');
         await sendDesignTaskToProduction(row, assignedTo);
         return;
       }
-
-      const { data: updatedTask, error: taskError } = await supabase.from('design_tasks').update({
-        status,
-        // v_team_workload (Owner Console → Team Workload/Performance)
-        // scores a design task as "completed" the moment it reaches
-        // 'approved' — nothing was ever actually writing this column, so
-        // every designer's "Completed this month" and turnaround figures
-        // silently stayed at zero forever. Fixed here at the one place a
-        // single design task is approved.
-        ...(status === 'approved' ? { completed_at: new Date().toISOString() } : {}),
-      }).eq('id', row.design_task_id).eq('organization_id', row.organization_id)
-        .eq('status', row.status).select('id');
-      if (taskError) throw new Error(`Could not update design task: ${taskError.message}`);
-      if (!updatedTask?.length) throw new Error('This design changed in another session. Refresh before continuing.');
-
-      if (status === 'approved') {
-        const { error: shopError } = await supabase.from('shops').update({ status: 'design_approved' }).eq('id', row.shop_id).select('id');
-        if (shopError) throw new Error(`Could not update shop status: ${shopError.message}`);
-
-        const latestVersion = (versions || []).slice().sort((a, b) => b.version_number - a.version_number)[0];
-        if (latestVersion) {
-          const { error: versionError } = await supabase.from('design_versions').update({ status: 'approved' }).eq('id', latestVersion.id).select('id');
-          if (versionError) throw new Error(`Could not mark design version approved: ${versionError.message}`);
-        }
-        // Only the designer who actually owns this task needs to know it
-        // was approved — nobody else's notification list should get this.
-        if (row.designer_id) {
-          await createNotification(row.designer_id, 'Design Approved', `Your design for ${row.shop_name} was approved.`, 'success', '/design');
-        }
+      if (!(canApprove || (isDesigner && row.designer_id === profile?.id))) {
+        throw new Error('Only the assigned Designer or Owner/Admin may submit for review.');
       }
-
-      // Designer just sent this shop's design up for a decision — the
-      // people who need to hear about it are whoever can actually approve
-      // a design (agency_owner/admin), not the whole org.
-      if (status === 'in_review') {
-        await notifyDesignReviewers(row.organization_id, row.shop_name);
-      }
-
-      await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, status, `Design task status changed to ${status} for ${row.shop_name}`);
+      if (row.status !== 'design_ready') throw new Error('Only a saved design can be sent for review.');
+      const liveDetail = await fetchShopDetail(row.shop_id, row.design_task_id);
+      const coverage = designCoverage(liveDetail.items, liveDetail.versions, liveDetail.versionItems, []);
+      if (!coverage.ready) throw new Error('Some boards have no mapped artwork. Complete the missing work items first.');
+      const { data: updated, error } = await supabase.from('design_tasks')
+        .update({ status: 'in_review' }).eq('id', row.design_task_id)
+        .eq('organization_id', row.organization_id).eq('status', 'design_ready').select('id');
+      if (error) throw new Error(`Could not submit design: ${error.message}`);
+      if (!updated?.length) throw new Error('Design was updated elsewhere. Refresh and retry.');
+      try { await notifyDesignReviewers(row.organization_id, row.shop_name); }
+      catch (error) { console.warn('Design submitted; reviewer notification failed.', error); }
+      try { await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, 'in_review', `Design submitted for review: ${row.shop_name}`); }
+      catch (error) { console.warn('Design submitted; audit notification failed.', error); }
     },
-    onSuccess: (_result, variables) => {
-      const nextReview = variables.status === 'approved' && variables.advance
-        ? rows.find((candidate) => candidate.status === 'in_review' && candidate.design_task_id !== variables.row.design_task_id)
-        : undefined;
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['design-task-list', orgId] });
       queryClient.invalidateQueries({ queryKey: ['design-task-stats', orgId] });
       queryClient.invalidateQueries({ queryKey: ['design-task-detail'] });
@@ -741,39 +760,39 @@ export default function DesignerPage() {
       queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
       setProductionTask(null);
       setProductionUserId('');
-      setReviewTask(null);
-      setRequestingChanges(false);
-      setChangesNote('');
-      if (nextReview) void quickReview(nextReview);
     },
   });
 
-  // Owner sends a design back for revision instead of approving it —
-  // status returns to 'designing' (the normal "still with the designer"
-  // state, same one a fresh assignment starts in) with the note recorded
-  // on the task, and only that task's designer is notified.
-  const requestChangesMutation = useMutation({
-    mutationFn: async ({ row, note }: { row: DesignTaskRow; note: string }) => {
-      const { error } = await supabase.from('design_tasks').update({ status: 'designing', notes: note || null }).eq('id', row.design_task_id).select('id');
-      if (error) throw new Error(`Could not send this design back for changes: ${error.message}`);
-      if (row.designer_id) {
-        await createNotification(
-          row.designer_id,
-          'Changes Requested',
-          `${row.shop_name}'s design needs changes${note ? `: ${note}` : '.'}`,
-          'warning',
-          '/design'
-        );
+  // A review is a single decision surface: approve all, or send ONLY selected
+  // boards for correction. The backend makes the whole shop decision atomic.
+  const designReviewMutation = useMutation({
+    mutationFn: async ({ row, redoIds, note }: { row: DesignTaskRow; redoIds: string[]; note: string }) => {
+      if (!canApprove || row.status !== 'in_review') throw new Error('Only Owner/Admin can review a pending design.');
+      if (redoIds.length) {
+        const message = validateDesignCorrection(reviewTask?.items || [], redoIds, note);
+        if (message) throw new Error(message);
       }
-      await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, 'designing', `Changes requested on design for ${row.shop_name}${note ? `: ${note}` : ''}`);
+      return decideDesignReview(row, redoIds, note);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['design-task-list', orgId] });
-      queryClient.invalidateQueries({ queryKey: ['design-task-stats', orgId] });
+    onSuccess: (_result, variables) => {
+      const remainingQueue = reviewQueueRemaining(reviewQueue, variables.row.design_task_id);
+      // A selected multi-shop run never accidentally approves another shop
+      // outside that selection. Single-shop review keeps its fast 'Next' flow.
+      const nextReview = reviewQueue.length
+        ? remainingQueue[0]
+        : rows.find(candidate => candidate.status === 'in_review' && candidate.design_task_id !== variables.row.design_task_id);
+      setReviewQueue(remainingQueue);
+      if (reviewQueue.length && !remainingQueue.length) setReviewQueueTotal(0);
+      void refreshDesignBatch();
       queryClient.invalidateQueries({ queryKey: ['design-task-detail'] });
+      queryClient.invalidateQueries({ queryKey: ['item-review-decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['phase2-company-approval'] });
+      setSelectedRowIds(prev => new Set([...prev].filter(id => id !== variables.row.design_task_id)));
       setReviewTask(null);
       setRequestingChanges(false);
+      setReviewCorrectionIds(new Set());
       setChangesNote('');
+      if (nextReview) void quickReview(nextReview);
     },
   });
 
@@ -814,36 +833,6 @@ export default function DesignerPage() {
     queryClient.invalidateQueries({ queryKey: ['shops'] });
     queryClient.invalidateQueries({ queryKey: ['nav-pending-counts', orgId] });
   };
-  const bulkApproveMutation = useMutation({
-    mutationFn: (selected: DesignTaskRow[]) => runBoundedWorkflowBatch(selected, async (row) => {
-      // The current company approval trigger still validates each task individually.
-      const d = await fetchShopDetail(row.shop_id, row.design_task_id);
-      if (!canApprove) throw new Error('Only Owner/Admin may approve designs.');
-      const { data: updatedTask, error: taskError } = await supabase.from('design_tasks')
-        .update({ status: 'approved', completed_at: new Date().toISOString() })
-        .eq('id', row.design_task_id).eq('organization_id', row.organization_id).eq('status', 'in_review').select('id');
-      if (taskError) throw new Error(taskError.message);
-      if (!updatedTask?.length) throw new Error('This design is no longer awaiting review. Refresh to see its current status.');
-      const { error: shopError } = await supabase.from('shops').update({ status: 'design_approved' }).eq('id', row.shop_id).select('id');
-      if (shopError) throw new Error(shopError.message);
-      const latestVersion = d.versions.slice().sort((a, b) => b.version_number - a.version_number)[0];
-      if (latestVersion) {
-        const { error: versionError } = await supabase.from('design_versions').update({ status: 'approved' }).eq('id', latestVersion.id).select('id');
-        if (versionError) throw new Error(versionError.message);
-      }
-      if (row.designer_id) {
-        await createNotification(row.designer_id, 'Design Approved', `Your design for ${row.shop_name} was approved.`, 'success', '/design');
-      }
-      await logAudit('design_tasks', row.design_task_id, 'update', 'status', row.status, 'approved', `Design task status changed to approved for ${row.shop_name} (bulk approve)`);
-    }, designBatchProgressCallback),
-    onSuccess: (result) => {
-      setDesignBatchResult(summarizeWorkflowBatch(result, 'designs approved', row => row.shop_name));
-      const succeeded = new Set(result.completed.map(row => row.design_task_id));
-      setSelectedRowIds(prev => new Set([...prev].filter(id => !succeeded.has(id))));
-    },
-    onSettled: () => { setDesignBatchProgress(null); refreshDesignBatch(); },
-  });
-
   const bulkSendToProductionMutation = useMutation({
     mutationFn: ({ selected, assignedTo }: { selected: DesignTaskRow[]; assignedTo: string }) => {
       if (!assignedTo) throw new Error('Select the Production team member.');
@@ -948,16 +937,45 @@ export default function DesignerPage() {
     }
   }
 
+  function reviewSelectedShops(selected: DesignTaskRow[]) {
+    if (!canApprove || quickActionLoadingId || designReviewMutation.isPending) return;
+    const pending = reviewQueueFromSelection(selected);
+    if (!pending.length) return;
+    setReviewQueue(pending);
+    setReviewQueueTotal(pending.length);
+    void quickReview(pending[0]);
+  }
+
+  function skipReviewShop() {
+    if (!reviewTask || designReviewMutation.isPending || quickActionLoadingId) return;
+    const next = reviewQueueRemaining(reviewQueue, reviewTask.design_task_id);
+    setReviewQueue(next);
+    setReviewTask(null);
+    if (next.length) void quickReview(next[0]);
+    else setReviewQueueTotal(0);
+  }
+
   async function quickReview(row: DesignTaskRow) {
+    if (!canApprove || row.status !== 'in_review') return;
+    const requestId = ++reviewRequestId.current;
     setQuickActionLoadingId(row.design_task_id);
+    setRequestingChanges(false);
+    setReviewCorrectionIds(new Set());
+    setChangesNote('');
     try {
       const loadedDetail = await fetchShopDetail(row.shop_id, row.design_task_id);
+      if (requestId !== reviewRequestId.current) return; // closed or a newer shop opened
       queryClient.setQueryData(['design-task-detail', row.shop_id, row.design_task_id], loadedDetail);
       setReviewTask({ ...row, ...loadedDetail });
     } catch (err) {
-      setExportError((err as Error).message);
+      if (requestId === reviewRequestId.current) {
+        setExportError((err as Error).message);
+        setReviewTask(null);
+        setReviewQueue([]);
+        setReviewQueueTotal(0);
+      }
     } finally {
-      setQuickActionLoadingId(null);
+      if (requestId === reviewRequestId.current) setQuickActionLoadingId(null);
     }
   }
 
@@ -1080,6 +1098,9 @@ export default function DesignerPage() {
       // work-item half of that rule — a batch can't go up covering zero
       // boards, unless this shop genuinely has no recorded boards at all
       // (a pre-existing data edge case — see the empty state below).
+      if (usesPreDesignMeasurements(uploadTask.fulfillment_type) && uploadTask.items.some((item) => !hasUsableApprovedSize(item))) {
+        throw new Error('Owner/Admin must record valid Work Order quantities and sizes (where required) before artwork can be uploaded.');
+      }
       const mappingError = validateArtworkMappings(uploadTask.items, stagedFiles);
       if (mappingError) throw new Error(mappingError);
       const mappedItemIds = Array.from(new Set(stagedFiles.flatMap(entry => entry.workItemIds)));
@@ -1100,6 +1121,7 @@ export default function DesignerPage() {
         .order('version_number', { ascending: false }).limit(1).maybeSingle();
       if (latestVersionError) throw new Error(`Could not determine design version: ${latestVersionError.message}`);
       const startVersion = latestVersion?.version_number || 0;
+      const uploadBatchId = crypto.randomUUID();
       const newVersionIds: string[] = [];
       const uploadedPaths: string[] = [];
       let statusWritesStarted = false;
@@ -1123,6 +1145,7 @@ export default function DesignerPage() {
             organization_id: orgId,
             design_task_id: uploadTask.design_task_id,
             version_number: versionNum,
+            upload_batch_id: uploadBatchId,
             storage_path: path,
             file_url: urlData.publicUrl,
             file_name: file.name,
@@ -1271,15 +1294,6 @@ export default function DesignerPage() {
           )}
           <p className="text-xs text-slate-500">Open a task directly, or browse Client → Work Order → Zone.</p>
         </div>
-      </div>
-
-      {/* Summary strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-5">
-        <StatTile icon={<Clock className="w-4 h-4" />} label="Pending Shops" value={stats?.pending_shops} accent="amber" onClick={() => { setActiveTab('pending'); setBrowsingList(true); }} />
-        <StatTile icon={<Layers className="w-4 h-4" />} label="Boards Pending" value={stats?.boards_pending} accent="fuchsia" />
-        <StatTile icon={<Eye className="w-4 h-4" />} label="In Review" value={stats?.in_review} accent="blue" onClick={() => { setActiveTab('in_review'); setBrowsingList(true); }} />
-        <StatTile icon={<CheckCircle2 className="w-4 h-4" />} label="Approved" value={stats?.approved} accent="green" onClick={() => { setActiveTab('approved'); setBrowsingList(true); }} />
-        <StatTile icon={<PackageCheck className="w-4 h-4" />} label="In Production" value={stats?.in_production} accent="teal" onClick={() => { setActiveTab('ready_for_production'); setBrowsingList(true); }} />
       </div>
 
       {/* Filter menu + search */}
@@ -1480,11 +1494,11 @@ export default function DesignerPage() {
           selection its own status actually applies to, and says exactly
           how many that is so it's never ambiguous what "Approve 3" vs
           "Send 2 to Production" is about to do. */}
-      {(canApprove || isDesigner) && selectedRowIds.size === 0 && rows.length > 0 && (
+      {(canApprove || isDesigner) && selectedRowIds.size === 0 && rows.some(isRowSelectable) && (
         <div className="mb-3 flex items-center justify-end">
-          <button type="button" onClick={() => setSelectedRowIds(new Set(rows.map(r => r.design_task_id)))}
+          <button type="button" onClick={() => setSelectedRowIds(new Set(rows.filter(isRowSelectable).map(r => r.design_task_id)))}
             className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-            Select visible {rows.length} design tasks
+            Select actionable ({rows.filter(isRowSelectable).length})
           </button>
         </div>
       )}
@@ -1500,9 +1514,9 @@ export default function DesignerPage() {
         return (
           <div className="mb-4 flex items-center gap-2 flex-wrap bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2.5">
             <span className="text-sm font-medium text-indigo-900">{selectedRowIds.size} selected</span>
-            <button type="button" onClick={() => setSelectedRowIds(new Set(rows.map(r => r.design_task_id)))}
+            <button type="button" onClick={() => setSelectedRowIds(new Set(rows.filter(isRowSelectable).map(r => r.design_task_id)))}
               disabled={!!designBatchProgress} className="rounded-md bg-white border border-indigo-200 px-2 py-1 text-xs font-semibold text-indigo-700 disabled:opacity-50">
-              Select visible ({rows.length})
+              Select actionable ({rows.filter(isRowSelectable).length})
             </button>
             <button
               onClick={() => setSelectedRowIds(new Set())}
@@ -1532,11 +1546,12 @@ export default function DesignerPage() {
               </button>
               {canApprove && selInReview.length > 0 && (
                 <button
-                  onClick={() => bulkApproveMutation.mutate(selInReview)}
-                  disabled={bulkApproveMutation.isPending || !!designBatchProgress}
-                  className="flex items-center gap-1 bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
+                  type="button"
+                  onClick={() => reviewSelectedShops(selInReview)}
+                  disabled={!!quickActionLoadingId || designReviewMutation.isPending || !!designBatchProgress}
+                  className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
                 >
-                  <CheckCircle2 className="w-3.5 h-3.5" /> {bulkApproveMutation.isPending ? 'Approving…' : `Approve ${selInReview.length}`}
+                  <Eye className="w-3.5 h-3.5" /> Review {selInReview.length} shop{selInReview.length === 1 ? '' : 's'}
                 </button>
               )}
               {canApprove && selApproved.length > 0 && (
@@ -1560,9 +1575,6 @@ export default function DesignerPage() {
           </div>
         );
       })()}
-      {bulkApproveMutation.isError && (
-        <p className="text-xs text-red-600 mb-3">{(bulkApproveMutation.error as Error).message}</p>
-      )}
       {bulkSendToProductionMutation.isError && (
         <p className="text-xs text-red-600 mb-3">{(bulkSendToProductionMutation.error as Error).message}</p>
       )}
@@ -1668,14 +1680,14 @@ export default function DesignerPage() {
                         <PackageCheck className="w-3.5 h-3.5" /> Design Not Required — Send
                       </button>
                     )}
-                    {canEditArtwork && (!isDesigner || row.designer_id === profile?.id) && !row.requires_design_all_false && ['assigned', 'designing', 'design_ready'].includes(row.status) && (
+                    {canEditArtwork && (!isDesigner || row.designer_id === profile?.id) && !row.requires_design_all_false && ['assigned', 'designing', 'design_ready', 'in_review'].includes(row.status) && (
                       <button
                         onClick={() => quickUpload(row)}
                         disabled={quickActionLoadingId === row.design_task_id}
                         className="flex items-center gap-1 bg-blue-600 hover:bg-blue-700 text-white px-2.5 py-1.5 rounded-lg text-xs font-medium disabled:opacity-60"
                       >
                         {quickActionLoadingId === row.design_task_id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
-                        Map artwork
+                        {row.status === 'in_review' ? 'Update artwork' : 'Map artwork'}
                       </button>
                     )}
                     {canEditArtwork && row.status === 'design_ready' && (
@@ -1694,7 +1706,7 @@ export default function DesignerPage() {
                     )}
                     {canApprove && row.status === 'in_review' && (
                       <button
-                        onClick={() => quickReview(row)}
+                        onClick={() => { setReviewQueue([]); setReviewQueueTotal(0); void quickReview(row); }}
                         disabled={quickActionLoadingId === row.design_task_id}
                         className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1.5 rounded-lg text-xs font-medium disabled:opacity-60"
                       >
@@ -1908,62 +1920,10 @@ export default function DesignerPage() {
 
                         {/* exportError now surfaces once, in the top-level banner — see above the list. */}
 
-                        <div className="flex gap-2 flex-wrap items-center">
-                          <Link to={`/shops/${row.shop_id}`} className="text-sm text-blue-600 hover:underline mr-auto flex items-center gap-1">
-                            Shop Details <ChevronRight className="w-4 h-4" />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Link to={`/shops/${row.shop_id}`} className="text-sm text-blue-600 hover:underline inline-flex items-center gap-1">
+                            Shop Details <ChevronRight className="h-4 w-4" />
                           </Link>
-
-                          {(detail?.versions.length || 0) > 0 && (
-                            <>
-                              <button
-                                onClick={() => handleExportDesignReport(row, 'pdf')}
-                                disabled={exportingTaskId === row.design_task_id}
-                                className="flex items-center gap-1 bg-white border border-slate-200 text-slate-600 px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
-                                title="Export survey-vs-design comparison as PDF"
-                              >
-                                <FileDown className="w-4 h-4" /> {exportingTaskId === row.design_task_id ? 'Exporting…' : 'PDF'}
-                              </button>
-                              <button
-                                onClick={() => handleExportDesignReport(row, 'ppt')}
-                                disabled={exportingTaskId === row.design_task_id}
-                                className="flex items-center gap-1 bg-white border border-slate-200 text-slate-600 px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
-                                title="Export survey-vs-design comparison as PPT"
-                              >
-                                <Presentation className="w-4 h-4" /> {exportingTaskId === row.design_task_id ? 'Exporting…' : 'PPT'}
-                              </button>
-                            </>
-                          )}
-
-                          {row.requires_design_all_false && row.status !== 'ready_for_production' && canApprove && (
-                            <button onClick={() => { setProductionTask(row); setProductionUserId(''); }} className="bg-teal-50 text-teal-700 border border-teal-200 px-3 py-1.5 rounded-lg text-sm font-medium">
-                              Design Not Required — Send to Production
-                            </button>
-                          )}
-                          {canEditArtwork && (!isDesigner || row.designer_id === profile?.id) && !row.requires_design_all_false && ['assigned', 'designing', 'design_ready', 'in_review'].includes(row.status) && (
-                            <button onClick={() => detail && openUploadModal(row, detail)} className="flex items-center gap-1 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm font-medium">
-                              <Upload className="w-4 h-4" /> Upload Designs
-                            </button>
-                          )}
-                          {canEditArtwork && row.status === 'design_ready' && (
-                            <button onClick={() => updateStatusMutation.mutate({ row, status: 'in_review' })} className="bg-amber-50 text-amber-700 border border-amber-200 px-3 py-1.5 rounded-lg text-sm font-medium">
-                              Send for Review
-                            </button>
-                          )}
-                          {row.status === 'in_review' && canApprove && (
-                            <>
-                              <button onClick={() => { setReviewTask(row as any); setRequestingChanges(true); setChangesNote(''); }} className="bg-amber-50 text-amber-700 border border-amber-200 px-3 py-1.5 rounded-lg text-sm font-medium">
-                                Redo / Changes
-                              </button>
-                              <button onClick={() => updateStatusMutation.mutate({ row, status: 'approved', versions: detail?.versions })} className="bg-green-50 text-green-700 border border-green-200 px-3 py-1.5 rounded-lg text-sm font-medium">
-                                Approve Design
-                              </button>
-                            </>
-                          )}
-                          {row.status === 'approved' && canApprove && (
-                            <button onClick={() => { setProductionTask(row); setProductionUserId(''); }} className="bg-teal-50 text-teal-700 border border-teal-200 px-3 py-1.5 rounded-lg text-sm font-medium">
-                              Ready for Production
-                            </button>
-                          )}
                         </div>
                         {updateStatusMutation.isError && updateStatusMutation.variables?.row?.design_task_id === row.design_task_id && (
                           <p className="text-xs text-red-600 mt-2">{(updateStatusMutation.error as Error).message}</p>
@@ -2032,12 +1992,13 @@ export default function DesignerPage() {
           there. No expanding, no scrolling through the full board/version
           audit trail just to make the one decision this screen exists
           for. */}
-      <Modal open={!!reviewTask} onClose={() => { setReviewTask(null); setRequestingChanges(false); setChangesNote(''); }} title="Review Design" size="lg">
+      <Modal open={!!reviewTask} onClose={() => { if (!designReviewMutation.isPending) { ++reviewRequestId.current; setReviewTask(null); setReviewQueue([]); setReviewQueueTotal(0); setRequestingChanges(false); setReviewCorrectionIds(new Set()); setChangesNote(''); } }} title="Design Review" size="xl">
         {reviewTask && (
           <div className="space-y-4">
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <p className="font-semibold text-slate-900">{reviewTask.shop_name}</p>
+                {reviewQueueTotal > 1 && <p className="text-xs font-medium text-indigo-700" aria-live="polite">Shop {reviewQueueTotal - reviewQueue.length + 1} of {reviewQueueTotal} selected for review</p>}
                 {reviewTask.po_number && (
                   <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-teal-100 text-teal-700">{reviewTask.po_name ? `${reviewTask.po_name} (${reviewTask.po_number})` : `PO ${reviewTask.po_number}`}</span>
                 )}
@@ -2048,11 +2009,14 @@ export default function DesignerPage() {
               </p>
               <button
                 onClick={() => {
-                  const { shop_id, design_task_id, items, photos, markings, versions, versionItems } = reviewTask;
-                  queryClient.setQueryData(['design-task-detail', shop_id, design_task_id], { items, photos, markings, versions, versionItems });
+                  const { shop_id, design_task_id, items, photos, markings, versions, versionItems, photoItems } = reviewTask;
+                  queryClient.setQueryData(['design-task-detail', shop_id, design_task_id], { items, photos, markings, versions, versionItems, photoItems });
                   setExpandedShopId(shop_id);
                   setExpandedTaskId(design_task_id);
+                  ++reviewRequestId.current;
                   setReviewTask(null);
+                  setReviewQueue([]);
+                  setReviewQueueTotal(0);
                   setRequestingChanges(false);
                   setChangesNote('');
                 }}
@@ -2062,93 +2026,108 @@ export default function DesignerPage() {
               </button>
             </div>
 
-            <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-[50vh] overflow-y-auto">
-              {reviewTask.items.length === 0 && <p className="text-xs text-slate-400 italic px-3 py-3">No boards recorded from survey for this shop.</p>}
+            <div className="flex items-center justify-between gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              <span>{reviewTask.items.length} work item{reviewTask.items.length === 1 ? '' : 's'} · latest mapped artwork shown below</span>
+              <div className="flex items-center gap-2">
+                {reviewQueue.length > 1 && <button type="button" onClick={skipReviewShop} disabled={designReviewMutation.isPending || !!quickActionLoadingId} className="font-semibold text-slate-600 underline disabled:opacity-40">Skip this shop</button>}
+                {!reviewCoverage.ready && <strong role="alert" className="text-red-700">{reviewCoverage.missing.length} artwork missing</strong>}
+                {requestingChanges && reviewTask.items.length > 1 && <button type="button" className="font-semibold text-blue-700 hover:underline" onClick={() => setReviewCorrectionIds(current => current.size === reviewTask.items.length ? new Set() : new Set(reviewTask.items.map(item => item.id)))}>
+                  {reviewCorrectionIds.size === reviewTask.items.length ? 'Clear selection' : 'Select all'}
+                </button>}
+              </div>
+            </div>
+
+            <div className="divide-y divide-slate-100 rounded-xl border border-slate-200" data-testid="design-review-board-list">
+              {reviewTask.items.length === 0 && <p className="px-3 py-5 text-sm text-amber-800">No work items found. Record sizes and map artwork before review.</p>}
               {(() => {
-                const reviewNumbering = numberMarkingsByPhoto(reviewTask.markings);
-                return reviewTask.items.map((item) => {
-                const marking = reviewTask.markings.find((m) => m.work_item_id === item.id && m.points?.length >= 3);
-                const photo = marking ? reviewTask.photos.find((p) => p.id === marking.survey_photo_id) : null;
-                const numbering = reviewNumbering.get(item.id);
-                const coveringVersions = reviewTask.versionItems
-                  .filter((link) => link.work_item_id === item.id)
-                  .map((link) => reviewTask.versions.find((v) => v.id === link.design_version_id))
-                  .filter(Boolean) as DesignVersion[];
-                const latestDesign = coveringVersions.sort((a, b) => b.version_number - a.version_number)[0] || null;
-                const { dims } = boardLabel(item);
-                const isDone = BOARD_DONE_STATUSES.includes(item.status);
-                return (
-                  <div key={item.id} className="flex items-center gap-2.5 px-3 py-2.5 text-sm">
-                    <DesignMarkingPreview
-                      photoUrl={photo?.photo_url}
-                      points={marking?.points}
-                      label={numbering ? `#${numbering.number} — ${item.work_type_name || 'Board'}` : item.work_type_name}
-                      className="w-16 h-16"
-                      onClick={setLightbox}
-                    />
-                    <ChevronRight className="w-3.5 h-3.5 text-slate-300 shrink-0" />
-                    {latestDesign?.file_url && /\.(png|jpe?g|webp|gif)$/i.test(latestDesign.file_name || '') ? (
-                      <DesignFilePreview url={latestDesign.file_url} onClick={setLightbox} />
-                    ) : (
-                      <div className="shrink-0 w-20 h-20 rounded-lg border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center">
-                        <FileImage className="w-4 h-4 text-slate-300" />
+                const numbered = numberMarkingsByPhoto(reviewTask.markings);
+                const markingsByItem = new Map(reviewTask.markings.filter(m => m.work_item_id && m.points?.length >= 3).map(m => [m.work_item_id, m]));
+                const photosById = new Map(reviewTask.photos.map(p => [p.id, p]));
+                return reviewTask.items.map(item => {
+                  const marking = markingsByItem.get(item.id);
+                  const photo = marking ? photosById.get(marking.survey_photo_id) : null;
+                  const number = numbered.get(item.id);
+                  const artwork = reviewArtwork.get(item.id);
+                  const artworks = reviewArtworkGroups.get(item.id) || [];
+                  const selected = reviewCorrectionIds.has(item.id);
+                  const { dims } = boardLabel(item);
+                  return (
+                    <div key={item.id} className={`flex flex-wrap items-center gap-3 px-3 py-3 sm:flex-nowrap ${selected ? 'bg-amber-50 ring-1 ring-inset ring-amber-300' : 'bg-white'}`}>
+                      <div className="flex min-w-0 flex-1 items-center gap-2">
+                        <figure className="text-center">
+                          <DesignMarkingPreview photoUrl={photo?.photo_url} points={marking?.points} label={number ? `#${number.number}` : item.work_type_name} className="h-20 w-20" onClick={setLightbox}/>
+                          <figcaption className="mt-1 text-[10px] text-slate-500">Site / marking</figcaption>
+                        </figure>
+                        <ChevronRight className="h-4 w-4 shrink-0 text-slate-300" />
+                        <div className={`flex max-w-full flex-wrap items-start gap-2 ${selected ? 'rounded-lg outline outline-2 outline-offset-2 outline-amber-400' : ''}`} aria-label={`Mapped artwork for ${item.work_type_name || 'work item'}`}>
+                          {artworks.length ? artworks.map(file => (
+                            <figure key={file.id} className="w-20 text-center" title={file.file_name || `Artwork v${file.version_number}`}>
+                              {/\.(png|jpe?g|webp|gif)(\?|$)/i.test(file.file_name || file.file_url || '') ? (
+                                <DesignFilePreview url={file.file_url!} onClick={setLightbox} />
+                              ) : (
+                                <SecureAnchor href={file.file_url!} target="_blank" rel="noopener noreferrer" className="flex h-20 w-20 items-center justify-center rounded-lg border border-blue-200 bg-blue-50 text-blue-700" aria-label={`Open ${file.file_name || 'artwork'}`}><FileText className="h-6 w-6" /></SecureAnchor>
+                              )}
+                              <figcaption className="mt-1 truncate text-[10px] text-slate-500">{file.file_name || `Artwork v${file.version_number}`}</figcaption>
+                            </figure>
+                          )) : <figure className="text-center"><div className="flex h-20 w-20 items-center justify-center rounded-lg border border-dashed border-red-200 bg-red-50 text-red-600"><AlertTriangle className="h-5 w-5" /></div><figcaption className="mt-1 text-[10px] text-red-600">Missing artwork</figcaption></figure>}
+                        </div>
                       </div>
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-bold text-slate-800">{item.work_type_name || 'Work item'} <span className="font-semibold text-blue-700">· {dims || 'Size not recorded'}</span></p>
-                      <p className="text-[11px] text-slate-500 truncate">
-                        {latestDesign ? `v${latestDesign.version_number} · ${latestDesign.source === 'client_provided' ? 'Company artwork' : 'Agency artwork'} · ${latestDesign.file_name || 'Artwork'}` : 'Artwork missing'}
-                      </p>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-slate-800">{number ? `#${number.number} · ` : ''}{item.work_type_name || 'Work item'}</p>
+                        <p className="mt-0.5 text-xs text-slate-600">{dims || 'Size not recorded'} · Qty {boardLabel(item).qty}</p>
+                        {requestingChanges && <label className="mt-2 inline-flex min-h-8 cursor-pointer items-center gap-2 rounded-md border border-amber-300 bg-white px-2 py-1 text-xs font-semibold text-amber-900">
+                          <input type="checkbox" checked={selected} onChange={() => setReviewCorrectionIds(previous => { const next = new Set(previous); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })} aria-label={`Request changes for ${item.work_type_name || 'work item'}`} className="h-4 w-4 rounded border-amber-300" /> Needs correction
+                        </label>}
+                        <p className={`mt-1 break-all text-xs ${artwork ? 'text-slate-500' : 'font-medium text-red-700'}`}>
+                          {artworks.length > 1 ? `${artworks.length} mapped artwork files · latest upload` : artwork ? `${artwork.file_name || 'Artwork'} · v${artwork.version_number}` : 'Artwork missing — cannot approve'}
+                        </p>
+                      </div>
                     </div>
-                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${isDone ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-                      {isDone ? 'Designed' : 'Pending'}
-                    </span>
-                  </div>
-                );
+                  );
                 });
               })()}
             </div>
 
-            {reviewTask.status === 'in_review' && <CompanyApprovalHandoff stage="design" refId={reviewTask.design_task_id} shopId={reviewTask.shop_id} />}
-
+            {/* External company sign-off is a separate mandatory gate for
+                applicable Work Orders. It does not create a second review decision. */}
             {reviewTask.status === 'in_review' && (
-              <ItemLevelReviewPanel stage="design" shopId={reviewTask.shop_id} refId={reviewTask.design_task_id} assignedTo={reviewTask.designer_id || undefined}
-                onDone={() => { setReviewTask(null); queryClient.invalidateQueries(); }} />
+              <CompanyApprovalHandoff stage="design" refId={reviewTask.design_task_id} shopId={reviewTask.shop_id} hideWhenNotRequired />
             )}
+            {companyApproval.isError && <p role="alert" className="text-xs text-red-700">Approval status couldn't load. {(companyApproval.error as Error).message}</p>}
 
+            <div className="sticky bottom-0 z-10 -mx-1 rounded-xl border border-slate-200 bg-white/95 p-3 shadow-sm backdrop-blur">
             {requestingChanges ? (
-              <div className="space-y-2">
-                <Textarea label="What needs to change?" value={changesNote} onChange={setChangesNote} rows={2} placeholder="e.g. Logo too small, wrong colour on the flex board..." />
+              <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50/50 p-3">
+                <p className="text-sm font-semibold text-amber-900">Select only the work items needing correction</p>
+                <Textarea label="Instructions for designer" value={changesNote} onChange={setChangesNote} rows={2} placeholder="Example: Change logo size on Board #2" />
                 <div className="flex gap-2">
-                  <button onClick={() => { setRequestingChanges(false); setChangesNote(''); }} className="flex-1 border border-slate-200 text-slate-600 font-medium py-2 rounded-lg text-sm">
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => requestChangesMutation.mutate({ row: reviewTask, note: changesNote })}
-                    disabled={requestChangesMutation.isPending}
-                    className="flex-1 bg-amber-500 hover:bg-amber-600 text-white font-medium py-2 rounded-lg text-sm disabled:opacity-50"
-                  >
-                    {requestChangesMutation.isPending ? 'Sending…' : 'Send Back to Designer'}
+                  <button type="button" disabled={designReviewMutation.isPending} onClick={() => { setRequestingChanges(false); setReviewCorrectionIds(new Set()); setChangesNote(''); }} className="flex-1 rounded-lg border border-slate-200 bg-white py-2.5 text-sm font-medium text-slate-700">Cancel</button>
+                  <button type="button" onClick={() => designReviewMutation.mutate({ row: reviewTask, redoIds: [...reviewCorrectionIds], note: changesNote })}
+                    disabled={designReviewMutation.isPending || !!validateDesignCorrection(reviewTask.items, [...reviewCorrectionIds], changesNote)}
+                    className="flex-1 rounded-lg bg-amber-600 py-2.5 text-sm font-semibold text-white disabled:opacity-40">
+                    {designReviewMutation.isPending ? 'Sending…' : `Send ${reviewCorrectionIds.size} for Changes`}
                   </button>
                 </div>
+                {reviewCorrectionIds.size === 0 && <p className="text-xs text-amber-800">Tick one or more work items above to request changes.</p>}
               </div>
             ) : (
               <div className="flex gap-2">
-                <button onClick={() => setRequestingChanges(true)} className="flex-1 border border-amber-200 text-amber-700 bg-amber-50 font-medium py-2.5 rounded-lg text-sm">
+                <button type="button" onClick={() => { setRequestingChanges(true); setReviewCorrectionIds(new Set()); }} disabled={designReviewMutation.isPending}
+                  className="flex-1 rounded-lg border border-amber-200 bg-amber-50 py-2.5 text-sm font-semibold text-amber-800 disabled:opacity-40">
                   Request Changes
                 </button>
-                <button
-                  onClick={() => updateStatusMutation.mutate({ row: reviewTask, status: 'approved', versions: reviewTask.versions, advance: true })}
-                  disabled={updateStatusMutation.isPending}
-                  className="flex-1 bg-green-600 hover:bg-green-700 text-white font-medium py-2.5 rounded-lg text-sm disabled:opacity-50"
-                >
-                  {updateStatusMutation.isPending ? 'Approving…' : rows.some((candidate) => candidate.status === 'in_review' && candidate.design_task_id !== reviewTask.design_task_id) ? 'Approve & Next' : 'Approve Design'}
+                <button type="button" onClick={() => designReviewMutation.mutate({ row: reviewTask, redoIds: [], note: '' })}
+                  disabled={designReviewMutation.isPending || !reviewCoverage.ready || !companyGateReady}
+                  className="flex-1 rounded-lg bg-green-600 py-2.5 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-40">
+                  {designReviewMutation.isPending ? 'Approving…' : reviewQueueTotal > 0 ? (reviewQueue.length > 1 ? 'Approve & Next' : 'Approve Shop') : rows.some(r => r.status === 'in_review' && r.design_task_id !== reviewTask.design_task_id) ? 'Approve & Next' : 'Approve Design'}
                 </button>
               </div>
             )}
-            {(updateStatusMutation.isError || requestChangesMutation.isError) && (
-              <p className="text-xs text-red-600">{((updateStatusMutation.error || requestChangesMutation.error) as Error).message}</p>
+            {!requestingChanges && !companyGateReady && !companyApproval.isError && <p className="text-xs text-amber-800">Finish required company approval above before approving this design.</p>}
+            {designReviewMutation.isError && (
+              <p role="alert" className="mt-2 text-xs text-red-700">{(designReviewMutation.error as Error).message}</p>
             )}
+            </div>
           </div>
         )}
       </Modal>
@@ -2158,7 +2137,7 @@ export default function DesignerPage() {
         <div className="space-y-4">
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
             <p className="text-sm font-semibold text-slate-900">{uploadTask?.shop_name} <span className="font-normal text-slate-500">· {uploadTask?.po_number || 'Direct work'}</span></p>
-            <p className="mt-0.5 text-xs text-slate-600">Match the Work Type and Size, then add artwork beside that survey marking. Complete mapping sends directly to Review.</p>
+            <p className="mt-0.5 text-xs text-slate-600">Match each file to the Work Item and Size. For no-survey Work Orders, the Owner/Admin records measurements first; the designer only uploads and maps artwork.</p>
           </div>
 
           <section aria-label="Work items and mapped artwork" className="space-y-2">
@@ -2172,19 +2151,20 @@ export default function DesignerPage() {
               </span>
             </div>
             {!uploadTask?.items.length ? (
-              <p role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">No Work Items are recorded for this shop. Add the work scope before uploading artwork.</p>
+              <p role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">No Work Items are recorded for this shop. Ask Owner/Admin to enter the Work Order scope and sizes before uploading artwork. {canApprove && uploadTask && <Link className="font-semibold underline" to={`/shops/${uploadTask.shop_id}`}>Open shop sizing</Link>}</p>
             ) : (
               <div className="space-y-2" data-testid="design-work-mapping-list">
+                {usesPreDesignMeasurements(uploadTask?.fulfillment_type) && uploadTask.items.some((item) => !hasUsableApprovedSize(item) || item.status === 'pending') &&
+                  <p role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                    Some work items have no approved quantity/size or are awaiting Owner/Admin confirmation. The designer cannot bypass this. {canApprove && uploadTask && <Link className="font-semibold underline" to={`/shops/${uploadTask.shop_id}`}>Record sizes in Shop Details</Link>}
+                  </p>}
+                
                 {uploadTask.items.map((item, index) => {
                   const ref = uploadMarkingRefFor(item.id);
                   const canEdit = uploadEditableItems.some(board => board.id === item.id);
                   const display = designWorkDisplay(item);
                   const staged = stagedFiles.filter(entry => entry.workItemIds.includes(item.id));
-                  const latestDesign = uploadTask.versionItems
-                    .filter(link => link.work_item_id === item.id)
-                    .map(link => uploadTask.versions.find(version => version.id === link.design_version_id))
-                    .filter((version): version is DesignVersion => !!version && !['deleted','rejected'].includes(version.status))
-                    .sort((a, b) => b.version_number - a.version_number)[0];
+                  const latestDesign = uploadLatestVersionByItem.get(item.id);
                   const preview = staged.find(entry => entry.previewUrl) || staged[0];
                   const artworkUrl = preview ? preview.previewUrl : latestDesign?.file_url || null;
                   const isImageArtwork = preview ? preview.file.type.startsWith('image/') : !!latestDesign?.file_name && /\.(png|jpe?g|webp)$/i.test(latestDesign.file_name);
@@ -2436,42 +2416,14 @@ const ACCENTS: Record<string, string> = {
   teal: 'text-teal-600 bg-teal-50 border-teal-100',
 };
 
-function StatTile({ icon, label, value, accent, onClick }: { icon: React.ReactNode; label: string; value: number | undefined; accent: string; onClick?: () => void }) {
-  const content = (
-    <Card className="p-3.5 flex items-center gap-3">
-      <div className={`w-9 h-9 rounded-lg border flex items-center justify-center shrink-0 ${ACCENTS[accent]}`}>{icon}</div>
-      <div className="min-w-0">
-        <p className="text-xl font-bold text-slate-900 leading-none">{value ?? '–'}</p>
-        <p className="text-[11px] text-slate-500 mt-1 truncate">{label}</p>
-      </div>
-    </Card>
-  );
-  return onClick ? (
-    <button type="button" aria-label={`Show ${label} tasks`} onClick={onClick}
-      className="w-full rounded-xl text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 hover:shadow-md transition">
-      {content}
-    </button>
-  ) : content;
-}
-
 // The uploaded design file's own preview inside the Review modal — same
 // "always show something real, never a permanent spinner" rule as
 // DesignMarkingPreview: it renders the image directly and only swaps to
 // the placeholder icon if the file genuinely fails to load.
 function DesignFilePreview({ url, onClick }: { url: string; onClick?: (src: string) => void }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) {
-    return (
-      <div className="shrink-0 w-20 h-20 rounded-lg border border-dashed border-slate-200 bg-slate-50 flex items-center justify-center">
-        <FileImage className="w-4 h-4 text-slate-300" />
-      </div>
-    );
-  }
-  return (
-    <button type="button" onClick={() => onClick?.(url)} className="shrink-0 w-20 h-20 rounded-lg overflow-hidden border border-slate-200 bg-slate-100">
-      <SecureImage src={url} alt="Design" onError={() => setFailed(true)} className="w-full h-full object-cover" />
-    </button>
-  );
+  return <button type="button" onClick={() => onClick?.(url)} aria-label="View mapped artwork" className="shrink-0 h-20 w-20 overflow-hidden rounded-lg border border-slate-200 bg-slate-100 focus-visible:ring-2 focus-visible:ring-blue-500">
+    <SecureImage src={url} alt="Mapped artwork" loading="lazy" className="h-full w-full object-contain" />
+  </button>;
 }
 
 function RowSkeleton() {

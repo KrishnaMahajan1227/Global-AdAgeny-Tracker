@@ -1,0 +1,14 @@
+QA_EVIDENCE_REVIEW_LIVE_UPDATES_V13.md
+README_EVIDENCE_REVIEW_LIVE_UPDATES_V13.md
+scripts/verify-campaign-removal.cjs
+scripts/verify-evidence-live-update-v13.cjs
+src/components/ui.tsx
+src/lib/appVersion.ts
+src/lib/installationArtwork.ts
+src/lib/release.ts
+src/lib/secureMedia.tsx
+src/pages/DesignerPage.tsx
+src/pages/InstallationReviewPage.tsx
+src/pages/InstallerPage.tsx
+src/pages/SurveyorPage.tsx
+vite.config.ts

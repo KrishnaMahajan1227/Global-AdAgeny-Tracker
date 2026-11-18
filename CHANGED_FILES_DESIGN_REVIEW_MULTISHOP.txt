@@ -1,0 +1,13 @@
+Changed since AdRoute_Design_Review_OneStep_Full_Updated_Project.zip
+
+QA_DESIGN_REVIEW_MULTISHOP_RELEASE.md
+README_DESIGN_REVIEW_MULTISHOP_RELEASE.md
+scripts/verify-design-review-v11.cjs
+scripts/verify-design-review-v12-multishop.cjs
+scripts/verify-production-v11-sizefirst.cjs
+src/lib/designReview.ts
+src/lib/types.ts
+src/pages/DesignerPage.tsx
+src/pages/ProductionPage.tsx
+src/pages/ShopsPages.tsx
+supabase/migrations/20261118140000_0120_design_review_board_artwork_approval.sql

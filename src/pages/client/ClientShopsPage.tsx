@@ -723,7 +723,7 @@ export default function ClientShopsPage() {
       {/* BULK */}
       <Modal open={bulkOpen} onClose={() => { setBulkOpen(false); resetBulkState(); }} title="Bulk Upload Shops" size="lg">
         <div className="space-y-4">
-          <a href="/templates/AdRoute_Universal_Shops_Bulk_Upload_Template.xlsx" download="AdRoute_Shops_Flexible_Template.xlsx" className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100">
+          <a href="/templates/AdRoute_Universal_Shops_Bulk_Upload_Template.xlsx" download="AdRoute_Shops_Officer_Flexible_Template.xlsx" className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100">
             Download Shops Excel Template (.xlsx)
           </a>
           <p className="text-xs text-slate-500">Fill the first sheet: Shop Name and Address are required; all other common fields are optional. You can append FMM/FSM Name or any other custom heading—populated values are saved automatically as Additional Shop Details. GPS is captured and verified during live field photography.</p>
@@ -731,7 +731,7 @@ export default function ClientShopsPage() {
           <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5">
             <p className="text-xs text-slate-500">
               Upload a .xlsx or .csv file with one row per site. Always-recognized columns (any order, any position in the file):{' '}
-              <span className="font-medium text-slate-700">Name and Full Address</span> (required), Owner Number, Contact Person, Contact Person Number, Zone, State, Village, Taluka, City and District (optional). Additional columns are kept automatically as shop details.
+              <span className="font-medium text-slate-700">Name and Full Address</span> (required), Owner Number, Officer Name, Officer Number, Zone, State, Village, Taluka, City and District (optional). Additional columns are kept automatically as shop details.
             </p>
           </div>
           <label className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-slate-300 hover:border-blue-400 rounded-lg py-8 cursor-pointer transition">
@@ -952,9 +952,9 @@ export default function ClientShopsPage() {
               <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Contact</h3>
               <dl className="space-y-1.5 text-sm">
                 {drawerShop.owner_name && <DetailRow label="Owner" value={drawerShop.owner_name} />}
-                {drawerShop.contact_person_name && <DetailRow label="Contact Person" value={drawerShop.contact_person_name} />}
+                {drawerShop.contact_person_name && <DetailRow label="Officer Name" value={drawerShop.contact_person_name} />}
                 {drawerShop.owner_phone && <DetailRow label="Owner Number" value={drawerShop.owner_phone} />}
-                {drawerShop.contact_phone && <DetailRow label="Contact Person Number" value={drawerShop.contact_phone} />}
+                {drawerShop.contact_phone && <DetailRow label="Officer Number" value={drawerShop.contact_phone} />}
                 {!drawerShop.owner_name && !drawerShop.owner_phone && !drawerShop.contact_phone && <p className="text-xs text-slate-400">No contact details added.</p>}
               </dl>
             </div>

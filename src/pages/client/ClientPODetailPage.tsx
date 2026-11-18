@@ -152,42 +152,62 @@ export default function ClientPODetailPage() {
   const { data: shops } = useQuery({
     queryKey: ['client-po-shops', poId],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('shops')
-        .select('id, name, owner_name, contact_person_name, owner_phone, contact_phone, address, city, district, taluka, pincode, village, zone, zone_id, state, status, latitude, longitude, extra_details')
-        .eq('purchase_order_id', poId)
-        .order('created_at');
-      if (error) throw error;
-      return data as ShopRow[];
+      // Supabase/PostgREST commonly caps one response at 1,000 rows. Read
+      // every page in a stable order, while rendering at most 200 shop cards.
+      // Large Work Orders must never silently lose later sites/report rows.
+      const result: ShopRow[] = [];
+      for (let offset = 0; ; offset += 500) {
+        const { data, error } = await supabase
+          .from('shops')
+          .select('id, name, owner_name, contact_person_name, owner_phone, contact_phone, address, city, district, taluka, pincode, village, zone, zone_id, state, status, latitude, longitude, extra_details')
+          .eq('purchase_order_id', poId)
+          .order('created_at', { ascending: true }).order('id', { ascending: true })
+          .range(offset, offset + 499);
+        if (error) throw error;
+        result.push(...(data || []) as ShopRow[]);
+        if (!data || data.length < 500) break;
+      }
+      return result;
     },
     enabled: !!poId,
   });
 
-  // Photo counts, for the Shops tab's thumbnail-count badges and the
-  // Report tab's photo-compliance table — one lightweight query per photo
-  // table (id + shop_id only), counted client-side, rather than a
-  // per-shop query.
-  const { data: surveyPhotoRows } = useQuery({
-    queryKey: ['client-po-survey-photos', poId, (shops || []).map((s) => s.id).join(',')],
-    queryFn: async () => {
-      const ids = (shops || []).map((s) => s.id);
-      if (ids.length === 0) return [];
-      const { data, error } = await supabase.from('survey_photos').select('id, shop_id').in('shop_id', ids);
-      if (error) throw error;
-      return data as { id: string; shop_id: string }[];
-    },
-    enabled: !!poId && !!shops && shops.length > 0,
+  // Photo counters are not needed on the overview or map tabs. Fetch them
+  // only for the Shops/Report tabs, chunking UUID filters (short URLs) and
+  // paging photo rows (no silent >1000-photo truncation). Bound concurrency
+  // so a large Work Order does not flood the database.
+  const photoCountsNeeded = tab === 'shops' || tab === 'report';
+  async function fetchEvidenceRows(table: 'survey_photos' | 'installation_proofs') {
+    const ids = (shops || []).map((site) => site.id);
+    const batches: string[][] = [];
+    for (let i = 0; i < ids.length; i += 100) batches.push(ids.slice(i, i + 100));
+    const result: { id: string; shop_id: string }[] = [];
+    for (let batch = 0; batch < batches.length; batch += 3) {
+      const groups = await Promise.all(batches.slice(batch, batch + 3).map(async (groupIds) => {
+        const group: { id: string; shop_id: string }[] = [];
+        for (let offset = 0; ; offset += 500) {
+          const { data, error } = await supabase.from(table).select('id, shop_id')
+            .in('shop_id', groupIds).order('id').range(offset, offset + 499);
+          if (error) throw error;
+          group.push(...(data || []));
+          if (!data || data.length < 500) break;
+        }
+        return group;
+      }));
+      for (const group of groups) result.push(...group);
+    }
+    return result;
+  }
+  const evidenceScope = [poId, shops?.length, shops?.[0]?.id, shops?.[(shops?.length || 1) - 1]?.id];
+  const { data: surveyPhotoRows, isError: surveyPhotoError } = useQuery({
+    queryKey: ['client-po-survey-photos', ...evidenceScope],
+    queryFn: () => fetchEvidenceRows('survey_photos'),
+    enabled: !!poId && photoCountsNeeded && !!shops && shops.length > 0,
   });
-  const { data: installPhotoRows } = useQuery({
-    queryKey: ['client-po-install-photos', poId, (shops || []).map((s) => s.id).join(',')],
-    queryFn: async () => {
-      const ids = (shops || []).map((s) => s.id);
-      if (ids.length === 0) return [];
-      const { data, error } = await supabase.from('installation_proofs').select('id, shop_id').in('shop_id', ids);
-      if (error) throw error;
-      return data as { id: string; shop_id: string }[];
-    },
-    enabled: !!poId && !!shops && shops.length > 0,
+  const { data: installPhotoRows, isError: installPhotoError } = useQuery({
+    queryKey: ['client-po-install-photos', ...evidenceScope],
+    queryFn: () => fetchEvidenceRows('installation_proofs'),
+    enabled: !!poId && photoCountsNeeded && !!shops && shops.length > 0,
   });
 
   // Full detail for whichever shop is open in the side drawer: photos
@@ -634,8 +654,15 @@ export default function ClientPODetailPage() {
   // the donut+bars chart instead of a burndown-over-time chart.
   const reportLineItemOptions = (progress || []).map((r) => ({ value: r.po_line_item_id, label: r.description }));
   const selectedProgressRow = (progress || []).find((r) => r.po_line_item_id === reportLineItemId) || null;
+  const applicableStages = po?.fulfillment_type === 'direct_install'
+    ? STAGE_STEPS.filter(stage => stage.key === 'installed')
+    : po?.fulfillment_type === 'production_install'
+      ? STAGE_STEPS.filter(stage => stage.key !== 'surveyed')
+      : po?.fulfillment_type === 'supply_only'
+        ? STAGE_STEPS.filter(stage => stage.key === 'approved' || stage.key === 'produced')
+        : STAGE_STEPS;
   const lineItemStageValues: { key: 'surveyed' | 'approved' | 'produced' | 'installed'; label: string; pct: number | null }[] = selectedProgressRow
-    ? STAGE_STEPS.map((s) => ({ key: s.key, label: s.label, pct: stagePct([selectedProgressRow], s.key) }))
+    ? applicableStages.map((s) => ({ key: s.key, label: s.label, pct: stagePct([selectedProgressRow], s.key) }))
     : [];
   const lineItemFinalStage = po ? finalStage(po.fulfillment_type) : 'installed';
   const lineItemCompletionPct = selectedProgressRow ? stagePct([selectedProgressRow], lineItemFinalStage) : null;
@@ -645,16 +672,18 @@ export default function ClientPODetailPage() {
     const installCount = installCountByShop.get(s.id) || 0;
     let compliant = true;
     let reason = 'OK';
-    if (SURVEYED_OR_LATER.has(s.status) && surveyCount === 0) {
+    if ((po?.fulfillment_type === 'survey_install' || po?.fulfillment_type === 'custom') && SURVEYED_OR_LATER.has(s.status) && surveyCount === 0) {
       compliant = false;
       reason = 'Survey photos missing';
-    } else if (INSTALLED_OR_LATER.has(s.status) && installCount === 0) {
+    } else if (po?.fulfillment_type !== 'supply_only' && INSTALLED_OR_LATER.has(s.status) && installCount === 0) {
       compliant = false;
       reason = 'Installation photos missing';
     }
     return { shop: s, surveyCount, installCount, compliant, reason };
-  }), [shops, surveyCountByShop, installCountByShop]);
+  }), [shops, surveyCountByShop, installCountByShop, po?.fulfillment_type]);
   const nonCompliantCount = photoComplianceRows.filter((r) => !r.compliant).length;
+  const evidenceReady = !shops?.length || (surveyPhotoRows != null && installPhotoRows != null);
+  const evidenceLoadFailed = surveyPhotoError || installPhotoError;
 
   if (isLoading) {
     return <div className="flex justify-center py-16"><Loader2 className="w-6 h-6 text-blue-600 animate-spin" /></div>;
@@ -724,7 +753,7 @@ export default function ClientPODetailPage() {
       <Card className="p-5 mb-5">
         <h2 className="font-semibold text-slate-900 mb-4 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-slate-400" /> Progress</h2>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          {STAGE_STEPS.map((stage) => {
+          {applicableStages.map((stage) => {
             const pct = stagePct(progress || [], stage.key);
             return (
               <div key={stage.key}>
@@ -773,7 +802,7 @@ export default function ClientPODetailPage() {
                     <tr>
                       <th className="text-left px-3 py-2">Description</th>
                       <th className="text-right px-3 py-2">Ordered</th>
-                      <th className="text-right px-3 py-2">Surveyed</th>
+                      {['survey_install', 'custom'].includes(po.fulfillment_type) && <th className="text-right px-3 py-2">Surveyed</th>}
                       <th className="text-right px-3 py-2">Installed / Produced</th>
                     </tr>
                   </thead>
@@ -787,13 +816,13 @@ export default function ClientPODetailPage() {
                         <tr key={item.id}>
                           <td className="px-3 py-2 text-slate-900">{item.description}</td>
                           <td className="px-3 py-2 text-right text-slate-600">{formatQty(ordered, item.uom)}</td>
-                          <td className="px-3 py-2 text-right text-slate-600">{formatQty(surveyed, item.uom)}</td>
+                          {['survey_install', 'custom'].includes(po.fulfillment_type) && <td className="px-3 py-2 text-right text-slate-600">{formatQty(surveyed, item.uom)}</td>}
                           <td className="px-3 py-2 text-right font-medium text-slate-900">{formatQty(done, po.fulfillment_type === 'supply_only' ? 'piece' : item.uom)}</td>
                         </tr>
                       );
                     })}
                     {(lineItems || []).length === 0 && (
-                      <tr><td colSpan={4} className="px-3 py-6 text-center text-slate-400">No line items on this Work Order yet.</td></tr>
+                      <tr><td colSpan={['survey_install', 'custom'].includes(po.fulfillment_type) ? 4 : 3} className="px-3 py-6 text-center text-slate-400">No line items on this Work Order yet.</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -938,8 +967,8 @@ export default function ClientPODetailPage() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <ReportStat icon={Store} label="Total Sites" value={String(photoComplianceRows.length)} color="text-purple-600 bg-purple-50" />
             <ReportStat icon={CheckCircle2} label="Overall Completion" value={completionPct != null ? `${Math.round(completionPct)}%` : '—'} color="text-emerald-600 bg-emerald-50" />
-            <ReportStat icon={ImageIcon} label="Photo-Compliant" value={photoComplianceRows.length > 0 ? `${photoComplianceRows.length - nonCompliantCount}/${photoComplianceRows.length}` : '—'} color="text-blue-600 bg-blue-50" />
-            <ReportStat icon={AlertTriangle} label="Needs Attention" value={String(nonCompliantCount)} color={nonCompliantCount > 0 ? 'text-amber-600 bg-amber-50' : 'text-slate-400 bg-slate-100'} />
+            <ReportStat icon={ImageIcon} label="Photo-Compliant" value={!evidenceReady ? 'Loading…' : photoComplianceRows.length > 0 ? `${photoComplianceRows.length - nonCompliantCount}/${photoComplianceRows.length}` : '—'} color="text-blue-600 bg-blue-50" />
+            <ReportStat icon={AlertTriangle} label="Needs Attention" value={evidenceReady ? String(nonCompliantCount) : '—'} color={evidenceReady && nonCompliantCount > 0 ? 'text-amber-600 bg-amber-50' : 'text-slate-400 bg-slate-100'} />
           </div>
 
           <Card className="p-5">
@@ -959,7 +988,7 @@ export default function ClientPODetailPage() {
                 ) : (
                   <LineItemProgressChart
                     completionPct={lineItemCompletionPct}
-                    completionLabel={STAGE_STEPS.find((s) => s.key === lineItemFinalStage)?.label || 'Complete'}
+                    completionLabel={applicableStages.find((s) => s.key === lineItemFinalStage)?.label || 'Complete'}
                     stages={lineItemStageValues}
                   />
                 )}
@@ -975,12 +1004,14 @@ export default function ClientPODetailPage() {
             <div className="flex items-center gap-2 mb-3">
               <ImageIcon className="w-4.5 h-4.5 text-slate-400" />
               <h2 className="font-semibold text-slate-900">Photo Compliance</h2>
-              {nonCompliantCount > 0 && (
+              {evidenceReady && nonCompliantCount > 0 && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
                   <AlertTriangle className="w-3 h-3" /> {nonCompliantCount} need attention
                 </span>
               )}
             </div>
+            {!evidenceReady && <p className="py-6 text-sm text-slate-500">{evidenceLoadFailed ? 'Could not fetch photo evidence. Try reloading this report.' : 'Loading shop photo counts…'}</p>}
+            {evidenceReady && (
             <div className="border border-slate-200 rounded-lg overflow-x-auto max-h-96 overflow-y-auto">
               <table className="w-full text-sm min-w-[560px]">
                 <thead className="bg-slate-50 text-slate-500 text-xs uppercase sticky top-0">
@@ -1010,6 +1041,7 @@ export default function ClientPODetailPage() {
                 </tbody>
               </table>
             </div>
+            )}
           </Card>
         </div>
       )}
@@ -1140,14 +1172,14 @@ export default function ClientPODetailPage() {
       {/* Bulk Upload via Excel */}
       <Modal open={bulkUploadOpen} onClose={() => { setBulkUploadOpen(false); resetBulkState(); }} title="Bulk Upload Shops" size="lg">
         <div className="space-y-4">
-          <a href="/templates/AdRoute_Universal_Shops_Bulk_Upload_Template.xlsx" download="AdRoute_Shops_Flexible_Template.xlsx" className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100">
+          <a href="/templates/AdRoute_Universal_Shops_Bulk_Upload_Template.xlsx" download="AdRoute_Shops_Officer_Flexible_Template.xlsx" className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100">
             Download Shops Excel Template (.xlsx)
           </a>
           <p className="text-xs text-slate-500">Fill the first sheet: Shop Name and Address are required; all other common fields are optional. You can append FMM/FSM Name or any other custom heading—populated values are saved automatically as Additional Shop Details. GPS is captured and verified during live field photography.</p>
           <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5">
             <p className="text-xs text-slate-500">
               Upload a .xlsx or .csv file with one row per site. Always-recognized columns (any order, any position in the file):{' '}
-              <span className="font-medium text-slate-700">Name and Full Address</span> (required), Owner Number, Contact Person, Contact Person Number, Zone, State, Village, Taluka, City and District (optional). Additional columns are kept automatically as shop details.
+              <span className="font-medium text-slate-700">Name and Full Address</span> (required), Owner Number, Officer Name, Officer Number, Zone, State, Village, Taluka, City and District (optional). Additional columns are kept automatically as shop details.
             </p>
           </div>
 
@@ -1289,9 +1321,9 @@ export default function ClientPODetailPage() {
               <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Contact</h3>
               <dl className="space-y-1.5 text-sm">
                 {drawerShop.owner_name && <DetailRow label="Owner" value={drawerShop.owner_name} />}
-                {drawerShop.contact_person_name && <DetailRow label="Contact Person" value={drawerShop.contact_person_name} />}
+                {drawerShop.contact_person_name && <DetailRow label="Officer Name" value={drawerShop.contact_person_name} />}
                 {drawerShop.owner_phone && <DetailRow label="Owner Number" value={drawerShop.owner_phone} />}
-                {drawerShop.contact_phone && <DetailRow label="Contact Person Number" value={drawerShop.contact_phone} />}
+                {drawerShop.contact_phone && <DetailRow label="Officer Number" value={drawerShop.contact_phone} />}
                 {!drawerShop.owner_name && !drawerShop.owner_phone && !drawerShop.contact_phone && <p className="text-xs text-slate-400">No contact details added.</p>}
               </dl>
             </div>

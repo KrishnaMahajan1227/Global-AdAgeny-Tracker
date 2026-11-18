@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo, type ReactNode } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import * as XLSX from 'xlsx';
 import { supabase } from '@/lib/supabase';
+import { approvedStateAfterMeasurement, usesPreDesignMeasurements, sizeNeedsInput, MEASUREMENT_LOCKED_STATUSES } from '@/lib/noSurveySizing';
 import { useAuth } from '@/lib/auth';
 import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { ProgressBar } from '@/components/ui';
@@ -2019,8 +2020,8 @@ export function ShopsPage() {
           />
           <div className="grid grid-cols-2 gap-4">
             <Input label="Owner Number (optional)" value={form.owner_phone} onChange={(v) => setForm({ ...form, owner_phone: v })} />
-            <Input label="Contact Person (optional)" value={form.contact_person_name} onChange={(v) => setForm({ ...form, contact_person_name: v })} />
-            <Input label="Contact Person Number (optional)" value={form.contact_phone} onChange={(v) => setForm({ ...form, contact_phone: v })} />
+            <Input label="Officer Name (optional)" value={form.contact_person_name} onChange={(v) => setForm({ ...form, contact_person_name: v })} />
+            <Input label="Officer Number (optional)" value={form.contact_phone} onChange={(v) => setForm({ ...form, contact_phone: v })} />
           </div>
           {editShop && (purchaseOrders || []).find((po) => po.id === form.purchase_order_id)?.fulfillment_type !== 'supply_only' && (
             <Input
@@ -2260,7 +2261,7 @@ export function ShopsPage() {
       {/* BULK UPLOAD */}
       <Modal open={bulkOpen} onClose={() => resetBulkState()} title="Bulk Upload Shops" size="lg">
         <div className="space-y-4">
-          <a href="/templates/AdRoute_Universal_Shops_Bulk_Upload_Template.xlsx" download="AdRoute_Shops_Flexible_Template.xlsx" className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100">
+          <a href="/templates/AdRoute_Universal_Shops_Bulk_Upload_Template.xlsx" download="AdRoute_Shops_Officer_Flexible_Template.xlsx" className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-800 hover:bg-blue-100">
             Download Shops Excel Template (.xlsx)
           </a>
           <p className="text-xs text-slate-500">Fill the first sheet: Shop Name and Address are required; all other common fields are optional. You can append FMM/FSM Name or any other custom heading—populated values are saved automatically as Additional Shop Details. GPS is captured and verified during live field photography.</p>
@@ -2293,7 +2294,7 @@ export function ShopsPage() {
             <p className="text-xs text-slate-500">
               Upload a .xlsx, .xls, or .csv file with one row per shop — any column order, any position in the file.
               Every client sends their list a little differently, so recognized columns can be named any of these:{' '}
-              <span className="font-medium text-slate-700">Name and Full Address</span> (required), Owner Name / Contact Person, Contact Phone,
+              <span className="font-medium text-slate-700">Name and Full Address</span> (required), Owner Number, Officer Name, Officer Number,
               Village, City, Taluka, District, PIN Code, Zone, State, Latitude and Longitude (optional). Any other column in the file will be shown below so
               you can choose to keep it as an extra detail on each shop.
             </p>
@@ -2703,7 +2704,15 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     } finally { setStageBusy(false); }
   };
   const openWorkItemForm = (item: any | null) => {
-    if (!item) { setEditWorkItem({ id: '__new__' } as WorkItem); setWorkItemForm(BLANK_ITEM_FORM); return; }
+    if (!item) {
+      // When a PO auto-created a draft scope placeholder, complete that row
+      // instead of inserting an accidental duplicate for the same PO line.
+      const pendingPlaceholder = usesPreDesignMeasurements(shop?.purchase_orders?.fulfillment_type)
+        ? (workItems || []).find((w) => w.status === 'pending' && !w.approved_width)
+        : null;
+      if (pendingPlaceholder) { openWorkItemForm(pendingPlaceholder); return; }
+      setEditWorkItem({ id: '__new__' } as WorkItem); setWorkItemForm(BLANK_ITEM_FORM); return;
+    }
     const w = item.approved_width ?? item.survey_width, h = item.approved_height ?? item.survey_height;
     const enteredOk = item.entered_width != null && item.entered_height != null && item.entered_width_unit && item.entered_height_unit
       && Math.abs(toFeet(Number(item.entered_width), item.entered_width_unit) - Number(w)) < 0.05 && Math.abs(toFeet(Number(item.entered_height), item.entered_height_unit) - Number(h)) < 0.05;
@@ -2897,28 +2906,57 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
     mutationFn: async () => {
       if (!editWorkItem) return;
       const f = workItemForm;
-      const width = Number(f.width), height = Number(f.height), quantity = Math.max(1, Number(f.quantity) || 1);
-      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new Error('Width aur height sahi daliye.');
-      const widthFt = toFeet(width, f.wUnit), heightFt = toFeet(height, f.hUnit);
-      const area = Math.round(widthFt * heightFt * quantity * 100) / 100;
+      const width = Number(f.width), height = Number(f.height), quantity = Number(f.quantity);
+      const noSurveyScope = usesPreDesignMeasurements(shop?.purchase_orders?.fulfillment_type);
+      const selectedUom = (poLineItems || []).find((line) => line.id === f.po_line_item_id)?.uom;
+      const dimensionsRequired = !noSurveyScope || !selectedUom || selectedUom === 'sqft';
+      const hasWidth = f.width.trim() !== '', hasHeight = f.height.trim() !== '';
+      if ((dimensionsRequired || hasWidth || hasHeight) &&
+          (!hasWidth || !hasHeight || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0)) {
+        throw new Error(dimensionsRequired ? 'Width aur height sahi daliye.' : 'Dono Width aur Height bharein, ya dono blank rakhein.');
+      }
+      if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 100000) throw new Error('Quantity 1 se 100000 tak poora number honi chahiye.');
+      if (noSurveyScope && editWorkItem.id !== '__new__' && MEASUREMENT_LOCKED_STATUSES.has(editWorkItem.status)) {
+        throw new Error('Artwork approved/production started: measurements are locked. Use the authorized revision workflow.');
+      }
+      if (noSurveyScope && shop?.purchase_order_id && !f.po_line_item_id) {
+        throw new Error('Work Order line select karein, phir size save karein.');
+      }
+      if (noSurveyScope && f.po_line_item_id && !(poLineItems || []).some((line) => line.id === f.po_line_item_id)) {
+        throw new Error('Selected Work Order line is no longer available. Reload this shop.');
+      }
+      const widthFt = hasWidth ? toFeet(width, f.wUnit) : null;
+      const heightFt = hasHeight ? toFeet(height, f.hUnit) : null;
+      const area = widthFt != null && heightFt != null ? Math.round(widthFt * heightFt * quantity * 100) / 100 : null;
       const typeName = (shopWorkTypes || []).find((w) => w.id === f.work_type_id)?.name || f.work_type_name.trim() || null;
       const payload = {
         work_type_id: f.work_type_id || null, work_type_name: typeName, po_line_item_id: f.po_line_item_id || null, material: f.material.trim() || null,
-        survey_width: widthFt, survey_height: heightFt, survey_unit: 'ft', survey_quantity: quantity, survey_area: area,
+        // No-survey Work Orders must not invent a survey merely because
+        // Owner/Admin supplied approved production dimensions.
+        ...(!noSurveyScope ? { survey_width: widthFt, survey_height: heightFt, survey_unit: 'ft', survey_quantity: quantity, survey_area: area } : {}),
         approved_width: widthFt, approved_height: heightFt, approved_unit: 'ft', approved_quantity: quantity, approved_area: area,
-        entered_width: width, entered_height: height, entered_width_unit: f.wUnit, entered_height_unit: f.hUnit,
+        entered_width: hasWidth ? width : null, entered_height: hasHeight ? height : null,
+        entered_width_unit: hasWidth ? f.wUnit : null, entered_height_unit: hasHeight ? f.hUnit : null,
       };
       if (editWorkItem.id === '__new__') {
         const { error } = await supabase.from('work_items').insert({ organization_id: orgId, shop_id: shopId, ...payload, status: 'approved' });
         if (error) throw error;
         await logAudit('work_items', null, 'insert', null, null, null, `Added board/item for ${shop?.name || 'shop'}`);
       } else {
-        const { error } = await supabase.from('work_items').update(payload).eq('id', editWorkItem.id);
+        const nextStatus = approvedStateAfterMeasurement(shop?.purchase_orders?.fulfillment_type, editWorkItem.status);
+        const { data: updated, error } = await supabase.from('work_items').update({ ...payload, ...(nextStatus ? { status: nextStatus } : {}) })
+          .eq('id', editWorkItem.id).eq('shop_id', shopId).eq('status', editWorkItem.status).select('id');
         if (error) throw error;
+        if (!updated?.length) throw new Error('Work item changed in another session. Reload shop details before saving again.');
         await logAudit('work_items', editWorkItem.id, 'update', null, null, null, `Updated board/item for ${shop?.name || 'shop'}`);
       }
     },
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['shop-work-items', shopId] }); queryClient.invalidateQueries({ queryKey: ['shop-work-items'] }); setEditWorkItem(null); },
+    onSuccess: () => {
+      for (const key of [['shop-work-items', shopId], ['shop-work-items'], ['design-task-list'], ['design-task-detail'], ['design-task-stats'], ['po-utilization'], ['po-execution'], ['shop', shopId]]) {
+        queryClient.invalidateQueries({ queryKey: key });
+      }
+      setEditWorkItem(null);
+    },
   });
   const deleteWorkItemMutation = useMutation({
     mutationFn: async (id: string) => { const { error } = await supabase.from('work_items').delete().eq('id', id); if (error) throw error; },
@@ -3465,7 +3503,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         const { data, error } = await supabase.from('design_tasks').insert({ organization_id: orgId, shop_id: shopId, status: 'designing' }).select('*').single();
         if (error) throw new Error(`Could not create design task: ${error.message}`); task = data;
       }
-      const startVersion = task.design_versions?.length || 0;
+      const startVersion = (task.design_versions || []).reduce((highest: number, v: { version_number: number }) => Math.max(highest, v.version_number || 0), 0);
+      const uploadBatchId = crypto.randomUUID();
       const failures: string[] = []; let successCount = 0;
       for (let i = 0; i < designUploadFiles.length; i++) {
         const file = designUploadFiles[i];
@@ -3476,7 +3515,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           const { error: storageError } = await supabase.storage.from('design-files').upload(path, file);
           if (storageError) throw storageError;
           const { data: urlData } = supabase.storage.from('design-files').getPublicUrl(path);
-          const { data: version, error: versionError } = await supabase.from('design_versions').insert({ organization_id: orgId, design_task_id: task.id, version_number: versionNumber, storage_path: path, file_url: urlData.publicUrl, file_name: file.name, uploaded_by: profile.id, notes: designUploadNotes || null, status: 'uploaded', source: 'admin' }).select('id').single();
+          const { data: version, error: versionError } = await supabase.from('design_versions').insert({ organization_id: orgId, design_task_id: task.id, version_number: versionNumber, upload_batch_id: uploadBatchId, storage_path: path, file_url: urlData.publicUrl, file_name: file.name, uploaded_by: profile.id, notes: designUploadNotes || null, status: 'uploaded', source: 'admin' }).select('id').single();
           if (versionError) { await supabase.storage.from('design-files').remove([path]); throw versionError; }
           const workItemId = designUploadFileMap[i];
           if (workItemId) {
@@ -3694,7 +3733,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-3 text-xs sm:grid-cols-3 xl:grid-cols-5">
             {([
               ['Shop / site', shop.name], ['Client', shop.clients?.name], ['Project', shop.projects?.name],
-              ['Owner', shop.owner_name], ['Owner Number', shop.owner_phone], ['Contact Person', shop.contact_person_name], ['Contact Person Number', shop.contact_phone], ['Signage language', shop.signage_language],
+              ['Owner', shop.owner_name], ['Owner Number', shop.owner_phone], ['Officer Name', shop.contact_person_name], ['Officer Number', shop.contact_phone], ['Signage language', shop.signage_language],
               ['Address', shop.address], ['Village', shop.village], ['City', shop.city], ['Taluka', shop.taluka], ['District', shop.district], ['PIN Code', shop.pincode],
               ['State', shop.state], ['Zone', shop.zones?.name || shop.zone],
               ['Fulfilment', shop.purchase_orders?.fulfillment_type ? String(shop.purchase_orders.fulfillment_type).replace(/_/g, ' ') : ''],
@@ -3781,14 +3820,14 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
               return <div key={role} className="min-w-0 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <span className="text-xs font-semibold capitalize text-slate-700">{role}{assigned.length > 1 ? 's' : ''} <span className="font-normal text-slate-500">({assigned.length})</span></span>
-                  {canAssign && <button type="button" aria-label={`Assign ${role}`} onClick={() => { setAssignModal(role); setAssignUserId(role === 'designer' ? designTasks?.[0]?.designer_id || '' : ''); }} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><UserPlus className="mr-1 inline h-3 w-3" />{assigned.length ? 'Change' : 'Assign'}</button>}
+                  {canAssign && allowsShopAssignment(shop?.purchase_orders?.fulfillment_type, role) && <button type="button" aria-label={`Assign ${role}`} onClick={() => { setAssignModal(role); setAssignUserId(role === 'designer' ? designTasks?.[0]?.designer_id || '' : ''); }} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"><UserPlus className="mr-1 inline h-3 w-3" />{assigned.length ? 'Change' : 'Assign'}</button>}
                 </div>
                 {assigned.length ? <ul className="space-y-1.5" aria-label={`Assigned ${role}s`}>
                   {assigned.map((person: any) => <li key={person.id} className="flex items-start justify-between gap-2 rounded-md bg-white px-2 py-1.5 text-xs">
                     <span className="min-w-0 break-words font-medium text-slate-800">{person.name}</span>
                     <span className="shrink-0 text-[11px] capitalize text-slate-500">{String(person.status || 'assigned').replace(/_/g, ' ')}</span>
                   </li>)}
-                </ul> : <p className="text-xs text-slate-500">{(assignmentsLoading || designTasksLoading || assignmentsError) ? '—' : 'Not assigned'}</p>}
+                </ul> : <p className="text-xs text-slate-500">{!allowsShopAssignment(shop?.purchase_orders?.fulfillment_type, role) ? 'Not required for this fulfillment' : (assignmentsLoading || designTasksLoading || assignmentsError) ? '—' : 'Not assigned'}</p>}
               </div>;
             })}
           </div>
@@ -3801,6 +3840,32 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           </details>}
         </section>
 
+        {/* Sizes are entered by Owner/Admin *before* the designer's artwork handoff.
+            Production & Installation intentionally has no survey visit. */}
+        {canCrudShop && usesPreDesignMeasurements(shop?.purchase_orders?.fulfillment_type) &&
+          !['design_approved', 'production_pending', 'in_production', 'production_ready', 'production_done', 'dispatched', 'installation_pending', 'installing', 'installed', 'billed'].includes(shop?.status || '') && (
+          <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-3 sm:p-4" data-testid="no-survey-size-entry">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold text-blue-950">Work order sizes · before designer artwork</h2>
+                <p className="mt-1 text-xs text-blue-800">
+                  {(() => { const pending = (workItems || []).filter(sizeNeedsInput).length;
+                    return pending ? `${pending} scope item(s) need measured width, height and quantity. Edit the existing Work Order item; do not add a second copy.` : 'All recorded work items have sizes. Designer can map artwork to these items.';
+                  })()}
+                </p>
+              </div>
+              {(workItems || []).some(sizeNeedsInput) &&
+                <button type="button" onClick={() => openWorkItemForm((workItems || []).find(sizeNeedsInput) || null)}
+                  className="shrink-0 rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800">
+                  <Ruler className="mr-1 inline h-4 w-4" /> Record missing size
+                </button>}
+              {!(workItems || []).length &&
+                <button type="button" onClick={() => openWorkItemForm(null)} className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white">
+                  <Plus className="mr-1 inline h-4 w-4" /> Add size / work item
+                </button>}
+            </div>
+          </div>
+        )}
         {/* Work Items */}
         <div className="min-w-0">
           {workItemsLoading ? <div role="status" className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">Loading work items and evidence…</div> : workItemsError ? <div role="alert" className="rounded-xl border border-red-200 bg-white p-6 text-sm text-red-700">Work items could not be loaded. <button type="button" onClick={() => void retryWorkItems()} className="font-medium underline">Retry</button></div> : <WorkItemsPanel
@@ -3996,7 +4061,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
       <Modal open={detailEditOpen} onClose={() => setDetailEditOpen(false)} title="Edit Shop Details" size="lg">
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3"><Input label="Shop / Site Name" value={detailForm.name} onChange={(v) => setDetailForm({ ...detailForm, name: v })} required /><Input label="Owner Name" value={detailForm.owner_name} onChange={(v) => setDetailForm({ ...detailForm, owner_name: v })} /></div>
-          <div className="grid grid-cols-2 gap-3"><Input label="Contact Person" value={detailForm.contact_person_name} onChange={(v) => setDetailForm({ ...detailForm, contact_person_name: v })} /><Input label="Phone" value={detailForm.contact_phone} onChange={(v) => setDetailForm({ ...detailForm, contact_phone: v })} /><Input label="Signage Language" value={detailForm.signage_language} onChange={(v) => setDetailForm({ ...detailForm, signage_language: v })} /></div>
+          <div className="grid grid-cols-2 gap-3"><Input label="Officer Name" value={detailForm.contact_person_name} onChange={(v) => setDetailForm({ ...detailForm, contact_person_name: v })} /><Input label="Officer Number" value={detailForm.contact_phone} onChange={(v) => setDetailForm({ ...detailForm, contact_phone: v })} /><Input label="Signage Language" value={detailForm.signage_language} onChange={(v) => setDetailForm({ ...detailForm, signage_language: v })} /></div>
           <Textarea label="Full Address (required)" value={detailForm.address} onChange={(v) => setDetailForm({ ...detailForm, address: v })} rows={2} />
           <div className="grid grid-cols-3 gap-3"><Input label="City (optional)" value={detailForm.city} onChange={(v) => setDetailForm({ ...detailForm, city: v })} /><Input label="District (optional)" value={detailForm.district} onChange={(v) => setDetailForm({ ...detailForm, district: v })} /><Input label="State (optional)" value={detailForm.state} onChange={(v) => setDetailForm({ ...detailForm, state: v })} /></div>
           <div className="grid grid-cols-2 gap-3"><Input label="Taluka / Tehsil (optional)" value={detailForm.taluka} onChange={(v) => setDetailForm({ ...detailForm, taluka: v })} /><Input label="PIN Code (optional)" value={detailForm.pincode} onChange={(v) => setDetailForm({ ...detailForm, pincode: v })} /></div>
@@ -4005,7 +4070,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
         </div>
       </Modal>
 
-      <Modal open={!!editWorkItem} onClose={() => setEditWorkItem(null)} title={editWorkItem?.id === '__new__' ? 'Add Work Item' : 'Edit Work Item'} size="lg">
+      <Modal open={!!editWorkItem} onClose={() => setEditWorkItem(null)} title={usesPreDesignMeasurements(shop?.purchase_orders?.fulfillment_type) ? (editWorkItem?.id === '__new__' ? 'Add size & work item' : 'Record work item size') : editWorkItem?.id === '__new__' ? 'Add Work Item' : 'Edit Work Item'} size="lg">
         {(() => {
           const f = workItemForm; const set = (patch: Partial<WorkItemForm>) => setWorkItemForm((cur) => ({ ...cur, ...patch }));
           const lbl = 'mb-1 block text-xs font-medium text-slate-600';
@@ -4017,6 +4082,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
           const matValue = f.materialOther ? '__other__' : f.material;
           return (
             <div className="space-y-4">
+              {usesPreDesignMeasurements(shop?.purchase_orders?.fulfillment_type) &&
+                <p className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">Owner/Admin: enter actual work dimensions before artwork. For additional boards, finish any empty Work Order item first. No survey assignment or survey approval is created.</p>}
               {shop?.purchase_order_id && (
                 <div>
                   <label className={lbl}>Work order line item</label>
@@ -4047,6 +4114,8 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
                   {f.materialOther && <input className={`${ctl} mt-2`} placeholder="Material likhiye" value={f.material} onChange={(e) => set({ material: e.target.value })} />}
                 </div>
               </div>
+              {usesPreDesignMeasurements(shop?.purchase_orders?.fulfillment_type) && (poLineItems || []).find((line) => line.id === f.po_line_item_id)?.uom !== 'sqft' &&
+                <p className="text-xs text-slate-600">Piece/Lot work: Width and Height are optional; Quantity is required. For sqft work, record both dimensions.</p>}
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className={lbl}>Width</label>
@@ -4061,7 +4130,7 @@ export function ShopDetailPage({ shopId }: { shopId: string }) {
               </div>
               <div className="flex flex-wrap items-end justify-between gap-3">
                 <div className="w-32"><label className={lbl}>Quantity</label><input type="number" min="1" className={ctl} value={f.quantity} onChange={(e) => set({ quantity: e.target.value })} /></div>
-                <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">{f.width && f.height ? <><span className="font-medium">{trimNum(f.width)} {unitShort(f.wUnit)} × {trimNum(f.height)} {unitShort(f.hUnit)}</span> · Qty {qty} · <span className="font-semibold">{area} sq.ft</span></> : 'Size daalne par area yahan dikhega'}</p>
+                <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">{f.width && f.height ? <><span className="font-medium">{trimNum(f.width)} {unitShort(f.wUnit)} × {trimNum(f.height)} {unitShort(f.hUnit)}</span> · Qty {qty} · <span className="font-semibold">{area} sq.ft</span></> : (poLineItems || []).find((line) => line.id === f.po_line_item_id)?.uom !== 'sqft' && usesPreDesignMeasurements(shop?.purchase_orders?.fulfillment_type) ? `Qty ${qty} · No physical dimensions needed` : 'Size daalne par area yahan dikhega'}</p>
               </div>
               {saveWorkItemMutation.isError && <p className="rounded-lg border border-red-200 bg-red-50 p-2 text-sm text-red-600">{(saveWorkItemMutation.error as Error).message}</p>}
               <div className="flex justify-end gap-2">
